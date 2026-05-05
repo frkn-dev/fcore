@@ -1,9 +1,5 @@
 mod config;
-#[cfg(feature = "email")]
-mod email;
-mod filters;
 mod handlers;
-mod helpers;
 mod http;
 mod metrics;
 mod request;

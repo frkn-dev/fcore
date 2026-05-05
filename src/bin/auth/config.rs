@@ -1,15 +1,13 @@
 use serde::Deserialize;
 use std::net::Ipv4Addr;
 
-use fcore::{ApiAccessConfig, Env, MetricsTxConfig, NodeConfigRaw, Result, Settings, Tag};
+use fcore::{ApiAccessConfig, MetricsTxConfig, NodeConfigRaw, Result, Settings};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceSettings {
     pub service: ServiceConfig,
     pub node: NodeConfigRaw,
     pub api: ApiAccessConfig,
-    #[cfg(feature = "email")]
-    pub smtp: SmtpConfig,
     pub metrics: MetricsTxConfig,
 }
 
@@ -31,11 +29,6 @@ fn default_cors_origin() -> String {
     "http://localhost:8080".to_string()
 }
 
-#[cfg(feature = "email")]
-fn default_company_website() -> String {
-    "http://localhost:8080".to_string()
-}
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceConfig {
     pub log_level: String,
@@ -48,24 +41,4 @@ pub struct ServiceConfig {
     #[serde(default = "default_cors_origin")]
     pub origin: String,
     pub updates_endpoint_zmq: String,
-
-    pub enabled_envs: Vec<Env>,
-    pub enabled_protos: Vec<Tag>,
-}
-
-#[cfg(feature = "email")]
-#[derive(Clone, Debug, Deserialize, Default)]
-pub struct SmtpConfig {
-    pub server: String,
-    pub username: String,
-    pub password: String,
-    pub port: u16,
-    pub from: String,
-    pub title: String,
-    pub company_name: String,
-    pub support: String,
-    pub email_file: String,
-    pub email_sign_token: Vec<u8>,
-    #[serde(default = "default_company_website")]
-    pub company_website: String,
 }

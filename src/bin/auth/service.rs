@@ -10,23 +10,16 @@ use tokio::{
 use warp::Filter;
 
 use fcore::{
-    http::filters as my_filters, ApiAccessConfig, BaseConnection as Connection,
-    ConnectionBaseOperations, Connections, Env, MetricBuffer, Node, NodeConfig, Publisher, Result,
-    SnapshotManager, Subscriber, Tag, Topic,
+    BaseConnection as Connection, ConnectionBaseOperations, Connections, MetricBuffer, Node,
+    NodeConfig, Publisher, Result, SnapshotManager, Subscriber, Tag, Topic,
 };
 
 use super::config::ServiceSettings;
-#[cfg(feature = "email")]
-use super::email::EmailStore;
-use super::filters;
-#[cfg(feature = "email")]
-use super::handlers::trial_handler;
-use super::handlers::{activate_key_handler, auth_handler, tg_trial_handler};
-use super::http::{ApiRequests, HttpClient};
+
+use super::handlers::auth_handler;
+use super::http::ApiRequests;
 use super::request;
 use super::tasks::Tasks;
-
-pub const DEFAULT_DAYS: i64 = 1;
 
 pub struct Service<C>
 where
@@ -36,15 +29,9 @@ where
     pub metrics: Arc<MetricBuffer>,
     pub node: Node,
     pub subscriber: Subscriber,
-    #[cfg(feature = "email")]
-    pub email_store: EmailStore,
-    pub http_client: HttpClient,
-    pub api: ApiAccessConfig,
     pub listen: Ipv4Addr,
     pub port: u16,
     pub origin: String,
-    pub envs: Vec<Env>,
-    pub protos: Vec<Tag>,
 }
 
 impl<C> Service<C>
@@ -55,13 +42,8 @@ where
         metrics: Arc<MetricBuffer>,
         node: Node,
         subscriber: Subscriber,
-        #[cfg(feature = "email")] email_store: EmailStore,
-        http_client: HttpClient,
-        api: ApiAccessConfig,
         listen: (Ipv4Addr, u16),
         origin: String,
-        envs: Vec<Env>,
-        protos: Vec<Tag>,
     ) -> Self {
         let memory = Arc::new(RwLock::new(Connections::default()));
         Self {
@@ -69,15 +51,9 @@ where
             metrics,
             node,
             subscriber,
-            #[cfg(feature = "email")]
-            email_store,
-            http_client,
-            api,
             listen: listen.0,
             port: listen.1,
             origin,
-            envs,
-            protos,
         }
     }
 
@@ -93,32 +69,7 @@ where
 
         tracing::debug!("CORS: {:?}", cors.clone());
 
-        #[cfg(feature = "email")]
-        let email_store = self.email_store.clone();
-
         let memory = self.memory.clone();
-        let http_client = self.http_client.clone();
-        let api = self.api.clone();
-
-        #[cfg(feature = "email")]
-        let trial_route = warp::post()
-            .and(warp::path("trial"))
-            .and(warp::body::json::<request::Trial>())
-            .and(filters::with_store(email_store.clone()))
-            .and(my_filters::with_http_client(http_client.clone()))
-            .and(filters::with_api_settings(api.clone()))
-            .and(filters::with_envs(self.envs.clone()))
-            .and(filters::with_protos(self.protos.clone()))
-            .and_then(trial_handler);
-
-        let tg_trial_route = warp::post()
-            .and(warp::path("tg-trial"))
-            .and(warp::body::json::<request::TgTrial>())
-            .and(my_filters::with_http_client(http_client.clone()))
-            .and(filters::with_api_settings(api.clone()))
-            .and(filters::with_envs(self.envs.clone()))
-            .and(filters::with_protos(self.protos.clone()))
-            .and_then(tg_trial_handler);
 
         let auth_route = warp::post()
             .and(warp::path("auth"))
@@ -126,22 +77,7 @@ where
             .and(warp::any().map(move || memory.clone()))
             .and_then(auth_handler);
 
-        let activate_route = warp::post()
-            .and(warp::path("activate"))
-            .and(warp::body::json::<request::ActivateKey>())
-            .and(my_filters::with_http_client(http_client))
-            .and(filters::with_api_settings(api))
-            .and(filters::with_envs(self.envs.clone()))
-            .and(filters::with_protos(self.protos.clone()))
-            .and_then(activate_key_handler);
-
-        let routes = health_check
-            .or(auth_route)
-            .or(tg_trial_route)
-            .or(activate_route);
-
-        #[cfg(feature = "email")]
-        let routes = routes.or(trial_route);
+        let routes = health_check.or(auth_route);
 
         warp::serve(routes.with(cors))
             .run(SocketAddr::new(IpAddr::V4(self.listen), self.port))
@@ -163,13 +99,6 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         vec![topic_init, Topic::Auth],
     );
 
-    #[cfg(feature = "email")]
-    let email_store = EmailStore::new(settings.smtp.clone());
-    #[cfg(feature = "email")]
-    email_store.load_trials().await?;
-
-    let http_client = HttpClient::new();
-
     let metrics = MetricBuffer {
         batch: parking_lot::Mutex::new(Vec::new()),
         publisher: Publisher::connect(&settings.metrics.publisher).await?,
@@ -179,14 +108,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         Arc::new(metrics),
         node,
         subscriber?,
-        #[cfg(feature = "email")]
-        email_store,
-        http_client,
-        settings.api.clone(),
         (settings.service.listen, settings.service.port),
         settings.service.origin.clone(),
-        settings.service.enabled_envs.clone(),
-        settings.service.enabled_protos.clone(),
     ));
 
     let snapshot_manager = SnapshotManager::new(

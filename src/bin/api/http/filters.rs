@@ -1,12 +1,15 @@
 use std::sync::Arc;
 use warp::Filter;
 
+use super::super::email::EmailStore;
+use super::super::sync::MemSync;
+
+use fcore::{Env, Tag};
+
 use fcore::{
     Connection, ConnectionApiOperations, ConnectionBaseOperations, IpAddrMask, MetricStorage,
     NodeStorageOperations, SubscriptionOperations,
 };
-
-use super::super::sync::MemSync;
 
 /// Provides application state filter
 pub fn with_sync<T, C, S>(
@@ -31,6 +34,16 @@ pub fn with_param_vec(
 ) -> impl Filter<Extract = (Vec<u8>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || param.clone())
 }
+pub fn with_param_envs(
+    param: Vec<Env>,
+) -> impl Filter<Extract = (Vec<Env>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || param.clone())
+}
+pub fn with_param_tags(
+    param: Vec<Tag>,
+) -> impl Filter<Extract = (Vec<Tag>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || param.clone())
+}
 
 pub fn with_param_ipaddrmask(
     param: IpAddrMask,
@@ -48,4 +61,10 @@ pub fn with_metrics(
     metrics: Arc<MetricStorage>,
 ) -> impl Filter<Extract = (Arc<MetricStorage>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || metrics.clone())
+}
+
+pub fn with_email_store(
+    email_store: EmailStore,
+) -> impl Filter<Extract = (EmailStore,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || email_store.clone())
 }

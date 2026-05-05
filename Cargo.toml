@@ -23,7 +23,7 @@ console-subscriber = {version = "0.4", optional = true}
 dashmap = "6.1.0"
 defguard_wireguard_rs = {version = "0.7.2", features=["serde"], optional = true}
 futures = "0.3"
-hex = { version = "0.4",  optional = true}
+hex = { version = "0.4"}
 hmac = "0.12"
 openssl = { version = "0.10", features = ["vendored"] }
 prost = { version = "0.13", optional = true }
@@ -54,7 +54,7 @@ zmq = "0.10"
 parking_lot = "0.12.5"
 sha2 = "0.10"
 data-encoding = "2.5"
-lettre = { version = "0.11", features = ["tokio1", "builder", "smtp-transport", "tokio1-native-tls"], optional = true}
+lettre = { version = "0.11", features = ["tokio1", "builder", "smtp-transport", "tokio1-native-tls"]}
 
 [build-dependencies]
 tonic-build = {version = "0.12", optional = true}
@@ -71,7 +71,6 @@ default = []
 debug = ["console-subscriber"]
 wireguard = ["defguard_wireguard_rs"]
 xray = ["prost", "prost-derive", "tonic", "tonic-build"]
-email = ["lettre", "hex"]
 
 [[bin]]
 name = "node"
