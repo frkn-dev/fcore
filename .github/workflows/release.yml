@@ -84,7 +84,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Build Auth
-        run: cargo build --release --bin auth --no-default-features --features email
+        run: cargo build --release --bin auth --no-default-features
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
