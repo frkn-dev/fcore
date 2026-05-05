@@ -166,7 +166,6 @@ where
             .and(warp::path("key"))
             .and(warp::path("validate"))
             .and(warp::path::end())
-            .and(auth.clone())
             .and(warp::query::<KeyQueryParams>())
             .and(with_sync(self.sync.clone()))
             .and(with_param_vec(params.key_sign_token.clone()))
@@ -185,7 +184,6 @@ where
             .and(warp::path("key"))
             .and(warp::path("activate"))
             .and(warp::path::end())
-            .and(auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and_then(post_activate_key_handler);
