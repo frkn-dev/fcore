@@ -90,10 +90,10 @@ jobs:
       - name: Build API (static)
         run: |
           RUSTFLAGS="-C target-feature=+crt-static" \
-         cargo zigbuild --release \
-            --bin api \
-            --no-default-features \
-            --target x86_64-unknown-linux-musl
+          cargo zigbuild --release \
+             --bin api \
+             --no-default-features \
+             --target x86_64-unknown-linux-musl
 
       - name: Verify static binary
         run: |
