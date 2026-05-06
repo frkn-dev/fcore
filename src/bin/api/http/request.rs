@@ -173,3 +173,19 @@ impl ConnectionInfoRequest {
         Ok(())
     }
 }
+
+#[derive(Debug, Deserialize)]
+pub struct Trial {
+    pub user: Option<String>,
+    pub email: Option<String>,
+    pub referred_by: Option<String>,
+}
+
+impl Trial {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.user.is_some() && self.email.is_some() {
+            return Err(Error::Custom("Only one param is allowed".to_string()));
+        }
+        Ok(())
+    }
+}

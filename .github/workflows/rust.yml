@@ -14,10 +14,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
+
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Test Lib
         run: cargo test --lib
 
@@ -26,23 +29,39 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
       - name: Install Build Tools
         run: |
-          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler musl-tools
           pip3 install ziglang
           cargo install cargo-zigbuild
-      - name: Build Node
-        run: cargo zigbuild --release --bin node --target ${{ matrix.target }} --features xray,wireguard
+
+      - name: Build Node (static)
+        run: |
+          RUSTFLAGS="-C target-feature=+crt-static" \
+          cargo zigbuild  --release \
+            --bin node \
+            --target ${{ matrix.target }} \
+            --features xray,wireguard
+
+      - name: Verify static binary
+        run: |
+          ldd target/${{ matrix.target }}/release/node || true
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -52,36 +71,81 @@ jobs:
   build-api:
     needs: [tests]
     runs-on: ubuntu-22.04
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
-      - name: Build API
-        run: cargo build --release --bin api --no-default-features
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler musl-tools
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build API (static)
+        run: |
+          RUSTFLAGS="-C target-feature=+crt-static" \
+          cargo zigbuild --release \
+             --bin api \
+             --no-default-features \
+             --target x86_64-unknown-linux-musl
+
+      - name: Verify static binary
+        run: |
+          ldd target/x86_64-unknown-linux-musl/release/api || true
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: fcore-api
-          path: target/release/api
+          path: target/x86_64-unknown-linux-musl/release/api
 
   build-auth:
     needs: [tests]
     runs-on: ubuntu-22.04
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
-      - name: Build Auth
-        run: cargo build --release --bin auth --no-default-features --features email
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler musl-tools
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build Auth (static)
+        run: |
+          RUSTFLAGS="-C target-feature=+crt-static" \
+          cargo zigbuild --release \
+            --bin auth \
+            --no-default-features \
+            --target x86_64-unknown-linux-musl
+
+      - name: Verify static binary
+        run: |
+          ldd target/x86_64-unknown-linux-musl/release/auth || true
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: fcore-auth
-          path: target/release/auth
+          path: target/x86_64-unknown-linux-musl/release/auth
 
   collect-binaries:
     runs-on: ubuntu-latest
     needs: [build-node, build-api, build-auth]
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -89,6 +153,7 @@ jobs:
           path: collected
           pattern: fcore-*
           merge-multiple: false
+
       - name: Upload combined bundle
         uses: actions/upload-artifact@v4
         with:

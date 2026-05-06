@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::net::Ipv4Addr;
 
-use fcore::{IpAddrMask, Result, Settings};
+use fcore::{Env, IpAddrMask, Result, Settings, Tag};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceSettings {
@@ -9,6 +9,7 @@ pub struct ServiceSettings {
     pub pg: PostgresConfig,
     pub metrics: MetricsRxConfig,
     pub tasks: TasksConfig,
+    pub smtp: SmtpConfig,
 }
 
 impl Settings for ServiceSettings {
@@ -49,6 +50,9 @@ pub struct ServiceConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
     pub updates_endpoint_zmq: String,
+    pub enabled_envs: Vec<Env>,
+    pub enabled_tags: Vec<Tag>,
+    pub trial_days: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -72,4 +76,23 @@ pub struct MetricsRxConfig {
     pub reciever: String,
     pub max_points: usize,
     pub retention_seconds: i64,
+}
+
+fn default_company_website() -> String {
+    "http://localhost:8080".to_string()
+}
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct SmtpConfig {
+    pub server: String,
+    pub username: String,
+    pub password: String,
+    pub port: u16,
+    pub from: String,
+    pub title: String,
+    pub company_name: String,
+    pub support: String,
+    pub email_file: String,
+    pub email_sign_token: Vec<u8>,
+    #[serde(default = "default_company_website")]
+    pub company_website: String,
 }

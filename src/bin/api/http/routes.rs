@@ -11,7 +11,9 @@ use fcore::{
 use super::{
     super::{config::ServiceConfig, service::Service},
     filters::*,
-    handlers::{connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*},
+    handlers::{
+        connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*, trial::*,
+    },
     param::*,
     rejection,
     request::*,
@@ -102,7 +104,7 @@ where
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_i64(params.bonus_days))
-            .and(with_param_vec_string(params.system_refer_codes))
+            .and(with_param_vec_string(params.system_refer_codes.clone()))
             .and_then(post_subscription_handler);
 
         let put_subscription_route = warp::put()
@@ -148,7 +150,7 @@ where
             .and(auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_ipaddrmask(params.wireguard_network))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
             .and_then(create_connection_handler);
 
         let delete_connection_route = warp::delete()
@@ -164,7 +166,6 @@ where
             .and(warp::path("key"))
             .and(warp::path("validate"))
             .and(warp::path::end())
-            .and(auth.clone())
             .and(warp::query::<KeyQueryParams>())
             .and(with_sync(self.sync.clone()))
             .and(with_param_vec(params.key_sign_token.clone()))
@@ -183,10 +184,24 @@ where
             .and(warp::path("key"))
             .and(warp::path("activate"))
             .and(warp::path::end())
-            .and(auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and_then(post_activate_key_handler);
+
+        //Trial
+        let post_trial_route = warp::post()
+            .and(warp::path("trial"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_email_store(self.email_store.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network))
+            .and(with_param_vec_string(params.system_refer_codes))
+            .and(with_param_envs(params.enabled_envs))
+            .and(with_param_tags(params.enabled_tags))
+            .and(with_i64(params.trial_days))
+            .and(with_i64(params.bonus_days))
+            .and_then(post_trial_handler);
 
         use uuid::Uuid;
         let ws_all_metrics_route = warp::path!("metrics" / "all" / Uuid / u64 / "ws")
@@ -237,6 +252,8 @@ where
             .or(get_key_validation_route)
             .or(post_key_route)
             .or(post_activate_key_route)
+            //Trial
+            .or(post_trial_route)
             // Metrics
             .or(ws_all_metrics_route)
             .or(ws_aggregate_route)

@@ -7,6 +7,8 @@ use fcore::{
     Node, NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions,
 };
 
+use super::email::EmailStore;
+
 use super::{config::ServiceSettings, sync::MemSync};
 
 pub type State = Cache<HashMap<Env, Vec<Node>>, Connection, Subscription>;
@@ -26,6 +28,7 @@ where
     pub sync: MemSync<N, C, S>,
     pub settings: ServiceSettings,
     pub metrics: Arc<MetricStorage>,
+    pub email_store: EmailStore,
 }
 
 impl<N, C, S> Service<N, C, S>
@@ -44,11 +47,13 @@ where
         sync: MemSync<N, C, S>,
         settings: ServiceSettings,
         metrics: Arc<MetricStorage>,
+        email_store: EmailStore,
     ) -> Self {
         Self {
             sync,
             settings,
             metrics,
+            email_store: email_store,
         }
     }
 }

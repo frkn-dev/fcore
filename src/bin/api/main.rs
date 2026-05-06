@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod config;
+mod email;
 mod http;
 mod metrics;
 mod postgres;
@@ -64,10 +65,14 @@ async fn main() -> Result<()> {
         settings.metrics.max_points,
         settings.metrics.retention_seconds,
     ));
+    let email_store = email::EmailStore::new(settings.smtp.clone());
+    email_store.load_trials().await?;
+
     let api_service = Arc::new(Service::new(
         mem_sync.clone(),
         settings.clone(),
         metric_storage,
+        email_store.clone(),
     ));
 
     measure_time(api_service.get_state_from_db(), "Init PostgreSQL DB").await?;
