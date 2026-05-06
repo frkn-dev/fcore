@@ -75,17 +75,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-musl
+
       - name: Install Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler musl-tools
           pip3 install ziglang
           cargo install cargo-zigbuild
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: [x86_64-unknown-linux-musl]
 
       - name: Build API (static)
         run: |
@@ -112,17 +112,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-musl
+
       - name: Install Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler musl-tools
           pip3 install ziglang
           cargo install cargo-zigbuild
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: [x86_64-unknown-linux-musl]
 
       - name: Build Auth (static)
         run: |
