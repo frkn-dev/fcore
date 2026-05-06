@@ -85,7 +85,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: [x86_64-unknown-linux-musl]
 
       - name: Build API (static)
         run: |
@@ -122,7 +122,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: [x86_64-unknown-linux-musl]
 
       - name: Build Auth (static)
         run: |
