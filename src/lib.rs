@@ -28,7 +28,7 @@ pub const BANNER: &str = r#"
 //                            |_|                |___/
 "#;
 
-pub const VERSION: &str = "0.5.1-dev";
+pub const VERSION: &str = "0.5.5";
 
 pub use config::{
     clash::InboundClashConfig,

@@ -3,12 +3,22 @@ log_level = "debug"
 listen = "127.0.0.1"
 port = 3000
 token = "supetsecrettoken"
-
 key_sign_token = [69,106,53,108,101,105,57]
 bonus_days = 7
+trial_days = 1
 system_refer_codes = ["WEB", "TG", "MOBILE"]
 wireguard_network = "10.1.0.0/16"
+base_url = "https://mycoolvpn.hehe"
+wireguardg_network = "10.1.0.0/16"
 updates_endpoint_zmq = "tcp://*:3001"
+enabled_envs = ["dev", "wl", "ru"]
+enabled_tags = [
+    "VlessXhttpReality",
+    "VlessTcpReality",
+    "VlessGrpcReality",
+    "Hysteria2",
+    "Mtproto"
+]
 
 [metrics]
 reciever = "tcp://0.0.0.0:3002"
@@ -20,10 +30,21 @@ db_sync_interval_sec = 1000
 subscription_restore_interval = 600
 subscription_expire_interval = 600
 
-
 [pg]
 host = "localhost"
 port = 5432
 db = "api"
 username = "postgres"
 password = "password"
+
+[smtp]
+email_file = "users_trials.csv"
+email_sign_token = [85,118,97,56,119]
+server = "smtp.yandex.ru"
+username = "hehe@hehe.org"
+password = "PASSWORD"
+port = 587
+from = "Privacy Company <hehe@hehe.org>"
+title = "Тест-Драйв активирован 🏴‍☠️"
+company_name = "Privacy Company"
+support = "https://t.me/hehe_support"

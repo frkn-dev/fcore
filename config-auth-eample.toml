@@ -8,7 +8,6 @@ snapshot_path = "snapshots/snapshot-auth.bin"
 snapshot_interval = 60
 web_host = "http://localhost:8080"
 
-
 [node]
 env = "experimental"
 hostname = "darkmachine.local"
@@ -27,15 +26,4 @@ publisher = "tcp://127.0.0.1:3002"
 endpoint = "http://127.0.0.1:3001"
 token = "supetsecrettoken"
 
-[smtp]
-email_file = "users_trials.csv"
-email_sign_token = [85,118,97,56,119]
-server = "smtp.yandex.ru"
-username = "hehe@hehe.org"
-password = "PASSWORD"
-port = 587
 
-from = "Privacy Company <hehe@hehe.org>"
-title = "Тест-Драйв активирован 🏴‍☠️"
-company_name = "Privacy Company"
-support = "https://t.me/hehe_support"
