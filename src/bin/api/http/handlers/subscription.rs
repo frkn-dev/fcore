@@ -14,7 +14,7 @@ use fcore::http::{
 use fcore::{
     utils::get_uuid_last_octet_simple, Connection, ConnectionApiOperations,
     ConnectionBaseOperations, ConnectionStorageApiOperations, Env, Inbound, InboundClashConfig,
-    InboundConnLink, MetricStorage, Node, NodeStorageOperations, Status, Subscription,
+    InboundConnLink, MetricStorage, NodeStorageOperations, Status, Subscription,
     SubscriptionOperations, SubscriptionStorageOperations, Tag,
 };
 
@@ -342,13 +342,7 @@ where
     // Prepare filters
     // -------------------------
     let proto_tags = req.proto.tags();
-
     let env_filter = &req.env;
-
-    let nodes: Vec<Node> = match env_filter {
-        EnvFilter::All => mem.nodes.iter_nodes().map(|(_, n)| n.clone()).collect(),
-        EnvFilter::Single(env) => mem.nodes.get_by_env(env).unwrap_or_else(Vec::new),
-    };
 
     // -------------------------
     // Pre-filter connections
@@ -376,23 +370,55 @@ where
     let mut inbounds_list: Vec<(Inbound, uuid::Uuid, Connection, String, Ipv4Addr, String)> =
         Vec::new();
 
-    for (conn_id, conn) in conns {
-        let proto = conn.get_proto().proto();
+    match env_filter {
+        EnvFilter::All => {
+            for (conn_id, conn) in &conns {
+                let proto = conn.get_proto().proto();
+                let env = conn.get_env();
 
-        if !proto_tags.contains(&proto) {
-            continue;
+                if !proto_tags.contains(&proto) {
+                    continue;
+                }
+
+                let nodes = mem.nodes.get_by_env(&env).unwrap_or_default();
+
+                for node in nodes {
+                    if let Some(inbound) = node.inbounds.get(&proto) {
+                        inbounds_list.push((
+                            inbound.clone(),
+                            *conn_id,
+                            conn.clone(),
+                            node.hostname.clone(),
+                            node.address,
+                            node.label.clone(),
+                        ));
+                    }
+                }
+            }
         }
 
-        for node in &nodes {
-            if let Some(inbound) = node.inbounds.get(&proto) {
-                inbounds_list.push((
-                    inbound.clone(),
-                    conn_id,
-                    conn.clone(),
-                    node.hostname.clone(),
-                    node.address,
-                    node.label.clone(),
-                ));
+        EnvFilter::Single(env) => {
+            let nodes = mem.nodes.get_by_env(env).unwrap_or_default();
+
+            for (conn_id, conn) in &conns {
+                let proto = conn.get_proto().proto();
+
+                if !proto_tags.contains(&proto) {
+                    continue;
+                }
+
+                for node in &nodes {
+                    if let Some(inbound) = node.inbounds.get(&proto) {
+                        inbounds_list.push((
+                            inbound.clone(),
+                            *conn_id,
+                            conn.clone(),
+                            node.hostname.clone(),
+                            node.address,
+                            node.label.clone(),
+                        ));
+                    }
+                }
             }
         }
     }
