@@ -70,7 +70,7 @@ impl NodeConfig {
             max_bandwidth_bps: raw.max_bandwidth_bps,
             cores: num_cpus,
             country: raw.country,
-            r#type: raw.r#type.parse().unwrap_or(Type::Common),
+            r#type: raw.r#type.parse().unwrap_or(Type::Node),
         })
     }
 }

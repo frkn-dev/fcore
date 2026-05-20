@@ -33,10 +33,10 @@ impl PgNode {
 
         let node_query = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type
         )
         ON CONFLICT (id) DO UPDATE SET
             uuid = EXCLUDED.uuid,
@@ -49,7 +49,8 @@ impl PgNode {
             interface = EXCLUDED.interface,
             cores = EXCLUDED.cores,
             max_bandwidth_bps = EXCLUDED.max_bandwidth_bps,
-            country = EXCLUDED.country
+            country = EXCLUDED.country,
+            node_type = EXCLUDED.node_type
     ";
 
         tx.execute(
@@ -68,6 +69,7 @@ impl PgNode {
                 &cores,
                 &node.max_bandwidth_bps,
                 &node.country,
+                &node.r#type,
             ],
         )
         .await?;
@@ -75,20 +77,16 @@ impl PgNode {
         let inbound_query = "
         INSERT INTO inbounds (
             id, node_id, tag, port, stream_settings,
-            uplink, downlink, conn_count,
             wg_privkey, wg_interface, wg_address, dns, h2, mtproto_secret
         )
         VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8,
-            $9, $10, $11, $12, $13, $14
+            $9, $10, $11
         )
         ON CONFLICT (node_id, tag) DO UPDATE SET
             port = EXCLUDED.port,
             stream_settings = EXCLUDED.stream_settings,
-            uplink = EXCLUDED.uplink,
-            downlink = EXCLUDED.downlink,
-            conn_count = EXCLUDED.conn_count,
             wg_privkey = EXCLUDED.wg_privkey,
             wg_interface = EXCLUDED.wg_interface,
             wg_address = EXCLUDED.wg_address,
@@ -129,9 +127,6 @@ impl PgNode {
                     &inbound.tag,
                     &(inbound.port as i32),
                     &stream_settings,
-                    &inbound.uplink,
-                    &inbound.downlink,
-                    &inbound.conn_count,
                     &wg_privkey,
                     &wg_interface,
                     &wg_address,
@@ -158,8 +153,7 @@ impl PgNode {
                 n.created_at, n.modified_at, n.label, n.interface,
                 n.cores, n.max_bandwidth_bps, n.country, n.node_type, i.id
 
-             AS inbound_id, i.tag, i.port, i.stream_settings, i.uplink, i.downlink,
-                i.conn_count, i.wg_privkey, i.wg_interface, i.wg_address, i.dns, i.h2, i.mtproto_secret
+             AS inbound_id, i.tag, i.port, i.stream_settings, i.wg_privkey, i.wg_interface, i.wg_address, i.dns, i.h2, i.mtproto_secret
              FROM nodes n
              LEFT JOIN inbounds i ON n.id = i.node_id",
                 &[],
@@ -247,9 +241,7 @@ impl PgNode {
                         stream_settings: row
                             .get::<_, Option<serde_json::Value>>("stream_settings")
                             .and_then(|v| serde_json::from_value(v).ok()),
-                        uplink: row.get("uplink"),
-                        downlink: row.get("downlink"),
-                        conn_count: row.get("conn_count"),
+
                         wg,
                         h2,
                         mtproto_secret,
@@ -263,32 +255,27 @@ impl PgNode {
         Ok(nodes_map.into_values().collect())
     }
 
-    pub async fn update_status(
-        &self,
-        uuid: &uuid::Uuid,
-        env: &str,
-        new_status: NodeStatus,
-    ) -> Result<()> {
+    pub async fn update_status(&self, uuid: &uuid::Uuid, new_status: NodeStatus) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
-        let query = "
-            UPDATE nodes
-            SET status = $1::node_status, modified_at = $2
-            WHERE uuid = $3 AND env = $4
-        ";
         let modified_at = Utc::now();
+        let query = "
+        UPDATE nodes
+        SET status = $1::node_status, modified_at = $2
+        WHERE uuid = $3
+    ";
 
         let result = client
-            .execute(query, &[&new_status, &modified_at, &uuid, &env])
+            .execute(query, &[&new_status, &modified_at, uuid])
             .await;
 
         match result {
             Ok(rows_updated) => {
                 if rows_updated == 0 {
-                    warn!("No node found with UUID {}", uuid);
+                    warn!("No node found with UUID {} ", uuid,);
                 } else {
-                    debug!("Updated node {} status to {}", uuid, new_status);
+                    debug!("Updated node {} status to {} ", uuid, new_status);
                 }
             }
             Err(e) => {

@@ -28,7 +28,7 @@ pub const BANNER: &str = r#"
 //                            |_|                |___/
 "#;
 
-pub const VERSION: &str = "0.5.6-dev";
+pub const VERSION: &str = "0.5.7-dev";
 
 pub use config::{
     clash::InboundClashConfig,
@@ -55,11 +55,10 @@ pub use memory::{
     env::Env,
     key::{Code, Distributor, Key},
     node::{
-        Node, NodeMetricInfo, NodeResponse, Stat as InboundStat, Status as NodeStatus,
-        Type as NodeType,
+        InboundStat, Node, NodeMetricInfo, NodeResponse, Status as NodeStatus, Type as NodeType,
     },
     snapshot::SnapshotManager,
-    stat::{Kind as StatKind, Stat},
+    stat::{Kind as StatKind, StatType},
     storage::{
         connection::ApiOp as ConnectionStorageApiOperations,
         connection::BaseOp as ConnectionStorageBaseOperations,

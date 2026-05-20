@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use super::{MetricEnvelope, MetricPoint};
 use crate::memory::node::Node;
@@ -96,15 +96,12 @@ impl MetricStorage {
             retention_seconds,
         }
     }
-    pub fn insert_envelope(&self, e: MetricEnvelope) {
-        tracing::info!(
-            "Inserting metric: node={}, name={}, value={}, tags={:?}",
-            e.node_id,
-            e.name,
-            e.value,
-            e.tags
-        );
 
+    // ------------------------------------------------------------
+    // INSERT
+    // ------------------------------------------------------------
+
+    pub fn insert_envelope(&self, e: MetricEnvelope) {
         let key = Self::make_series_key(&e.name, &e.tags);
 
         self.metadata.entry(key).or_insert_with(|| {
@@ -120,40 +117,188 @@ impl MetricStorage {
         });
 
         let node_map = self.inner.entry(e.node_id).or_default();
-        let mut entry = node_map.entry(key).or_default();
+        let mut series = node_map.entry(key).or_default();
 
-        entry.push_back(MetricPoint {
+        series.push_back(MetricPoint {
             timestamp: e.timestamp,
             value: e.value,
         });
 
-        while entry.len() > self.max_points {
-            entry.pop_front();
+        while series.len() > self.max_points {
+            series.pop_front();
         }
 
-        let retention_ms = self.retention_seconds * 1000;
-        let min_ts = e.timestamp - retention_ms;
+        let min_ts = e.timestamp - self.retention_seconds * 1000;
 
-        while let Some(front) = entry.front() {
+        while let Some(front) = series.front() {
             if front.timestamp < min_ts {
-                entry.pop_front();
+                series.pop_front();
             } else {
                 break;
             }
         }
     }
-    fn make_series_key(name: &str, tags: &BTreeMap<String, String>) -> u64 {
+
+    pub fn make_series_key(name: &str, tags: &BTreeMap<String, String>) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let mut hasher = DefaultHasher::new();
-        name.hash(&mut hasher);
+        let mut h = DefaultHasher::new();
+        name.hash(&mut h);
         for (k, v) in tags {
-            k.hash(&mut hasher);
-            v.hash(&mut hasher);
+            k.hash(&mut h);
+            v.hash(&mut h);
         }
-        hasher.finish()
+        h.finish()
     }
+
+    // ------------------------------------------------------------
+    // LOW LEVEL ACCESS
+    // ------------------------------------------------------------
+
+    pub fn metric_name(&self, hash: u64) -> Option<String> {
+        self.metadata.get(&hash).map(|m| m.0.clone())
+    }
+
+    pub fn series_for(
+        &self,
+        metric: Option<&str>,
+        tags: &BTreeMap<String, String>,
+    ) -> HashSet<u64> {
+        let mut result: Option<HashSet<u64>> = None;
+
+        // AND по тегам
+        for (k, v) in tags {
+            let current = self
+                .tag_index
+                .get(k)
+                .and_then(|m| m.get(v).map(|x| x.clone()))
+                .unwrap_or_default();
+
+            result = Some(match result {
+                None => current,
+                Some(prev) => prev.intersection(&current).copied().collect(),
+            });
+        }
+
+        let mut set = result.unwrap_or_default();
+
+        // фильтр по metric
+        if let Some(metric) = metric {
+            set.retain(|hash| {
+                self.metadata
+                    .get(hash)
+                    .map(|m| m.value().0 == metric)
+                    .unwrap_or(false)
+            });
+        }
+
+        set
+    }
+
+    // ------------------------------------------------------------
+    // CORE QUERY API
+    // ------------------------------------------------------------
+
+    pub fn latest_sum(&self, metric: Option<&str>, tags: &BTreeMap<String, String>) -> f64 {
+        let hashes = self.series_for(metric, tags);
+
+        let mut total = 0.0;
+
+        for node in self.inner.iter() {
+            let node_map = node.value();
+
+            for hash in &hashes {
+                if let Some(series) = node_map.get(hash) {
+                    if let Some(last) = series.back() {
+                        total += last.value;
+                    }
+                }
+            }
+        }
+
+        total
+    }
+
+    pub fn delta_sum(
+        &self,
+        metric: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        from: i64,
+        to: i64,
+    ) -> f64 {
+        let hashes = self.series_for(metric, tags);
+
+        let mut total = 0.0;
+
+        for node in self.inner.iter() {
+            let _node_id = *node.key();
+            let node_map = node.value();
+
+            for hash in &hashes {
+                let Some(series) = node_map.get(hash) else {
+                    continue;
+                };
+
+                let points = series
+                    .iter()
+                    .filter(|p| p.timestamp >= from && p.timestamp <= to)
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                if let (Some(first), Some(last)) = (points.first(), points.last()) {
+                    total += (last.value - first.value).max(0.0);
+                }
+            }
+        }
+
+        total
+    }
+
+    pub fn query_points(
+        &self,
+        metric: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        from: i64,
+        to: i64,
+    ) -> HashMap<uuid::Uuid, Vec<MetricPoint>> {
+        let hashes = self.series_for(metric, tags);
+        let mut result = HashMap::new();
+
+        for node in self.inner.iter() {
+            let node_id = *node.key();
+            let node_map = node.value();
+
+            let mut all = Vec::new();
+
+            for hash in &hashes {
+                let Some(series) = node_map.get(hash) else {
+                    continue;
+                };
+
+                let mut pts: Vec<MetricPoint> = series
+                    .iter()
+                    .filter(|p| p.timestamp >= from && p.timestamp <= to)
+                    .cloned()
+                    .collect();
+
+                all.append(&mut pts);
+            }
+
+            all.sort_by_key(|p| p.timestamp);
+
+            if !all.is_empty() {
+                result.insert(node_id, all);
+            }
+        }
+
+        result
+    }
+
+    // ------------------------------------------------------------
+    // RANGE
+    // ------------------------------------------------------------
+
     pub fn get_range(
         &self,
         node_id: &uuid::Uuid,
@@ -163,10 +308,9 @@ impl MetricStorage {
     ) -> Vec<MetricPoint> {
         self.inner
             .get(node_id)
-            .and_then(|node_data| {
-                node_data.get(&series_hash).map(|deque| {
-                    deque
-                        .iter()
+            .and_then(|node| {
+                node.get(&series_hash).map(|dq| {
+                    dq.iter()
                         .filter(|p| p.timestamp >= from && p.timestamp <= to)
                         .cloned()
                         .collect()
@@ -175,81 +319,104 @@ impl MetricStorage {
             .unwrap_or_default()
     }
 
-    pub fn find_series_by_tag(&self, tag_key: &str, tag_value: &str) -> HashSet<u64> {
-        self.tag_index
-            .get(tag_key)
-            .and_then(|tag_map| tag_map.get(tag_value).map(|v| v.clone()))
-            .unwrap_or_default()
-    }
-
-    pub fn get_aggregated_range(
-        &self,
-        tag_key: &str,
-        tag_value: &str,
-        metric_name: &str,
-        from: i64,
-        to: i64,
-    ) -> BTreeMap<uuid::Uuid, Vec<MetricPoint>> {
-        let mut result = BTreeMap::new();
-
-        let hashes = self.find_series_by_tag(tag_key, tag_value);
-
-        for node_ref in self.inner.iter() {
-            let node_id = node_ref.key();
-            let _node_data = node_ref.value();
-
-            for hash in &hashes {
-                if let Some(meta) = self.metadata.get(hash) {
-                    if meta.0 == metric_name {
-                        let points = self.get_range(node_id, *hash, from, to);
-                        if !points.is_empty() {
-                            result.insert(*node_id, points);
-                        }
-                    }
-                }
-            }
-        }
-        result
-    }
+    // ------------------------------------------------------------
+    // GC
+    // ------------------------------------------------------------
 
     pub fn perform_gc(&self) {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let retention_ms = self.retention_seconds * 1000;
-        let min_ts = now_ms - retention_ms;
+        let now = chrono::Utc::now().timestamp_millis();
+        let min_ts = now - self.retention_seconds * 1000;
 
-        self.inner.retain(|_node_id, node_map| {
-            node_map.retain(|_series_key, deque| {
-                while let Some(front) = deque.front() {
+        self.inner.retain(|_, node_map| {
+            node_map.retain(|_, series| {
+                while let Some(front) = series.front() {
                     if front.timestamp < min_ts {
-                        deque.pop_front();
+                        series.pop_front();
                     } else {
                         break;
                     }
                 }
-                !deque.is_empty()
+                !series.is_empty()
             });
 
             !node_map.is_empty()
         });
 
-        let mut alive_series = std::collections::HashSet::new();
-        for node_ref in self.inner.iter() {
-            for key in node_ref.value().iter().map(|entry| *entry.key()) {
-                alive_series.insert(key);
+        let mut alive = HashSet::new();
+
+        for node in self.inner.iter() {
+            for hash in node.value().iter().map(|e| *e.key()) {
+                alive.insert(hash);
             }
         }
 
-        self.metadata
-            .retain(|series_key, _| alive_series.contains(series_key));
+        self.metadata.retain(|k, _| alive.contains(k));
 
-        self.tag_index.retain(|_tag_key, tag_map| {
-            tag_map.retain(|_tag_value, set| {
-                set.retain(|series_key| alive_series.contains(series_key));
-
+        self.tag_index.retain(|_, tag_map| {
+            tag_map.retain(|_, set| {
+                set.retain(|h| alive.contains(h));
                 !set.is_empty()
             });
-
             !tag_map.is_empty()
         });
+    }
+
+    // ------------------------------------------------------------
+    // HEARTBEAT
+    // ------------------------------------------------------------
+
+    pub fn get_last_heartbeat(&self, node_id: &uuid::Uuid) -> Option<i64> {
+        let node = self.inner.get(node_id)?;
+
+        for entry in node.iter() {
+            let hash = *entry.key();
+
+            if let Some((name, _)) = self.metadata.get(&hash).map(|m| m.value().clone()) {
+                if name == "sys.heartbeat" {
+                    return entry.value().back().map(|p| p.timestamp);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn sum_metric(&self, metric: &str, tags: &BTreeMap<String, String>) -> u64 {
+        let hashes = self.series_for(Some(metric), tags);
+
+        let mut total = 0u64;
+
+        for node in self.inner.iter() {
+            let node_map = node.value();
+
+            for hash in &hashes {
+                let Some(series) = node_map.get(hash) else {
+                    continue;
+                };
+
+                let Some(first) = series.front() else {
+                    continue;
+                };
+
+                let Some(last) = series.back() else {
+                    continue;
+                };
+
+                let delta = (last.value - first.value).max(0.0) as u64;
+                total += delta;
+            }
+        }
+
+        total
+    }
+
+    pub fn get_subscription_total_traffic(&self, subscription_id: &uuid::Uuid) -> (u64, u64) {
+        let mut tags = BTreeMap::new();
+        tags.insert("subscription_id".to_string(), subscription_id.to_string());
+
+        let uplink = self.sum_metric("user.traffic.uplink", &tags);
+        let downlink = self.sum_metric("user.traffic.downlink", &tags);
+
+        (uplink, downlink)
     }
 }

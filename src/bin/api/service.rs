@@ -1,29 +1,34 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use fcore::{
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, Connections, Env, MetricStorage,
-    Node, NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, Connections, MetricStorage,
+    NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions,
 };
 
 use super::email::EmailStore;
 
 use super::{config::ServiceSettings, sync::MemSync};
 
-pub type State = Cache<HashMap<Env, Vec<Node>>, Connection, Subscription>;
-
 pub struct Service<N, C, S>
 where
-    N: NodeStorageOperations + Send + Sync + Clone + 'static,
+    N: NodeStorageOperations + Send + Sync + Clone + 'static + Default,
     C: ConnectionBaseOperations
         + ConnectionApiOperations
         + Send
         + Sync
         + Clone
         + 'static
+        + PartialEq
+        + From<Connection>,
+    S: SubscriptionOperations
+        + Send
+        + Sync
+        + Clone
+        + 'static
+        + Default
+        + From<Subscription>
         + PartialEq,
-    S: SubscriptionOperations + Send + Sync + Clone + 'static,
 {
     pub sync: MemSync<N, C, S>,
     pub settings: ServiceSettings,
@@ -33,15 +38,23 @@ where
 
 impl<N, C, S> Service<N, C, S>
 where
-    N: NodeStorageOperations + Send + Sync + Clone + 'static,
+    N: NodeStorageOperations + Send + Sync + Clone + 'static + Default,
     C: ConnectionBaseOperations
         + ConnectionApiOperations
         + Send
         + Sync
         + Clone
         + 'static
+        + PartialEq
+        + From<Connection>,
+    S: SubscriptionOperations
+        + Send
+        + Sync
+        + Clone
+        + 'static
+        + Default
+        + From<Subscription>
         + PartialEq,
-    S: SubscriptionOperations + Send + Sync + Clone + 'static,
 {
     pub fn new(
         sync: MemSync<N, C, S>,

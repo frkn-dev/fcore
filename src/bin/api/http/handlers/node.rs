@@ -87,7 +87,6 @@ where
 pub async fn get_nodes_handler<N, C, S>(
     node_param: NodesQueryParams,
     memory: MemSync<N, C, S>,
-    metrics: Arc<MetricStorage>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -113,43 +112,12 @@ where
         Some(nodes) => {
             let node_response: Vec<NodeResponse> = nodes
                 .into_iter()
-                .map(|node| {
-                    let mut res = node.as_node_response();
-                    let node_uuid = node.uuid;
-
-                    res.metrics = if let Some(node_metrics_map) = metrics.inner.get(&node_uuid) {
-                        node_metrics_map
-                            .iter()
-                            .filter_map(|entry| {
-                                let series_hash = entry.key();
-                                let points = entry.value();
-
-                                if points.is_empty() {
-                                    return None;
-                                }
-
-                                let (name, tags) = metrics.metadata.get(series_hash).map(|m| {
-                                    let val = m.value();
-                                    (val.0.clone(), val.1.clone())
-                                })?;
-
-                                Some(NodeMetricInfo {
-                                    key: series_hash.to_string(),
-                                    name,
-                                    tags,
-                                })
-                            })
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-                    res
-                })
+                .map(|node| node.as_node_response())
                 .collect();
 
             let response = ResponseMessage {
                 status: StatusCode::OK.as_u16(),
-                message: "List of nodes with metrics".to_string(),
+                message: "List of nodes".to_string(),
                 response: Some(node_response),
             };
 
@@ -175,11 +143,11 @@ where
     }
 }
 
-/// Get single node handler - ИСПРАВЛЕНАЯ ВЕРСИЯ
+/// Get single node handler
 pub async fn get_node_handler<N, C, S>(
     node_id: uuid::Uuid,
     memory: MemSync<N, C, S>,
-    metrics: Arc<MetricStorage>, // ДОБАВЛЯЕМ metrics параметр!
+    metrics: Arc<MetricStorage>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -216,6 +184,13 @@ where
                         }
                         None => return None,
                     };
+
+                    if matches!(
+                        name.as_str(),
+                        "user.traffic.downlink" | "user.traffic.uplink" | "user.traffic.online"
+                    ) {
+                        return None;
+                    }
 
                     Some(NodeMetricInfo {
                         key: series_hash.to_string(),

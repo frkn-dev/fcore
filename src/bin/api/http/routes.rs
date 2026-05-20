@@ -10,7 +10,7 @@ use fcore::{
 };
 
 use super::{
-    super::{config::ServiceConfig, service::Service},
+    super::service::Service,
     filters::*,
     handlers::{
         connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*, trial::*,
@@ -22,7 +22,7 @@ use super::{
 
 #[async_trait]
 pub trait Http {
-    async fn run(&self, params: ServiceConfig) -> Result<()>;
+    async fn run_http(&self) -> Result<()>;
 }
 
 #[async_trait]
@@ -35,17 +35,27 @@ where
         + Clone
         + 'static
         + From<Connection>
-        + std::fmt::Debug
         + serde::Serialize
-        + PartialEq,
-    N: NodeStorageOperations + Send + Sync + Clone,
+        + PartialEq
+        + Into<Connection>,
+
+    N: NodeStorageOperations + Send + Sync + Clone + std::default::Default,
     Connection: From<C>,
 
-    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+    S: SubscriptionOperations
+        + Send
+        + Sync
+        + Clone
+        + 'static
+        + PartialEq
+        + From<Subscription>
+        + std::default::Default,
+    Vec<(Uuid, fcore::Connection)>: FromIterator<(Uuid, C)>,
 {
-    async fn run(&self, params: ServiceConfig) -> Result<()> {
+    async fn run_http(&self) -> Result<()> {
         let auth = auth(Arc::new(self.settings.service.token.clone()));
 
+        let params = &self.settings.service;
         let cors_origins = params.cors_origins.clone();
 
         let mut cors_builder = warp::cors()
@@ -74,8 +84,13 @@ where
             .and(warp::path::end())
             .and(warp::query::<NodesQueryParams>())
             .and(with_sync(self.sync.clone()))
-            .and(with_metrics(self.metrics.clone()))
             .and_then(get_nodes_handler);
+
+        let get_node_route = warp::path!("node" / Uuid)
+            .and(warp::get())
+            .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(get_node_handler);
 
         let post_node_register_route = warp::post()
             .and(warp::path("node"))
@@ -85,19 +100,15 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(post_node_handler);
 
-        let get_node_route = warp::path!("node" / Uuid)
-            .and(warp::get())
-            .and(with_sync(self.sync.clone()))
-            .and(with_metrics(self.metrics.clone()))
-            .and_then(get_node_handler);
-
         let get_subscription_route = warp::get()
             .and(warp::path("sub"))
             .and(warp::path::end())
             .and(warp::query::<SubscriptionInfoRequest>())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_string(params.subscription_title))
-            .and(with_i64(params.trial_limit_bytes))
+            .and(with_metrics(self.metrics.clone()))
+            .and(with_param_string(params.subscription_title.clone()))
+            .and(with_param_string(params.base_url.clone()))
+            .and(with_param_string(params.support_contact.clone()))
             .and_then(subscription_link_handler);
 
         let get_subscription_info_route = warp::get()
@@ -187,7 +198,7 @@ where
             .and(auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_vec(params.key_sign_token))
+            .and(with_param_vec(params.key_sign_token.clone()))
             .and_then(post_key_handler);
 
         let post_activate_key_route = warp::post()
@@ -205,46 +216,27 @@ where
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_email_store(self.email_store.clone()))
-            .and(with_param_ipaddrmask(params.wireguard_network))
-            .and(with_param_vec_string(params.system_refer_codes))
-            .and(with_param_envs(params.enabled_envs))
-            .and(with_param_tags(params.enabled_tags))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_vec_string(params.system_refer_codes.clone()))
+            .and(with_param_envs(params.enabled_envs.clone()))
+            .and(with_param_tags(params.enabled_tags.clone()))
             .and(with_i64(params.trial_limit_days))
             .and(with_i64(params.bonus_days))
             .and(with_i64(params.trial_limit_bytes))
             .and_then(post_trial_handler);
 
-        let ws_all_metrics_route = warp::path!("metrics" / "all" / Uuid / u64 / "ws")
+        //Metrics
+
+        let ws_route = warp::path("ws")
+            .and(warp::path("metrics"))
             .and(warp::ws())
+            .and(warp::query::<WsMetricQuery>())
             .and(with_metrics(self.metrics.clone()))
-            .map(
-                |node_id: Uuid, series_hash: u64, ws: warp::ws::Ws, storage| {
-                    ws.on_upgrade(move |socket| {
-                        handle_ws_client(socket, node_id, series_hash, storage)
-                    })
-                },
-            );
-
-        let ws_aggregate_route =
-            warp::path!("metrics" / "aggregate" / String / String / String / "ws")
-                .and(warp::ws())
-                .and(with_metrics(self.metrics.clone()))
-                .map(
-                    |tag_key: String,
-                     tag_value: String,
-                     metric_name: String,
-                     ws: warp::ws::Ws,
-                     storage| {
-                        ws.on_upgrade(move |socket| {
-                            handle_aggregated_ws(socket, tag_key, tag_value, metric_name, storage)
-                        })
-                    },
-                );
-
-        let debug_metrics_route = warp::path!("debug" / "metrics")
-            .and(warp::get())
-            .and(with_metrics(self.metrics.clone()))
-            .and_then(debug_metrics_handler);
+            .map(|ws: warp::ws::Ws, query: WsMetricQuery, storage| {
+                ws.on_upgrade(move |socket| async move {
+                    metrics_ws_handler(socket, query, storage).await;
+                })
+            });
 
         let routes = get_healthcheck_route
             // Subscription
@@ -270,9 +262,7 @@ where
             //Trial
             .or(post_trial_route)
             // Metrics
-            .or(ws_all_metrics_route)
-            .or(ws_aggregate_route)
-            .or(debug_metrics_route)
+            .or(ws_route)
             .recover(rejection)
             .with(cors);
 

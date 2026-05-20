@@ -3,8 +3,8 @@ use tonic::Status;
 
 use super::api::app::stats::command::GetStatsResponse;
 use crate::memory::connection::stat::Stat as ConnectionStat;
-use crate::memory::node::Stat as InboundStat;
-use crate::memory::stat::Stat;
+use crate::memory::node::InboundStat;
+use crate::memory::stat::StatType;
 use crate::memory::tag::ProtoTag as Tag;
 
 #[derive(Debug, Clone, Copy)]
@@ -28,7 +28,7 @@ pub trait StatsOp {
     async fn stat(
         &self,
         prefix: Prefix,
-        stat_kind: Stat,
+        stat_kind: StatType,
         reset: bool,
     ) -> Result<GetStatsResponse, Status>;
     async fn conn(&self, conn_id: Prefix) -> Result<ConnectionStat, Status>;

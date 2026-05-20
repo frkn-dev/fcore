@@ -340,7 +340,6 @@ where
         + Clone
         + 'static
         + From<Connection>
-        + std::fmt::Debug
         + PartialEq
         + serde::ser::Serialize,
     S: SubscriptionOperations + Send + Sync + Clone + 'static,
@@ -374,7 +373,6 @@ where
         + Clone
         + 'static
         + From<Connection>
-        + std::fmt::Debug
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
@@ -457,7 +455,6 @@ where
         + Clone
         + 'static
         + From<Connection>
-        + std::fmt::Debug
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,

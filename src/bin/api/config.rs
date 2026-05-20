@@ -55,6 +55,8 @@ pub struct ServiceConfig {
     pub trial_limit_days: i64,
     pub trial_limit_bytes: i64,
     pub subscription_title: String,
+    pub support_contact: String,
+    pub base_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -71,6 +73,17 @@ pub struct TasksConfig {
     pub db_sync_interval_sec: u64,
     pub subscription_restore_interval: u64,
     pub subscription_expire_interval: u64,
+    pub connection_expire_interval: u64,
+    pub monitor_nodes_interval: u64,
+    pub heartbeat_node_offline_threshold_sec: u64,
+}
+
+#[derive(Clone, Default, Debug, Deserialize)]
+pub struct MetricsLogConfig {
+    pub enabled: bool,
+    pub directory: String,
+    pub rotation: String,
+    pub level: String,
 }
 
 #[derive(Clone, Default, Debug, Deserialize)]
@@ -78,6 +91,8 @@ pub struct MetricsRxConfig {
     pub reciever: String,
     pub max_points: usize,
     pub retention_seconds: i64,
+    pub log: MetricsLogConfig,
+    pub snapshot_path: String,
 }
 
 fn default_company_website() -> String {

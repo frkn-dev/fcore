@@ -118,14 +118,51 @@ ALTER TABLE nodes
 ADD COLUMN node_type node_type NOT NULL DEFAULT 'common';
 
 
-ALTER TYPE node_type ADD VALUE 'service';
-ALTER TYPE node_type ADD VALUE 'agent';
-
 
 alter table connections drop column "node_id";
 alter table connections drop column "wg_pubkey";
 
 alter table subscriptions add column limit_bytes bigint;
 alter table subscriptions add column downlink_bytes bigint;
+
+
+alter table inbounds drop column  uplink;
+alter table inbounds drop column  downlink ;
+alter table inbounds drop column  conn_count;
+
+alter table inbounds drop column  wg_pubkey;
+alter table inbounds drop column  wg_network;
+
+
+
+CREATE TYPE node_type_new AS ENUM ('node', 'premium_node', 'service');
+
+-- 2. Для каждой таблицы, использующей старый тип, добавить временную колонку
+ALTER TABLE nodes ADD COLUMN node_type_new node_type_new;
+
+-- 3. Обновить данные: преобразовать старые значения в новые
+UPDATE nodes
+SET node_type_new = CASE node_type
+    WHEN 'common' THEN 'node'
+    WHEN 'node' THEN 'node'
+    WHEN 'agent' THEN 'node'
+    WHEN 'premium' THEN 'premium_node'
+    WHEN 'premium_node' THEN 'premium_node'
+    WHEN 'premiumnode' THEN 'premium_node'
+    WHEN 'service' THEN 'service'
+    -- если есть другие, то по аналогии
+END;
+
+-- 4. Удалить старую колонку и переименовать новую
+ALTER TABLE nodes DROP COLUMN node_type;
+ALTER TABLE nodes RENAME COLUMN node_type_new TO node_type;
+
+-- 5. Удалить старый тип (если он больше нигде не используется)
+DROP TYPE node_type;
+
+-- 6. Переименовать новый тип в старое имя (опционально)
+ALTER TYPE node_type_new RENAME TO node_type;
+
+
 
 

@@ -5,9 +5,6 @@ use crate::zmq::message::Action;
 use crate::zmq::message::Message;
 
 pub trait Operations {
-    fn get_subscription_id(&self) -> Option<uuid::Uuid>;
-    fn set_subscription_id(&mut self, subscription_id: &uuid::Uuid);
-
     fn get_env(&self) -> Env;
     fn set_env(&mut self, env: &Env);
 
@@ -21,12 +18,6 @@ impl Operations for Conn {
         self.env.clone()
     }
 
-    fn get_subscription_id(&self) -> Option<uuid::Uuid> {
-        self.subscription_id
-    }
-    fn set_subscription_id(&mut self, subscription_id: &uuid::Uuid) {
-        self.subscription_id = Some(*subscription_id);
-    }
     fn set_env(&mut self, env: &Env) {
         self.env = env.clone();
     }
