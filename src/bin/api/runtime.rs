@@ -91,6 +91,17 @@ where
             }
         });
 
+        spawn_task("metric_pg_flush", {
+            let service = Arc::clone(&self);
+            let buffer = self.metrics_buffer.clone();
+
+            async move {
+                buffer
+                    .flush_loop(service.settings.metrics.pg_flush_interval)
+                    .await;
+            }
+        });
+
         spawn_task("monitor_node_heartbeats", {
             let service = Arc::clone(&self);
 
@@ -141,11 +152,12 @@ where
         spawn_task("metric_worker", {
             let metrics = Arc::clone(&self.metrics);
             let receiver = self.settings.metrics.reciever.clone();
+            let metric_buffer = self.metrics_buffer.clone();
 
             async move {
                 match Subscriber::new_bound(&receiver, vec![Topic::Metrics]) {
                     Ok(subscriber) => {
-                        MetricWorker::start(metrics, subscriber).await;
+                        MetricWorker::start(metrics, metric_buffer, subscriber).await;
                     }
                     Err(err) => {
                         error!("Failed to start MetricWorker: {}", err);

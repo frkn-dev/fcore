@@ -1,12 +1,17 @@
 use rkyv::Deserialize;
 use std::sync::Arc;
 
+use super::postgres::metrics::MetricDbBuffer;
 use fcore::{MetricEnvelope, MetricStorage, Subscriber};
 
 pub struct MetricWorker;
 
 impl MetricWorker {
-    pub async fn start(metric_storage: Arc<MetricStorage>, subscriber: Subscriber) {
+    pub async fn start(
+        metric_storage: Arc<MetricStorage>,
+        db_buffer: Arc<MetricDbBuffer>,
+        subscriber: Subscriber,
+    ) {
         tracing::info!("MetricWorker: Monitoring pipeline initialized...");
 
         loop {
@@ -39,7 +44,8 @@ impl MetricWorker {
                         metric.tags
                     );
 
-                    metric_storage.insert_envelope(metric);
+                    metric_storage.insert_envelope(metric.clone());
+                    db_buffer.push(metric.clone());
                 }
             }
         }

@@ -23,13 +23,16 @@ impl MetricSink for MetricBuffer {
         tags: BTreeMap<String, String>,
     ) {
         let mut b = self.batch.lock();
-        b.push(MetricEnvelope {
+
+        let e = MetricEnvelope {
             node_id: *node_id,
             name: metric.to_string(),
             value,
             timestamp: chrono::Utc::now().timestamp_millis(),
             tags,
-        });
+        };
+
+        b.push(e.clone());
     }
 }
 
@@ -167,7 +170,6 @@ impl MetricStorage {
     ) -> HashSet<u64> {
         let mut result: Option<HashSet<u64>> = None;
 
-        // AND по тегам
         for (k, v) in tags {
             let current = self
                 .tag_index
@@ -183,7 +185,6 @@ impl MetricStorage {
 
         let mut set = result.unwrap_or_default();
 
-        // фильтр по metric
         if let Some(metric) = metric {
             set.retain(|hash| {
                 self.metadata

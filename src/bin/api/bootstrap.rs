@@ -18,7 +18,10 @@ use tracing_subscriber::{
 use super::{
     config::ServiceSettings,
     email::EmailStore,
-    postgres::pg::PgContext,
+    postgres::{
+        metrics::{MetricDbBuffer, PostgresMetricWriter},
+        pg::PgContext,
+    },
     service::{Cache, Service},
     sync::MemSync,
     tasks::Tasks,
@@ -54,11 +57,8 @@ where
         let db = PgContext::init(&settings.pg).await?;
 
         let mem = Arc::new(RwLock::new(Cache::new()));
-
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;
-
         let mem_sync = MemSync::new(mem.clone(), db.clone(), publisher);
-
         let metric_storage = match MetricStorage::load_snapshot(
             &settings.metrics.snapshot_path,
             settings.metrics.max_points,
@@ -83,11 +83,21 @@ where
         let email_store = EmailStore::new(settings.smtp.clone());
         email_store.load_trials().await?;
 
+        let pg_writer = Arc::new(PostgresMetricWriter {
+            pool: db.pool().clone(),
+        });
+
+        let db_buffer = Arc::new(MetricDbBuffer {
+            batch: parking_lot::Mutex::new(vec![]),
+            pg: pg_writer.clone(),
+        });
+
         let service = Service::new(
             mem_sync,
             settings.clone(),
             Arc::new(metric_storage),
             email_store,
+            db_buffer,
         );
 
         measure_time(service.get_state_from_db(), "Init PostgreSQL DB").await?;
@@ -103,10 +113,13 @@ pub fn init_tracing(settings: ServiceSettings) {
         .with_target(true)
         .with_filter(level)
         .with_filter(filter_fn(|metadata| {
-            !metadata.target().starts_with("metrics")
+            !metadata.target().starts_with("metrics") && !metadata.target().starts_with("sqlx")
         }));
 
-    let metrics_file = RollingFileAppender::new(Rotation::DAILY, "./logs", "metrics.log");
+    let log_directory = settings.metrics.log.directory;
+    let log_file = settings.metrics.log.file;
+
+    let metrics_file = RollingFileAppender::new(Rotation::DAILY, log_directory, log_file);
 
     let metrics_layer = fmt::layer()
         .with_ansi(false)

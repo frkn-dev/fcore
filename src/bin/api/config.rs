@@ -82,6 +82,7 @@ pub struct TasksConfig {
 pub struct MetricsLogConfig {
     pub enabled: bool,
     pub directory: String,
+    pub file: String,
     pub rotation: String,
     pub level: String,
 }
@@ -93,6 +94,7 @@ pub struct MetricsRxConfig {
     pub retention_seconds: i64,
     pub log: MetricsLogConfig,
     pub snapshot_path: String,
+    pub pg_flush_interval: u64,
 }
 
 fn default_company_website() -> String {

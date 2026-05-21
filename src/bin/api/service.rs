@@ -7,7 +7,7 @@ use fcore::{
 };
 
 use super::email::EmailStore;
-
+use super::postgres::metrics::MetricDbBuffer;
 use super::{config::ServiceSettings, sync::MemSync};
 
 pub struct Service<N, C, S>
@@ -34,6 +34,7 @@ where
     pub settings: ServiceSettings,
     pub metrics: Arc<MetricStorage>,
     pub email_store: EmailStore,
+    pub metrics_buffer: Arc<MetricDbBuffer>,
 }
 
 impl<N, C, S> Service<N, C, S>
@@ -61,12 +62,14 @@ where
         settings: ServiceSettings,
         metrics: Arc<MetricStorage>,
         email_store: EmailStore,
+        metrics_buffer: Arc<MetricDbBuffer>,
     ) -> Self {
         Self {
             sync,
             settings,
             metrics,
             email_store,
+            metrics_buffer,
         }
     }
 }

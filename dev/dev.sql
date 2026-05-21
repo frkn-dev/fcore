@@ -135,34 +135,35 @@ alter table inbounds drop column  wg_network;
 
 
 
-CREATE TYPE node_type_new AS ENUM ('node', 'premium_node', 'service');
+-- TIMESCALE METRICS (SINGLE SOURCE OF TRUTH)
 
--- 2. Для каждой таблицы, использующей старый тип, добавить временную колонку
-ALTER TABLE nodes ADD COLUMN node_type_new node_type_new;
+CREATE EXTENSION IF NOT EXISTS timescaledb;
 
--- 3. Обновить данные: преобразовать старые значения в новые
-UPDATE nodes
-SET node_type_new = CASE node_type
-    WHEN 'common' THEN 'node'
-    WHEN 'node' THEN 'node'
-    WHEN 'agent' THEN 'node'
-    WHEN 'premium' THEN 'premium_node'
-    WHEN 'premium_node' THEN 'premium_node'
-    WHEN 'premiumnode' THEN 'premium_node'
-    WHEN 'service' THEN 'service'
-    -- если есть другие, то по аналогии
-END;
+CREATE TABLE node_metrics (
+    time TIMESTAMPTZ NOT NULL,
+    node_id UUID NOT NULL,
+    metric TEXT NOT NULL,
+    value DOUBLE PRECISION NOT NULL,
+    labels JSONB NOT NULL
+);
 
--- 4. Удалить старую колонку и переименовать новую
-ALTER TABLE nodes DROP COLUMN node_type;
-ALTER TABLE nodes RENAME COLUMN node_type_new TO node_type;
+SELECT create_hypertable('node_metrics', 'time');
 
--- 5. Удалить старый тип (если он больше нигде не используется)
-DROP TYPE node_type;
+-- индексы
+CREATE INDEX idx_node_metrics_time ON node_metrics (time DESC);
+CREATE INDEX idx_node_metrics_node ON node_metrics (node_id);
+CREATE INDEX idx_node_metrics_metric ON node_metrics (metric);
 
--- 6. Переименовать новый тип в старое имя (опционально)
-ALTER TYPE node_type_new RENAME TO node_type;
+-- GIN индекс для фильтрации по labels
+CREATE INDEX idx_node_metrics_labels ON node_metrics USING GIN (labels);
 
+-- compression (очень важно для прод)
+ALTER TABLE node_metrics SET (
+  timescaledb.compress,
+  timescaledb.compress_segmentby = 'node_id, metric'
+);
 
+SELECT add_compression_policy('node_metrics', INTERVAL '7 days');
 
-
+-- retention (опционально)
+SELECT add_retention_policy('node_metrics', INTERVAL '90 days');
