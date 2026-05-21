@@ -167,3 +167,29 @@ SELECT add_compression_policy('node_metrics', INTERVAL '7 days');
 
 -- retention (опционально)
 SELECT add_retention_policy('node_metrics', INTERVAL '90 days');
+
+ALTER TABLE node_metrics ADD PRIMARY KEY (time, node_id, metric);
+CREATE INDEX ON node_metrics (node_id, time DESC);
+
+SELECT set_chunk_time_interval('node_metrics', INTERVAL '1 day');
+
+
+CREATE INDEX idx_node_metrics_grafana
+ON node_metrics (metric, node_id, time DESC);
+
+ALTER TABLE node_metrics SET (
+  timescaledb.compress,
+  timescaledb.compress_segmentby = 'node_id, metric',
+  timescaledb.compress_orderby = 'time DESC'
+);
+
+
+CREATE MATERIALIZED VIEW node_metrics_1m
+WITH (timescaledb.continuous) AS
+SELECT
+  time_bucket('1 minute', time) AS bucket,
+  node_id,
+  metric,
+  avg(value) AS value
+FROM node_metrics
+GROUP BY bucket, node_id, metric;

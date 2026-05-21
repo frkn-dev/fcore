@@ -48,24 +48,36 @@ impl PostgresMetricWriter {
             return Ok(());
         }
 
-        let mut tx = self.pool.begin().await?;
+        const CHUNK_SIZE: usize = 2000;
 
-        let mut qb: QueryBuilder<Postgres> =
-            QueryBuilder::new("INSERT INTO node_metrics (time, node_id, metric, value, labels) ");
+        for chunk in batch.chunks(CHUNK_SIZE) {
+            let mut tx = self.pool.begin().await?;
 
-        qb.push_values(batch.iter(), |mut b, m| {
-            b.push_bind(
-                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(m.timestamp).unwrap(),
-            )
-            .push_bind(m.node_id)
-            .push_bind(&m.name)
-            .push_bind(m.value)
-            .push_bind(serde_json::to_value(&m.tags).unwrap());
-        });
+            let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO node_metrics (time, node_id, metric, value, labels) ",
+            );
 
-        let query = qb.build();
-        query.execute(&mut *tx).await?;
-        tx.commit().await?;
+            qb.push_values(chunk.iter(), |mut b, m| {
+                b.push_bind(
+                    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(m.timestamp).unwrap(),
+                )
+                .push_bind(m.node_id)
+                .push_bind(&m.name)
+                .push_bind(m.value)
+                .push_bind(serde_json::to_value(&m.tags).unwrap());
+            });
+
+            tracing::debug!(
+                target: "metrics",
+                "pg insert chunk size={} params={}",
+                chunk.len(),
+                chunk.len() * 5
+            );
+
+            qb.build().execute(&mut *tx).await?;
+
+            tx.commit().await?;
+        }
 
         Ok(())
     }
