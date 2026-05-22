@@ -321,48 +321,6 @@ impl MetricStorage {
     }
 
     // ------------------------------------------------------------
-    // GC
-    // ------------------------------------------------------------
-
-    pub fn perform_gc(&self) {
-        let now = chrono::Utc::now().timestamp_millis();
-        let min_ts = now - self.retention_seconds * 1000;
-
-        self.inner.retain(|_, node_map| {
-            node_map.retain(|_, series| {
-                while let Some(front) = series.front() {
-                    if front.timestamp < min_ts {
-                        series.pop_front();
-                    } else {
-                        break;
-                    }
-                }
-                !series.is_empty()
-            });
-
-            !node_map.is_empty()
-        });
-
-        let mut alive = HashSet::new();
-
-        for node in self.inner.iter() {
-            for hash in node.value().iter().map(|e| *e.key()) {
-                alive.insert(hash);
-            }
-        }
-
-        self.metadata.retain(|k, _| alive.contains(k));
-
-        self.tag_index.retain(|_, tag_map| {
-            tag_map.retain(|_, set| {
-                set.retain(|h| alive.contains(h));
-                !set.is_empty()
-            });
-            !tag_map.is_empty()
-        });
-    }
-
-    // ------------------------------------------------------------
     // HEARTBEAT
     // ------------------------------------------------------------
 

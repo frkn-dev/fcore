@@ -1,9 +1,9 @@
-use super::{storage::MetricStorage, MetricPoint};
 use rkyv::Deserialize;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 
-use std::collections::BTreeMap;
-
+use super::{storage::MetricStorage, MetricPoint};
 use crate::error::Result;
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -20,6 +20,123 @@ pub struct MetricSeriesSnapshot {
 }
 
 impl MetricStorage {
+    // ------------------------------------------------------------
+    // GC
+    // ------------------------------------------------------------
+
+    pub fn perform_gc(&self) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let min_ts = now - self.retention_seconds * 1000;
+
+        self.inner.retain(|_, node_map| {
+            node_map.retain(|_, series| {
+                while let Some(front) = series.front() {
+                    if front.timestamp < min_ts {
+                        series.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                !series.is_empty()
+            });
+
+            !node_map.is_empty()
+        });
+
+        let mut alive = HashSet::new();
+
+        for node in self.inner.iter() {
+            for hash in node.value().iter().map(|e| *e.key()) {
+                alive.insert(hash);
+            }
+        }
+
+        self.metadata.retain(|k, _| alive.contains(k));
+
+        self.tag_index.retain(|_, tag_map| {
+            tag_map.retain(|_, set| {
+                set.retain(|h| alive.contains(h));
+                !set.is_empty()
+            });
+            !tag_map.is_empty()
+        });
+    }
+
+    pub fn compact_series(
+        points: &VecDeque<MetricPoint>,
+        interval_ms: i64,
+    ) -> VecDeque<MetricPoint> {
+        if points.len() < 2 {
+            return points.clone();
+        }
+
+        let mut result = VecDeque::new();
+
+        let mut current_bucket: Option<i64> = None;
+        let mut last_point: Option<MetricPoint> = None;
+
+        for p in points {
+            let bucket = p.timestamp / interval_ms;
+
+            match current_bucket {
+                None => {
+                    current_bucket = Some(bucket);
+                    last_point = Some(p.clone());
+                }
+                Some(b) if b == bucket => {
+                    last_point = Some(p.clone());
+                }
+                Some(_) => {
+                    if let Some(lp) = last_point.take() {
+                        result.push_back(lp);
+                    }
+
+                    current_bucket = Some(bucket);
+                    last_point = Some(p.clone());
+                }
+            }
+        }
+
+        if let Some(lp) = last_point {
+            result.push_back(lp);
+        }
+
+        result
+    }
+
+    pub fn compact_old_points(&self, older_than_sec: i64, interval_sec: i64) {
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let threshold = now - older_than_sec * 1000;
+        let interval_ms = interval_sec * 1000;
+
+        for mut node in self.inner.iter_mut() {
+            for mut series in node.value_mut().iter_mut() {
+                let original = series.value();
+
+                if original.len() < 100 {
+                    continue;
+                }
+
+                let mut old = VecDeque::new();
+                let mut recent = VecDeque::new();
+
+                for p in original.iter() {
+                    if p.timestamp < threshold {
+                        old.push_back(p.clone());
+                    } else {
+                        recent.push_back(p.clone());
+                    }
+                }
+
+                let mut compacted = Self::compact_series(&old, interval_ms);
+
+                compacted.extend(recent);
+
+                *series.value_mut() = compacted;
+            }
+        }
+    }
     pub fn snapshot(&self) -> MetricStorageSnapshot {
         fn should_persist(metric: &str) -> bool {
             matches!(
@@ -101,9 +218,25 @@ impl MetricStorage {
     }
 
     pub async fn save_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
+        self.perform_gc();
+        self.compact_old_points(3600, 60);
+
         let snapshot = self.snapshot();
 
+        let points: usize = snapshot.series.iter().map(|s| s.points.len()).sum();
+
+        tracing::debug!(
+            "Saved {} metric series ({} points)",
+            snapshot.series.len(),
+            points
+        );
+
         let bytes = rkyv::to_bytes::<_, { 8 * 1024 * 1024 }>(&snapshot)?;
+
+        tracing::debug!(
+            "Metric snapshot size: {:.2} MB",
+            bytes.len() as f64 / 1024.0 / 1024.0
+        );
         let tmp = path.as_ref().with_extension("tmp");
         tokio::fs::write(&tmp, bytes.as_slice()).await?;
         tokio::fs::rename(tmp, path).await?;
