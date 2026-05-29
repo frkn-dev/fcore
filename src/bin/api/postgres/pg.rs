@@ -1,4 +1,3 @@
-use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::Client as PgClient;
@@ -74,28 +73,15 @@ impl PgClientManager {
 #[derive(Clone)]
 pub struct PgContext {
     pub manager: Arc<Mutex<PgClientManager>>,
-    pub pool: PgPool,
 }
 
 impl PgContext {
     pub async fn init(config: &PostgresConfig) -> Result<Self> {
         let manager = PgClientManager::new(config.clone()).await?;
 
-        let pg_url = format!(
-            "postgres://{}:{}@{}:{}/{}",
-            config.username, config.password, config.host, config.port, config.db
-        );
-
-        let pool = PgPool::connect(&pg_url).await?;
-
         Ok(Self {
             manager: Arc::new(Mutex::new(manager)),
-            pool,
         })
-    }
-
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
     }
 
     pub fn node(&self) -> PgNode {

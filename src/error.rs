@@ -5,9 +5,6 @@ use thiserror::Error as ThisError;
 #[derive(Debug, ThisError)]
 pub enum Error {
     #[error(transparent)]
-    Sqlx(#[from] sqlx::Error),
-
-    #[error(transparent)]
     Database(#[from] tokio_postgres::Error),
 
     #[error("DB conflict")]

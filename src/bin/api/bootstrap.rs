@@ -18,10 +18,7 @@ use tracing_subscriber::{
 use super::{
     config::ServiceSettings,
     email::EmailStore,
-    postgres::{
-        metrics::{MetricDbBuffer, PostgresMetricWriter},
-        pg::PgContext,
-    },
+    postgres::pg::PgContext,
     service::{Cache, Service},
     sync::MemSync,
     tasks::Tasks,
@@ -83,21 +80,11 @@ where
         let email_store = EmailStore::new(settings.smtp.clone());
         email_store.load_trials().await?;
 
-        let pg_writer = Arc::new(PostgresMetricWriter {
-            pool: db.pool().clone(),
-        });
-
-        let db_buffer = Arc::new(MetricDbBuffer {
-            batch: parking_lot::Mutex::new(vec![]),
-            pg: pg_writer.clone(),
-        });
-
         let service = Service::new(
             mem_sync,
             settings.clone(),
             Arc::new(metric_storage),
             email_store,
-            db_buffer,
         );
 
         measure_time(service.get_state_from_db(), "Init PostgreSQL DB").await?;
