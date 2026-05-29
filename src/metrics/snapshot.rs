@@ -333,16 +333,23 @@ impl MetricStorage {
         for idx in 0..meta.parts {
             let path = base.with_extension(format!("part{}", idx));
 
-            tracing::info!("Loading snapshot part {}", idx);
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => {
+                    let archived = unsafe { rkyv::archived_root::<MetricStorageSnapshot>(&bytes) };
 
-            let bytes = tokio::fs::read(&path).await?;
+                    let snapshot: MetricStorageSnapshot =
+                        archived.deserialize(&mut rkyv::Infallible)?;
 
-            let archived = unsafe { rkyv::archived_root::<MetricStorageSnapshot>(&bytes) };
+                    for series in snapshot.series {
+                        storage.restore_series(series);
+                    }
 
-            let snapshot: MetricStorageSnapshot = archived.deserialize(&mut rkyv::Infallible)?;
+                    tracing::debug!("Loaded snapshot part {}", idx);
+                }
 
-            for series in snapshot.series {
-                storage.restore_series(series);
+                Err(err) => {
+                    tracing::warn!("Skipping missing/corrupted snapshot part {}: {}", idx, err);
+                }
             }
         }
 
