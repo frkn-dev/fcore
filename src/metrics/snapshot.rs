@@ -2,9 +2,18 @@ use rkyv::Deserialize;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::path::Path;
 
 use super::{storage::MetricStorage, MetricPoint};
 use crate::error::Result;
+
+const SNAPSHOT_PART_SIZE: usize = 300 * 1024 * 1024; // 300 MB
+
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
+pub struct MetricStorageSnapshotMeta {
+    pub version: u32,
+    pub parts: usize,
+}
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct MetricStorageSnapshot {
@@ -137,23 +146,100 @@ impl MetricStorage {
             }
         }
     }
-    pub fn snapshot(&self) -> MetricStorageSnapshot {
-        fn should_persist(metric: &str) -> bool {
-            matches!(
-                metric,
-                "user.traffic.uplink"
-                    | "user.traffic.downlink"
-                    | "user.traffic.online"
-                    | "net.inbound.VlessTcpReality.uplink"
-                    | "net.inbound.VlessTcpReality.downlink"
-                    | "net.inbound.VlessXhttpReality.uplink"
-                    | "net.inbound.VlessXhttpReality.downlink"
-                    | "net.inbound.VlessGrpcReality.uplink"
-                    | "net.inbound.VlessGrpcReality.downlink"
-            )
+    fn should_persist(metric: &str) -> bool {
+        matches!(
+            metric,
+            "user.traffic.uplink"
+                | "user.traffic.downlink"
+                | "user.traffic.online"
+                | "net.inbound.VlessTcpReality.uplink"
+                | "net.inbound.VlessTcpReality.downlink"
+                | "net.inbound.VlessXhttpReality.uplink"
+                | "net.inbound.VlessXhttpReality.downlink"
+                | "net.inbound.VlessGrpcReality.uplink"
+                | "net.inbound.VlessGrpcReality.downlink"
+        )
+    }
+
+    fn restore_series(&self, series: MetricSeriesSnapshot) {
+        let hash = Self::make_series_key(&series.metric, &series.tags);
+
+        self.metadata
+            .insert(hash, (series.metric.clone(), series.tags.clone()));
+
+        for (k, v) in &series.tags {
+            self.tag_index
+                .entry(k.clone())
+                .or_default()
+                .entry(v.clone())
+                .or_default()
+                .insert(hash);
         }
 
-        let mut series = Vec::new();
+        let node = self.inner.entry(series.node_id).or_default();
+
+        let mut deque = VecDeque::new();
+
+        for p in series.points {
+            deque.push_back(p);
+        }
+
+        node.insert(hash, deque);
+    }
+
+    async fn save_part(base: &Path, idx: usize, series: Vec<MetricSeriesSnapshot>) -> Result<()> {
+        let snapshot = MetricStorageSnapshot { series };
+
+        let bytes = rkyv::to_bytes::<_, { 64 * 1024 * 1024 }>(&snapshot)?;
+
+        tracing::debug!(
+            "Saving snapshot part {} ({:.2} MB)",
+            idx,
+            bytes.len() as f64 / 1024.0 / 1024.0
+        );
+
+        let path = base.with_extension(format!("part{}", idx));
+
+        let tmp = path.with_extension("tmp");
+
+        tokio::fs::write(&tmp, bytes.as_slice()).await?;
+
+        tokio::fs::rename(tmp, path).await?;
+
+        Ok(())
+    }
+
+    pub async fn save_snapshot<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        self.perform_gc();
+
+        self.compact_old_points(3600, 60);
+
+        let base = path.as_ref();
+
+        // cleanup old parts
+        let mut cleanup_idx = 0usize;
+
+        loop {
+            let old_part = base.with_extension(format!("part{}", cleanup_idx));
+
+            if tokio::fs::metadata(&old_part).await.is_err() {
+                break;
+            }
+
+            let _ = tokio::fs::remove_file(&old_part).await;
+
+            cleanup_idx += 1;
+        }
+
+        let mut current_part = Vec::new();
+
+        let mut current_size = 0usize;
+
+        let mut part_idx = 0usize;
+
+        let mut total_series = 0usize;
+
+        let mut total_points = 0usize;
 
         for node in self.inner.iter() {
             let node_id = *node.key();
@@ -167,97 +253,99 @@ impl MetricStorage {
 
                 let (metric, tags) = meta.value();
 
-                if !should_persist(metric) {
+                if !Self::should_persist(metric) {
                     continue;
                 }
 
-                series.push(MetricSeriesSnapshot {
+                let points: Vec<_> = entry.value().iter().cloned().collect();
+
+                let estimated_size =
+                    points.len() * std::mem::size_of::<MetricPoint>() + metric.len() + 2048;
+
+                if current_size >= SNAPSHOT_PART_SIZE && !current_part.is_empty() {
+                    Self::save_part(base, part_idx, current_part).await?;
+
+                    current_part = Vec::new();
+
+                    current_size = 0;
+
+                    part_idx += 1;
+                }
+
+                total_points += points.len();
+
+                total_series += 1;
+
+                current_part.push(MetricSeriesSnapshot {
                     node_id,
                     metric: metric.clone(),
                     tags: tags.clone(),
-                    points: entry.value().iter().cloned().collect(),
+                    points,
                 });
+
+                current_size += estimated_size;
             }
         }
 
-        MetricStorageSnapshot { series }
-    }
+        if !current_part.is_empty() {
+            Self::save_part(base, part_idx, current_part).await?;
 
-    pub fn restore(snapshot: MetricStorageSnapshot, max_points: usize, retention_sec: i64) -> Self {
-        let storage = Self::new(max_points, retention_sec);
-
-        for series in snapshot.series {
-            let hash = Self::make_series_key(&series.metric, &series.tags);
-
-            storage
-                .metadata
-                .insert(hash, (series.metric.clone(), series.tags.clone()));
-
-            for (k, v) in &series.tags {
-                storage
-                    .tag_index
-                    .entry(k.clone())
-                    .or_default()
-                    .entry(v.clone())
-                    .or_default()
-                    .insert(hash);
-            }
-
-            let node = storage.inner.entry(series.node_id).or_default();
-
-            let mut deque = VecDeque::new();
-
-            for p in series.points {
-                deque.push_back(p);
-            }
-
-            node.insert(hash, deque);
+            part_idx += 1;
         }
 
-        storage
-    }
+        let meta = MetricStorageSnapshotMeta {
+            version: 1,
+            parts: part_idx,
+        };
 
-    pub async fn save_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
-        self.perform_gc();
-        self.compact_old_points(3600, 60);
+        let meta_bytes = rkyv::to_bytes::<_, { 1024 * 1024 }>(&meta)?;
 
-        let snapshot = self.snapshot();
-
-        let points: usize = snapshot.series.iter().map(|s| s.points.len()).sum();
+        tokio::fs::write(base.with_extension("meta"), meta_bytes.as_slice()).await?;
 
         tracing::debug!(
-            "Saved {} metric series ({} points)",
-            snapshot.series.len(),
-            points
+            "Saved {} series ({} points) in {} parts",
+            total_series,
+            total_points,
+            part_idx
         );
-
-        let bytes = rkyv::to_bytes::<_, { 8 * 1024 * 1024 }>(&snapshot)?;
-
-        tracing::debug!(
-            "Metric snapshot size: {:.2} MB",
-            bytes.len() as f64 / 1024.0 / 1024.0
-        );
-        let tmp = path.as_ref().with_extension("tmp");
-        tokio::fs::write(&tmp, bytes.as_slice()).await?;
-        tokio::fs::rename(tmp, path).await?;
-        let count = snapshot.series.len();
-        tracing::info!("Saved {} metric series", count);
 
         Ok(())
     }
 
-    pub async fn load_snapshot<P: AsRef<std::path::Path>>(
+    pub async fn load_snapshot<P: AsRef<Path>>(
         path: P,
         max_points: usize,
         retention_sec: i64,
     ) -> Result<Self> {
-        let bytes = tokio::fs::read(path).await?;
+        let base = path.as_ref();
 
-        let archived = unsafe { rkyv::archived_root::<MetricStorageSnapshot>(&bytes) };
-        let snapshot: MetricStorageSnapshot = archived.deserialize(&mut rkyv::Infallible)?;
-        let count = snapshot.series.len();
-        tracing::info!("Restoring {} metric series", count);
-        let storage = Self::restore(snapshot, max_points, retention_sec);
+        let meta_bytes = tokio::fs::read(base.with_extension("meta")).await?;
+
+        let archived_meta =
+            unsafe { rkyv::archived_root::<MetricStorageSnapshotMeta>(&meta_bytes) };
+
+        let meta: MetricStorageSnapshotMeta = archived_meta.deserialize(&mut rkyv::Infallible)?;
+
+        tracing::debug!("Loading metric snapshot ({} parts)", meta.parts);
+
+        let storage = Self::new(max_points, retention_sec);
+
+        for idx in 0..meta.parts {
+            let path = base.with_extension(format!("part{}", idx));
+
+            tracing::info!("Loading snapshot part {}", idx);
+
+            let bytes = tokio::fs::read(&path).await?;
+
+            let archived = unsafe { rkyv::archived_root::<MetricStorageSnapshot>(&bytes) };
+
+            let snapshot: MetricStorageSnapshot = archived.deserialize(&mut rkyv::Infallible)?;
+
+            for series in snapshot.series {
+                storage.restore_series(series);
+            }
+        }
+
         storage.perform_gc();
 
         Ok(storage)
