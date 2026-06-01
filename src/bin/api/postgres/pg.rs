@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::Client as PgClient;
@@ -7,8 +6,9 @@ use tokio_postgres::NoTls;
 use tracing::{debug, error, trace, warn};
 
 use fcore::{
-    Connection, ConnectionStorageApiOperations, Env, Node, NodeStorageOperations, Result, Status,
-    Subscription, SubscriptionStorageOperations,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, ConnectionStorageApiOperations,
+    Node, NodeStorageOperations, Result, Status, Subscription, SubscriptionOperations,
+    SubscriptionStorageOperations,
 };
 
 use super::{
@@ -78,6 +78,7 @@ pub struct PgContext {
 impl PgContext {
     pub async fn init(config: &PostgresConfig) -> Result<Self> {
         let manager = PgClientManager::new(config.clone()).await?;
+
         Ok(Self {
             manager: Arc::new(Mutex::new(manager)),
         })
@@ -108,12 +109,28 @@ pub trait Tasks {
 }
 
 #[async_trait::async_trait]
-impl Tasks for Cache<HashMap<Env, Vec<Node>>, Connection, Subscription> {
+impl<N, C, S> Tasks for Cache<N, C, S>
+where
+    N: NodeStorageOperations + Send + Sync + Clone + 'static,
+    C: ConnectionBaseOperations
+        + ConnectionApiOperations
+        + Send
+        + Sync
+        + Clone
+        + 'static
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static,
+    C: std::convert::From<fcore::Connection>,
+    N: std::default::Default,
+    S: PartialEq,
+    S: std::convert::From<fcore::Subscription>,
+    S: std::default::Default,
+{
     async fn add_conn(&mut self, db_conn: ConnRow) -> Result<Status> {
         let conn_id = db_conn.conn_id;
         let conn: Connection = db_conn.try_into()?;
 
-        self.connections.add(&conn_id, conn).map_err(|e| {
+        self.connections.add(&conn_id, conn.into()).map_err(|e| {
             format!(
                 "Create: Failed to add connection {} to state: {}",
                 conn_id, e
@@ -139,7 +156,7 @@ impl Tasks for Cache<HashMap<Env, Vec<Node>>, Connection, Subscription> {
         let id = db_sub.id;
         trace!("Processing subscription: {}", id);
 
-        let status = self.subscriptions.add(db_sub);
+        let status = self.subscriptions.add(db_sub.into());
 
         match &status {
             Status::Ok(_) => debug!("✓ Subscription {} stored", id),

@@ -2,6 +2,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use warp::http::{Response, StatusCode};
 
 use fcore::http::{
@@ -20,6 +21,7 @@ use fcore::{
 use super::super::super::sync::{tasks::SyncOp, MemSync};
 use super::super::{
     param::SubIdQueryParam,
+    request::EnvFilter,
     request::{FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
 
@@ -166,7 +168,7 @@ where
 pub async fn get_subscription_info_json<N, C, S>(
     subscription_id: uuid::Uuid,
     memory: MemSync<N, C, S>,
-    _metrics: std::sync::Arc<MetricStorage>,
+    metrics: std::sync::Arc<MetricStorage>,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -177,7 +179,6 @@ where
         + Send
         + Clone
         + 'static
-        + std::fmt::Debug
         + PartialEq,
 {
     let mem = memory.memory.read().await;
@@ -191,8 +192,10 @@ where
 
     let connections = mem.connections.get_by_subscription_id(&subscription_id);
     let mut locations = Vec::new();
-    let downlink: i64 = 0; // Placeholder
+    let (uplink, downlink) = metrics.get_subscription_total_traffic(&subscription_id);
 
+    let downlink_i64 = downlink as i64;
+    let uplink_i64 = uplink as i64;
     if let Some(conns) = connections.clone() {
         let active_envs: HashSet<Env> = conns
             .iter()
@@ -277,7 +280,8 @@ where
         ref_code: sub.refer_code(),
         invited_count: mem.subscriptions.count_invited_by(&sub.refer_code()),
         locations,
-        downlink,
+        downlink: downlink_i64,
+        uplink: uplink_i64,
         limit_bytes,
     };
 
@@ -287,8 +291,10 @@ where
 pub async fn subscription_link_handler<N, C, S>(
     req: SubscriptionInfoRequest,
     memory: MemSync<N, C, S>,
+    metrics: Arc<MetricStorage>,
     title: String,
-    limit: i64,
+    base_url: String,
+    support_contact: String,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -299,100 +305,164 @@ where
         + Clone
         + 'static
         + From<Connection>
-        + std::fmt::Debug
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
+    Vec<(uuid::Uuid, fcore::Connection)>: FromIterator<(uuid::Uuid, C)>,
 {
+    // -------------------------
+    // Validate request
+    // -------------------------
     if let Err(e) = req.validate() {
         return Ok(Box::new(http::bad_request(&format!("Bad Request: {}", e))));
-    };
+    }
 
     let mem = memory.memory.read().await;
 
-    let sub = if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
-        if !sub.is_active() {
+    // -------------------------
+    // Subscription lookup
+    // -------------------------
+    let sub = match mem.subscriptions.find_by_id(&req.id) {
+        Some(sub) if sub.is_active() => sub,
+        Some(_) => {
             return Ok(Box::new(http::not_found(&format!(
                 "Subscription {} is expired",
                 req.id
             ))));
         }
-
-        sub
-    } else {
-        return Ok(Box::new(http::not_found(&format!(
-            "Subscription {} not found",
-            req.id
-        ))));
+        None => {
+            return Ok(Box::new(http::not_found(&format!(
+                "Subscription {} not found",
+                req.id
+            ))));
+        }
     };
 
-    let conns = mem.connections.get_by_subscription_id(&req.id);
+    // -------------------------
+    // Prepare filters
+    // -------------------------
+    let proto_tags = req.proto.tags();
+    let env_filter = &req.env;
+
+    // -------------------------
+    // Pre-filter connections
+    // -------------------------
+    let conns: Vec<(uuid::Uuid, Connection)> = mem
+        .connections
+        .get_by_subscription_id(&req.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, conn)| {
+            if conn.get_deleted() {
+                return false;
+            }
+
+            match env_filter {
+                EnvFilter::All => true,
+                EnvFilter::Single(env) => conn.get_env() == *env,
+            }
+        })
+        .collect();
+
+    // -------------------------
+    // Build inbound list
+    // -------------------------
     let mut inbounds_list: Vec<(Inbound, uuid::Uuid, Connection, String, Ipv4Addr, String)> =
-        vec![];
+        Vec::new();
 
-    let tags = req.proto.tags();
+    match env_filter {
+        EnvFilter::All => {
+            for (conn_id, conn) in &conns {
+                let proto = conn.get_proto().proto();
+                let env = conn.get_env();
 
-    if let Some(conns) = conns {
-        for (conn_id, conn) in conns {
-            if conn.get_deleted() || conn.get_env() != req.env {
-                continue;
-            }
-            if !tags.contains(&conn.get_proto().proto()) {
-                continue;
-            }
+                if !proto_tags.contains(&proto) {
+                    continue;
+                }
 
-            if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
-                for node in nodes.iter() {
-                    let conn_converted: Connection = conn.clone().into();
+                let nodes = mem.nodes.get_by_env(&env).unwrap_or_default();
 
-                    let proto = conn.get_proto().proto();
+                for node in nodes {
                     if let Some(inbound) = node.inbounds.get(&proto) {
                         inbounds_list.push((
                             inbound.clone(),
-                            conn_id,
-                            conn_converted,
+                            *conn_id,
+                            conn.clone(),
                             node.hostname.clone(),
                             node.address,
                             node.label.clone(),
-                        ))
+                        ));
+                    }
+                }
+            }
+        }
+
+        EnvFilter::Single(env) => {
+            let nodes = mem.nodes.get_by_env(env).unwrap_or_default();
+
+            for (conn_id, conn) in &conns {
+                let proto = conn.get_proto().proto();
+
+                if !proto_tags.contains(&proto) {
+                    continue;
+                }
+
+                for node in &nodes {
+                    if let Some(inbound) = node.inbounds.get(&proto) {
+                        inbounds_list.push((
+                            inbound.clone(),
+                            *conn_id,
+                            conn.clone(),
+                            node.hostname.clone(),
+                            node.address,
+                            node.label.clone(),
+                        ));
                     }
                 }
             }
         }
     }
 
-    if inbounds_list.clone().is_empty() {
+    // -------------------------
+    // Empty check
+    // -------------------------
+    if inbounds_list.is_empty() {
         return Ok(Box::new(http::not_found(&format!(
             "Nodes for subscription {} not found",
             req.id
         ))));
     }
 
-    let expires_at = if let Some(exp) = sub.expires_at() {
-        exp.timestamp()
-    } else {
-        0
-    };
+    // -------------------------
+    // Subscription metadata
+    // -------------------------
+    let expires_at = sub.expires_at().map(|e| e.timestamp()).unwrap_or(0);
 
-    fn generate_meta(title: String, limit: i64, expires_at: i64) -> String {
-        format!(
-            "
-#profile-title: {}
-#profile-update-interval: 1
-#subscription-userinfo: upload={}; download={}; total={}; expire={}
+    let traffic = metrics.get_subscription_total_traffic(&req.id);
+    let limit = sub.limit_bytes();
 
-",
-            title,
-            0,     // Placeholder, should be grab from mtrics
-            0,     // Placeholder, should be grab from mtrics
-            limit, // Placeholder, should be set externally
-            expires_at
-        )
-    }
+    let sub_url = format!("{}/subscription?id={}", base_url, sub.id());
 
+    let meta = format!(
+        "#profile-title: {}\n\
+         #profile-update-interval: 1\n\
+         #subscription-userinfo: upload={}; download={}; total={}; expire={}\n\
+         #profile-web-page-url: {}\n\
+         #support-url: {}\n",
+        title,
+        traffic.0,
+        traffic.1,
+        limit.unwrap_or(0),
+        expires_at,
+        sub_url,
+        support_contact
+    );
+
+    // -------------------------
+    // Response generation
+    // -------------------------
     match req.format {
         FormatReq::Txt => {
-            let meta = generate_meta(title, limit, expires_at);
             let links: Result<Vec<_>, _> = inbounds_list
                 .iter()
                 .map(|(inbound, conn_id, conn, hostname, address, label)| {
@@ -401,23 +471,27 @@ where
                 .collect();
 
             let body = format!("{}{}", meta, links?.join("\n"));
+
             Ok(Box::new(warp::reply::with_status(
                 warp::reply::with_header(body, "Content-Type", "text/plain"),
                 StatusCode::OK,
             )))
         }
+
         FormatReq::Base64 => {
-            let meta = generate_meta(title, limit, expires_at);
             let links: Result<Vec<_>, _> = inbounds_list
                 .iter()
                 .map(|(inbound, conn_id, conn, hostname, address, label)| {
                     inbound.create_link(conn_id, conn, hostname, address, label)
                 })
                 .collect();
+
             let body = format!("{}{}", meta, links?.join("\n"));
-            let sub = base64::engine::general_purpose::STANDARD.encode(body);
+
+            let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+
             Ok(Box::new(warp::reply::with_status(
-                warp::reply::with_header(format!("{}\n", sub), "Content-Type", "text/base64"),
+                warp::reply::with_header(encoded, "Content-Type", "text/base64"),
                 StatusCode::OK,
             )))
         }

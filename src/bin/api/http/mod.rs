@@ -14,7 +14,9 @@ struct JsonError(String);
 impl reject::Reject for JsonError {}
 
 pub async fn rejection(reject: Rejection) -> Result<impl Reply, Rejection> {
+    tracing::debug!("[REJECTION] Request rejected: {:?}", reject);
     if reject.find::<MethodError>().is_some() {
+        tracing::debug!("[REJECTION] Reason: Method Not Allowed");
         let error_response = warp::reply::json(&serde_json::json!({
             "error": "Method Not Allowed"
         }));
@@ -23,6 +25,7 @@ pub async fn rejection(reject: Rejection) -> Result<impl Reply, Rejection> {
             StatusCode::METHOD_NOT_ALLOWED,
         ))
     } else if reject.find::<AuthError>().is_some() {
+        tracing::debug!("[REJECTION] Reason UNAUTHORIZED");
         let error_response = warp::reply::json(&serde_json::json!({
             "error": "UNAUTHORIZED"
         }));
@@ -31,6 +34,8 @@ pub async fn rejection(reject: Rejection) -> Result<impl Reply, Rejection> {
             StatusCode::UNAUTHORIZED,
         ))
     } else if let Some(err) = reject.find::<JsonError>() {
+        tracing::debug!("[REJECTION] Reason BAD_REQUEST");
+
         let error_response = warp::reply::json(&serde_json::json!({
             "error": err.0
         }));
@@ -39,6 +44,7 @@ pub async fn rejection(reject: Rejection) -> Result<impl Reply, Rejection> {
             StatusCode::BAD_REQUEST,
         ))
     } else if reject.is_not_found() {
+        tracing::debug!("[REJECTION] Reason Not_Found");
         let error_response = warp::reply::json(&serde_json::json!({
             "error": "Not Found"
         }));

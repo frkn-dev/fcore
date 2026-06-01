@@ -24,6 +24,9 @@ pub trait Operations {
     fn get_password(&self) -> Option<String>;
     fn get_token(&self) -> Option<uuid::Uuid>;
     fn set_password(&mut self, password: Option<String>) -> Result<()>;
+
+    fn get_subscription_id(&self) -> Option<uuid::Uuid>;
+    fn set_subscription_id(&mut self, subscription_id: &uuid::Uuid);
 }
 
 impl Operations for Base {
@@ -88,6 +91,13 @@ impl Operations for Base {
             )),
         }
     }
+
+    fn get_subscription_id(&self) -> Option<uuid::Uuid> {
+        self.subscription_id
+    }
+    fn set_subscription_id(&mut self, subscription_id: &uuid::Uuid) {
+        self.subscription_id = Some(*subscription_id);
+    }
 }
 
 impl Operations for Conn {
@@ -150,5 +160,12 @@ impl Operations for Conn {
             Proto::Hysteria2 { token } => Some(*token),
             _ => None,
         }
+    }
+
+    fn get_subscription_id(&self) -> Option<uuid::Uuid> {
+        self.subscription_id
+    }
+    fn set_subscription_id(&mut self, subscription_id: &uuid::Uuid) {
+        self.subscription_id = Some(*subscription_id);
     }
 }

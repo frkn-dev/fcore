@@ -1,6 +1,6 @@
 [package]
 name = "fcore"
-version = "0.5.6-dev"
+version = "0.5.9-dev"
 edition = "2021"
 build = "build.rs"
 
@@ -42,6 +42,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = { version="0.7", features=["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"]}
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 postgres-types = { version = "0.2", features = ["derive"]}
 url = "2"

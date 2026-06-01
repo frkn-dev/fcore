@@ -3,8 +3,8 @@ use tonic::{Code, Request, Status};
 use fcore::proto::xray::api::app::stats::command::{GetStatsRequest, GetStatsResponse};
 
 use fcore::{
-    ConnectionBaseOperations, ConnectionStat, InboundStat, Prefix, Stat, StatKind, StatsOp, Tag,
-    XrayConnOperation,
+    ConnectionBaseOperations, ConnectionStat, InboundStat, Prefix, StatKind, StatType, StatsOp,
+    Tag, XrayConnOperation,
 };
 
 use super::node::Node;
@@ -17,7 +17,7 @@ where
     async fn stat(
         &self,
         prefix: Prefix,
-        stat_type: Stat,
+        stat_type: StatType,
         reset: bool,
     ) -> Result<GetStatsResponse, Status> {
         if let Some(client) = &self.stats_client {
@@ -29,13 +29,13 @@ where
             };
 
             let stat_name = match &stat_type {
-                Stat::Conn(StatKind::Downlink)
-                | Stat::Conn(StatKind::Uplink)
-                | Stat::Inbound(StatKind::Downlink)
-                | Stat::Inbound(StatKind::Uplink) => {
+                StatType::Conn(StatKind::Downlink)
+                | StatType::Conn(StatKind::Uplink)
+                | StatType::Inbound(StatKind::Downlink)
+                | StatType::Inbound(StatKind::Uplink) => {
                     format!("{}>>>traffic>>>{}", base_name, stat_type)
                 }
-                Stat::Conn(StatKind::Online) => {
+                StatType::Conn(StatKind::Online) => {
                     format!("{}>>>{}", base_name, stat_type)
                 }
                 _ => return Err(Status::internal("Unsupported stat type")),
@@ -47,7 +47,9 @@ where
             });
 
             let response = match stat_type {
-                Stat::Conn(StatKind::Online) => stats_client.client.get_stats_online(request).await,
+                StatType::Conn(StatKind::Online) => {
+                    stats_client.client.get_stats_online(request).await
+                }
                 _ => stats_client.client.get_stats(request).await,
             };
 
@@ -66,18 +68,18 @@ where
     async fn reset(&self, conn_id: &uuid::Uuid) -> Result<(), Status> {
         let id = Prefix::ConnPrefix(*conn_id);
         let _ = tokio::join!(
-            self.stat(id, Stat::Conn(StatKind::Downlink), true),
-            self.stat(id, Stat::Conn(StatKind::Uplink), true),
-            self.stat(id, Stat::Conn(StatKind::Online), true)
+            self.stat(id, StatType::Conn(StatKind::Downlink), true),
+            self.stat(id, StatType::Conn(StatKind::Uplink), true),
+            self.stat(id, StatType::Conn(StatKind::Online), true)
         );
         Ok(())
     }
 
     async fn conn(&self, conn_id: Prefix) -> Result<ConnectionStat, Status> {
         let (down_res, up_res, online_res) = tokio::join!(
-            self.stat(conn_id, Stat::Conn(StatKind::Downlink), false),
-            self.stat(conn_id, Stat::Conn(StatKind::Uplink), false),
-            self.stat(conn_id, Stat::Conn(StatKind::Online), false)
+            self.stat(conn_id, StatType::Conn(StatKind::Downlink), false),
+            self.stat(conn_id, StatType::Conn(StatKind::Uplink), false),
+            self.stat(conn_id, StatType::Conn(StatKind::Online), false)
         );
 
         if let Err(e) = &down_res {
@@ -111,8 +113,8 @@ where
 
     async fn inbound(&self, inbound: Prefix) -> Result<InboundStat, Status> {
         let (down, up, count) = tokio::join!(
-            self.stat(inbound, Stat::Inbound(StatKind::Downlink), false),
-            self.stat(inbound, Stat::Inbound(StatKind::Uplink), false),
+            self.stat(inbound, StatType::Inbound(StatKind::Downlink), false),
+            self.stat(inbound, StatType::Inbound(StatKind::Uplink), false),
             self.conn_count(*inbound.as_tag().unwrap())
         );
 

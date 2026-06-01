@@ -61,20 +61,26 @@ impl FromStr for Status {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Copy, ToSql, FromSql, PartialEq)]
-#[postgres(name = "node_type", rename_all = "snake_case")]
-#[serde(rename_all = "lowercase")]
+#[postgres(name = "node_type")]
 pub enum Type {
-    Common,
-    Premium,
+    #[postgres(name = "common")]
+    Node,
+
+    #[postgres(name = "premium")]
+    PremiumNode,
+
+    #[postgres(name = "service")]
     Service,
+
+    #[postgres(name = "agent")]
     Agent,
 }
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Common => write!(f, "Common"),
-            Type::Premium => write!(f, "Premium"),
+            Type::Node => write!(f, "Node"),
+            Type::PremiumNode => write!(f, "PremiumNode"),
             Type::Service => write!(f, "Service"),
             Type::Agent => write!(f, "Agent"),
         }
@@ -85,12 +91,11 @@ impl FromStr for Type {
     type Err = ();
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
-            "Common" => Ok(Type::Common),
-            "Premium" => Ok(Type::Premium),
-            "Service" => Ok(Type::Service),
-            "Agent" => Ok(Type::Agent),
-            _ => Ok(Type::Common),
+        match input.to_lowercase().as_str() {
+            "agent" | "common" | "node" => Ok(Type::Node),
+            "premium" | "premiumnode" | "premium_node" => Ok(Type::PremiumNode),
+            "service" => Ok(Type::Service),
+            _ => Err(()),
         }
     }
 }
@@ -117,6 +122,12 @@ pub struct NodeMetricInfo {
     pub key: String,
     pub name: String,
     pub tags: BTreeMap<String, String>,
+}
+
+pub struct InboundStat {
+    pub downlink: i64,
+    pub uplink: i64,
+    pub conn_count: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -168,9 +179,6 @@ impl Node {
                         port: config.port,
                         tag: Tag::Wireguard,
                         stream_settings: None,
-                        uplink: None,
-                        downlink: None,
-                        conn_count: None,
                         wg: wg_config,
                         h2: None,
                         mtproto_secret: None,
@@ -185,9 +193,6 @@ impl Node {
                         port: config.port,
                         tag: Tag::Mtproto,
                         stream_settings: None,
-                        uplink: None,
-                        downlink: None,
-                        conn_count: None,
                         wg: None,
                         h2: None,
                         mtproto_secret: Some(config.secret[0].key.clone()),
@@ -202,9 +207,6 @@ impl Node {
                         port: config.port,
                         tag: Tag::Hysteria2,
                         stream_settings: None,
-                        uplink: None,
-                        downlink: None,
-                        conn_count: None,
                         wg: None,
                         h2: h2_config,
                         mtproto_secret: None,
@@ -272,40 +274,7 @@ impl Node {
         Ok(())
     }
 
-    pub fn update_uplink(&mut self, tag: &Tag, new_uplink: i64) -> Result<(), String> {
-        if let Some(inbound) = self.inbounds.get_mut(tag) {
-            inbound.update_uplink(new_uplink);
-            Ok(())
-        } else {
-            Err(format!("Inbound {}  not found", tag))
-        }
-    }
-
-    pub fn update_downlink(&mut self, tag: &Tag, new_downlink: i64) -> Result<(), String> {
-        if let Some(inbound) = self.inbounds.get_mut(tag) {
-            inbound.update_downlink(new_downlink);
-            Ok(())
-        } else {
-            Err(format!("Inbound {}  not found", tag))
-        }
-    }
-
-    pub fn update_conn_count(&mut self, tag: &Tag, conn_count: i64) -> Result<(), String> {
-        if let Some(inbound) = self.inbounds.get_mut(tag) {
-            inbound.update_conn_count(conn_count);
-            Ok(())
-        } else {
-            Err(format!("Inbound {}  not found", tag))
-        }
-    }
-
     pub fn inbound(&self, tag: Tag) -> Option<&Inbound> {
         self.inbounds.values().find(|i| i.tag == tag)
     }
-}
-
-pub struct Stat {
-    pub downlink: i64,
-    pub uplink: i64,
-    pub conn_count: i64,
 }

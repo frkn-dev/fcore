@@ -12,7 +12,6 @@ use crate::utils::get_uuid_last_octet_simple;
 
 use crate::config::h2::H2Settings;
 use crate::config::wireguard::WireguardSettings;
-use crate::memory::node::Stat as InboundStat;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -84,9 +83,6 @@ pub struct Inbound {
     pub port: u16,
     #[serde(rename = "streamSettings")]
     pub stream_settings: Option<StreamSettings>,
-    pub uplink: Option<i64>,
-    pub downlink: Option<i64>,
-    pub conn_count: Option<i64>,
     pub wg: Option<WireguardSettings>,
     pub h2: Option<H2Settings>,
     pub mtproto_secret: Option<String>,
@@ -102,25 +98,6 @@ impl Inbound {
             h2: self.h2.clone(),
             mtproto_secret: self.mtproto_secret.clone(),
         }
-    }
-
-    pub fn as_inbound_stat(&self) -> InboundStat {
-        InboundStat {
-            uplink: self.uplink.unwrap_or(0),
-            downlink: self.downlink.unwrap_or(0),
-            conn_count: self.conn_count.unwrap_or(0),
-        }
-    }
-
-    pub fn update_uplink(&mut self, new_uplink: i64) {
-        self.uplink = Some(new_uplink);
-    }
-
-    pub fn update_downlink(&mut self, new_downlink: i64) {
-        self.downlink = Some(new_downlink);
-    }
-    pub fn update_conn_count(&mut self, new_conn_count: i64) {
-        self.conn_count = Some(new_conn_count);
     }
 }
 

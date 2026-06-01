@@ -4,8 +4,7 @@ use std::collections::HashMap;
 use super::super::env::Env;
 use super::super::node::Node;
 use super::super::storage::Status as OperationStatus;
-use super::super::tag::ProtoTag as Tag;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 pub trait Operations {
     fn clear(&mut self) -> Result<()>;
@@ -18,27 +17,6 @@ pub trait Operations {
     fn get_by_id(&self, id: &uuid::Uuid) -> Option<Node>;
     fn get(&self, env: &Env, uuid: &uuid::Uuid) -> Option<&Node>;
     fn get_mut(&mut self, env: &Env, uuid: &uuid::Uuid) -> Option<&mut Node>;
-    fn update_node_uplink(
-        &mut self,
-        tag: &Tag,
-        new_uplink: i64,
-        env: &Env,
-        node_id: &uuid::Uuid,
-    ) -> Result<()>;
-    fn update_node_downlink(
-        &mut self,
-        tag: &Tag,
-        new_uplink: i64,
-        env: &Env,
-        node_id: &uuid::Uuid,
-    ) -> Result<()>;
-    fn update_node_conn_count(
-        &mut self,
-        tag: &Tag,
-        node_count: i64,
-        env: &Env,
-        node_id: &uuid::Uuid,
-    ) -> Result<()>;
 }
 
 impl Operations for HashMap<Env, Vec<Node>> {
@@ -106,58 +84,5 @@ impl Operations for HashMap<Env, Vec<Node>> {
     fn all_json(&self) -> serde_json::Value {
         let nodes: Vec<&Node> = self.values().flat_map(|v| v.iter()).collect();
         serde_json::to_value(&nodes).unwrap_or_else(|_| json!([]))
-    }
-    fn update_node_uplink(
-        &mut self,
-        tag: &Tag,
-        new_uplink: i64,
-        env: &Env,
-        node_id: &uuid::Uuid,
-    ) -> Result<()> {
-        if let Some(nodes) = self.get_mut(env) {
-            if let Some(node) = nodes.iter_mut().find(|n| n.uuid == *node_id) {
-                node.update_uplink(tag, new_uplink)?;
-                return Ok(());
-            }
-        }
-        Err(Error::Custom(format!(
-            "Node not found in env {} with id {}",
-            env, node_id
-        )))
-    }
-    fn update_node_downlink(
-        &mut self,
-        tag: &Tag,
-        new_downlink: i64,
-        env: &Env,
-        node_id: &uuid::Uuid,
-    ) -> Result<()> {
-        if let Some(nodes) = self.get_mut(env) {
-            if let Some(node) = nodes.iter_mut().find(|n| n.uuid == *node_id) {
-                node.update_downlink(tag, new_downlink)?;
-                return Ok(());
-            }
-        }
-        Err(Error::Custom(format!(
-            "Node not found in env {} with id {}",
-            env, node_id
-        )))
-    }
-    fn update_node_conn_count(
-        &mut self,
-        tag: &Tag,
-        conn_count: i64,
-        env: &Env,
-        node_id: &uuid::Uuid,
-    ) -> Result<()> {
-        if let Some(nodes) = self.get_mut(env) {
-            if let Some(node) = nodes.iter_mut().find(|n| n.uuid == *node_id) {
-                node.update_conn_count(tag, conn_count)?;
-                return Ok(());
-            } else {
-                return Err(Error::Custom(format!("Node with ID {} not found", node_id)));
-            }
-        }
-        Err(Error::Custom(format!("Environment '{}' not found", env)))
     }
 }

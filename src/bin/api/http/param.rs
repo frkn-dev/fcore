@@ -12,10 +12,6 @@ pub struct SubIdQueryParam {
 pub struct NodesQueryParams {
     pub env: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct NodeIdParam {
-    pub id: uuid::Uuid,
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ConnQueryParam {

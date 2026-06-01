@@ -1,43 +1,10 @@
 
+
 requests.get('http://localhost:3000/healthcheck')
 requests.get('http://localhost:3000/nodes')
+requests.get('http://localhost:3000/node/ab514c21-aaaa-bbbb-91f7-32f8cb1ada40')
 
+requests.post('http://localhost:3000/subscription', headers={'Authorization':'Bearer supetsecrettoken','Content-Type':'application/json'},json={'days':10})
 
-requests.post(
-    'http://localhost:5005/subscription',
-    headers={
-        'Authorization': 'Bearer supetsecrettoken',
-        'Content-Type': 'application/json'
-    },
-    json={
-        "env": "experimental",
-        "days": 10
-    }
-)
+requests.post('http://localhost:3000/connection', headers={'Authorization': 'Bearer supetsecrettoken', 'Content-Type': 'application/json' },json={"env": "experimental","proto": "VlessTcpReality","subscription_id": "525832b0-9886-4df3-8f10-0c1abb2cf99b"})
 
-
-requests.post(
-    'http://localhost:3000/connection',
-    headers={
-        'Authorization': 'Bearer supetsecrettoken',
-        'Content-Type': 'application/json'
-    },
-    json={
-        "env": "dev",
-        "proto": "Hysteria2",
-        "subscription_id": "ac01dba1-1190-4cc6-905b-f4a35f82cfee"
-    }
-)
-
-requests.post(
-    'http://localhost:3000/connection',
-    headers={
-        'Authorization': 'Bearer supetsecrettoken',
-        'Content-Type': 'application/json'
-    },
-    json={
-        "env": "premium12345",
-        "proto": "VlessTcpReality",
-        "subscription_id": "ac01dba1-1190-4cc6-905b-f4a35f82cfee"
-    }
-)

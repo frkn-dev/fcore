@@ -433,49 +433,30 @@ where
             uuid, env, status
         );
 
-        // Get current node
-        let current_node = {
-            let memory = self.memory.read().await;
-            memory.nodes.get(env, uuid).cloned()
-        };
-
-        let node = match current_node {
-            Some(n) => n,
-            None => {
-                debug!("Node {} not found in env {}", uuid, env);
-                return Ok(());
-            }
-        };
-
-        // Check if status actually changed
-        if node.status == status {
-            debug!("Node {} status unchanged", uuid);
-            return Ok(());
-        }
-
-        // Update database first
-        if let Err(e) = self
-            .db
-            .node()
-            .update_status(uuid, &env.to_string(), status)
-            .await
-        {
-            error!("Failed to update node {} status in database: {}", uuid, e);
+        // -------------------------
+        // 1. DB update FIRST (source of truth)
+        // -------------------------
+        if let Err(e) = self.db.node().update_status(uuid, status).await {
+            error!("Failed DB update for node {}: {}", uuid, e);
             return Err(SyncError::Database(e));
         }
 
-        // Update memory
+        // -------------------------
+        // 2. Memory update AFTER DB
+        // -------------------------
         {
-            let mut memory = self.memory.write().await;
-            if let Some(node_mut) = memory.nodes.get_mut(env, uuid) {
-                if let Err(e) = node_mut.update_status(status) {
-                    error!("Failed to update node {} status in memory: {}", uuid, e);
-                    return Err(SyncError::Memory(e.to_string()));
-                }
+            let memory = self.memory.write().await;
+
+            // IMPORTANT: DO NOT rely on env here
+            if let Some(mut node) = memory.nodes.get_by_id(uuid) {
+                node.status = status;
+            } else {
+                debug!("Node {} not found in memory (will be synced later)", uuid);
             }
         }
 
-        debug!("Successfully updated node {} status", uuid);
+        debug!("Successfully updated node {} status to {:?}", uuid, status);
+
         Ok(())
     }
 

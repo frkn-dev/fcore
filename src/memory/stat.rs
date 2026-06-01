@@ -1,30 +1,28 @@
 use std::fmt;
 
 #[derive(Debug, Clone)]
-pub enum Stat {
+pub enum StatType {
     Conn(Kind),
     Inbound(Kind),
     Outbound(Kind),
 }
 
-impl fmt::Display for Stat {
+impl fmt::Display for StatType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Stat::Conn(Kind::Uplink) => write!(f, "uplink"),
-            Stat::Conn(Kind::Downlink) => write!(f, "downlink"),
-            Stat::Conn(Kind::Online) => write!(f, "online"),
-            Stat::Inbound(Kind::Uplink) => write!(f, "uplink"),
-            Stat::Inbound(Kind::Downlink) => write!(f, "downlink"),
-            // COMMENT(qezz): The "not implemented" cases hint that
-            // this state should not be representable.
-            Stat::Inbound(Kind::Online) => write!(f, "Not implemented"),
-            Stat::Outbound(Kind::Uplink) => write!(f, "uplink"),
-            Stat::Outbound(Kind::Downlink) => write!(f, "downlink"),
-            Stat::Outbound(Kind::Online) => write!(f, "Not implemented"),
+            StatType::Conn(Kind::Uplink) => write!(f, "uplink"),
+            StatType::Conn(Kind::Downlink) => write!(f, "downlink"),
+            StatType::Conn(Kind::Online) => write!(f, "online"),
+            StatType::Inbound(Kind::Uplink) => write!(f, "uplink"),
+            StatType::Inbound(Kind::Downlink) => write!(f, "downlink"),
+            StatType::Inbound(Kind::Online) => write!(f, "Not implemented"),
+            StatType::Outbound(Kind::Uplink) => write!(f, "uplink"),
+            StatType::Outbound(Kind::Downlink) => write!(f, "downlink"),
+            StatType::Outbound(Kind::Online) => write!(f, "Not implemented"),
 
-            Stat::Conn(Kind::Unknown)
-            | Stat::Inbound(Kind::Unknown)
-            | Stat::Outbound(Kind::Unknown) => write!(f, "unknown"),
+            StatType::Conn(Kind::Unknown)
+            | StatType::Inbound(Kind::Unknown)
+            | StatType::Outbound(Kind::Unknown) => write!(f, "unknown"),
         }
     }
 }

@@ -43,6 +43,7 @@ pub struct SubscriptionResponse {
     pub invited_count: usize,
     pub locations: Vec<EnvInfo>,
     pub downlink: i64,
+    pub uplink: i64,
     pub limit_bytes: i64,
 }
 

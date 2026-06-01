@@ -2,6 +2,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::str::FromStr;
 
 use std::collections::HashSet;
 
@@ -12,8 +13,26 @@ pub enum TagReq {
     #[serde(alias = "xray", alias = "Xray")]
     Xray,
 
+    #[serde(
+        alias = "allproxy",
+        alias = "Allproxy",
+        alias = "AllProxy",
+        alias = "proxy",
+        alias = "Proxy"
+    )]
+    Proxy,
+
     #[serde(alias = "wireguard", alias = "Wireguard")]
     Wireguard,
+
+    #[serde(alias = "VlessTcpReality")]
+    VlessTcpReality,
+
+    #[serde(alias = "VlessGrpcReality")]
+    VlessGrpcReality,
+
+    #[serde(alias = "VlessXhttpReality")]
+    VlessXhttpReality,
 
     #[serde(alias = "hysteria2", alias = "Hysteria2")]
     Hysteria2,
@@ -44,8 +63,19 @@ impl TagReq {
                 Tag::Vmess,
                 Tag::Shadowsocks,
             ],
+            TagReq::Proxy => vec![
+                Tag::VlessTcpReality,
+                Tag::VlessGrpcReality,
+                Tag::VlessXhttpReality,
+                Tag::Vmess,
+                Tag::Shadowsocks,
+                Tag::Hysteria2,
+            ],
             TagReq::Wireguard => vec![Tag::Wireguard],
             TagReq::Hysteria2 => vec![Tag::Hysteria2],
+            TagReq::VlessTcpReality => vec![Tag::VlessTcpReality],
+            TagReq::VlessGrpcReality => vec![Tag::VlessGrpcReality],
+            TagReq::VlessXhttpReality => vec![Tag::VlessXhttpReality],
             TagReq::Mtproto => vec![Tag::Mtproto],
         }
     }
@@ -81,7 +111,7 @@ impl NodeRequest {
         let t = if let Some(t) = self.r#type {
             t
         } else {
-            NodeType::Common
+            NodeType::Node
         };
         Node {
             uuid: self.uuid,
@@ -128,11 +158,34 @@ pub struct ActivateKeyReq {
     pub subscription_id: uuid::Uuid,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnvFilter {
+    Single(Env),
+    All,
+}
+
+impl<'de> Deserialize<'de> for EnvFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?.to_lowercase();
+
+        match s.as_str() {
+            "all" => Ok(EnvFilter::All),
+            _ => {
+                let env = Env::from_str(&s).map_err(serde::de::Error::custom)?;
+                Ok(EnvFilter::Single(env))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SubscriptionInfoRequest {
     pub id: uuid::Uuid,
     pub format: FormatReq,
-    pub env: Env,
+    pub env: EnvFilter,
     pub proto: TagReq,
 }
 
@@ -143,8 +196,12 @@ impl SubscriptionInfoRequest {
 
         match proto {
             Xray => [Txt, Base64, Clash].into(),
+            Proxy => [Txt, Base64].into(),
             Wireguard => [].into(),
             Hysteria2 => [Txt, Base64].into(),
+            VlessTcpReality => [Txt, Base64, Clash].into(),
+            VlessGrpcReality => [Txt, Base64, Clash].into(),
+            VlessXhttpReality => [Txt, Base64, Clash].into(),
             Mtproto => [].into(),
         }
     }

@@ -82,16 +82,24 @@ where
 
         let active_conns = {
             let mem = self.memory.read().await;
-            mem.keys().cloned().collect::<Vec<_>>()
+
+            mem.iter()
+                .map(|(id, conn)| (*id, conn.get_subscription_id(), conn.get_proto().proto()))
+                .collect::<Vec<_>>()
         };
 
-        for conn_id in active_conns {
+        for (conn_id, subscription_id, proto) in active_conns {
             let res = self.conn(Prefix::ConnPrefix(conn_id)).await;
             match res {
                 Ok(stats) => {
                     tracing::debug!("Successfully fetched stats for {}", conn_id);
                     let mut metric_tags = base_tags.clone();
                     metric_tags.insert("conn_id".to_string(), conn_id.to_string());
+                    metric_tags.insert("proto".to_string(), proto.to_string());
+                    if let Some(subscription_id) = subscription_id {
+                        metric_tags
+                            .insert("subscription_id".to_string(), subscription_id.to_string());
+                    }
 
                     self.metrics.push(
                         node_uuid,
@@ -128,17 +136,23 @@ where
         let wg_conns = {
             let mem = self.memory.read().await;
             mem.iter()
-                .filter_map(|(id, conn)| conn.get_wireguard().map(|wg| (*id, wg.keys.pubkey())))
+                .filter_map(|(id, conn)| {
+                    conn.get_wireguard()
+                        .map(|wg| (*id, conn.get_subscription_id(), wg.keys.pubkey()))
+                })
                 .collect::<Vec<_>>()
         };
 
-        for (conn_id, pubkey) in wg_conns {
+        for (conn_id, subscription_id, pubkey) in wg_conns {
             if let Ok(pubkey) = pubkey {
                 if let Ok((uplink, downlink)) = wg_client.peer_stats(&pubkey) {
                     let mut metric_tags = base_tags.clone();
-                    metric_tags.insert("user_id".to_string(), conn_id.to_string());
+                    metric_tags.insert("conn_id".to_string(), conn_id.to_string());
                     metric_tags.insert("proto".to_string(), "wireguard".to_string());
-
+                    if let Some(subscription_id) = subscription_id {
+                        metric_tags
+                            .insert("subscription_id".to_string(), subscription_id.to_string());
+                    }
                     self.metrics.push(
                         node_uuid,
                         "user.traffic.downlink",
