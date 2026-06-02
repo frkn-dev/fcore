@@ -5,8 +5,8 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use defguard_wireguard_rs::host::Peer;
 use defguard_wireguard_rs::key::Key;
+use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::WGApi;
 use defguard_wireguard_rs::WireguardInterfaceApi;
 
@@ -66,7 +66,7 @@ impl WgApi {
 
     pub fn create(&self, pubkey: &str, ip: IpAddrMask) -> Result<()> {
         let ip = defguard_wireguard_rs::net::IpAddrMask {
-            ip: ip.address,
+            address: ip.address,
             cidr: ip.cidr,
         };
         let key = Self::decode_pubkey(pubkey)?;
@@ -85,7 +85,7 @@ impl WgApi {
             .flat_map(|peer| &peer.allowed_ips)
             .filter_map(|ip_mask| match ip_mask {
                 defguard_wireguard_rs::net::IpAddrMask {
-                    ip: IpAddr::V4(addr),
+                    address: IpAddr::V4(addr),
                     cidr: 32,
                 } => Some(*addr),
                 _ => None,
@@ -128,7 +128,7 @@ impl WgApi {
             .flat_map(|peer| &peer.allowed_ips)
             .filter_map(|ip_mask| match ip_mask {
                 defguard_wireguard_rs::net::IpAddrMask {
-                    ip: IpAddr::V4(addr),
+                    address: IpAddr::V4(addr),
                     cidr: 32,
                 } => Some(u32::from_be_bytes(addr.octets())),
                 _ => None,

@@ -28,9 +28,12 @@ pub const BANNER: &str = r#"
 //                            |_|                |___/
 "#;
 
-pub const VERSION: &str = "0.5.9-dev";
+pub const VERSION: &str = "0.5.10-dev";
 
 pub use config::{
+    amnezia_wg::{
+        AmneziaWgServerConfig, AmneziaWgSettings, AwgInterfaceConfig, AwgObfuscationParams,
+    },
     clash::InboundClashConfig,
     h2::{H2Settings, Hysteria2Settings},
     inbound::{Inbound, InboundConnLink, Settings as XraySettings},
@@ -73,6 +76,8 @@ pub use metrics::{
     storage::{HasMetrics, MetricBuffer, MetricStorage},
     MetricEnvelope, Metrics,
 };
+#[cfg(feature = "amnezia-wg")]
+pub use proto::amnezia_wg::AwgInterface;
 #[cfg(feature = "wireguard")]
 pub use proto::wireguard::WgApi;
 #[cfg(feature = "xray")]

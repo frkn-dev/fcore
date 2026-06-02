@@ -12,14 +12,19 @@ use serde::{Deserialize, Serialize};
 
 use super::env::Env;
 use super::tag::ProtoTag as Tag;
+
 use crate::config::h2::H2Settings;
 
 #[cfg(feature = "xray")]
 use crate::config::inbound::Settings as XraySettings;
 
+#[cfg(feature = "amnezia-wg")]
+use crate::config::amnezia_wg::AmneziaWgSettings;
+
 use crate::config::inbound::Inbound;
 use crate::config::mtproto::MtprotoSettings;
 use crate::config::settings::NodeConfig;
+
 #[cfg(feature = "wireguard")]
 use crate::config::wireguard::WireguardSettings;
 
@@ -153,6 +158,7 @@ impl Node {
         settings: NodeConfig,
         #[cfg(feature = "xray")] xray_config: Option<XraySettings>,
         #[cfg(feature = "wireguard")] wg_config: Option<WireguardSettings>,
+        #[cfg(feature = "amnezia-wg")] awg_config: Option<AmneziaWgSettings>,
         h2_config: Option<H2Settings>,
         mtproto_config: Option<MtprotoSettings>,
     ) -> Self {
@@ -179,7 +185,24 @@ impl Node {
                         port: config.port,
                         tag: Tag::Wireguard,
                         stream_settings: None,
+                        awg: None,
                         wg: wg_config,
+                        h2: None,
+                        mtproto_secret: None,
+                    },
+                );
+            }
+
+            #[cfg(feature = "amnezia-wg")]
+            if let Some(ref config) = awg_config {
+                inbounds.insert(
+                    Tag::AmneziaWg,
+                    Inbound {
+                        port: config.interface.listen_port,
+                        tag: Tag::AmneziaWg,
+                        stream_settings: None,
+                        awg: awg_config,
+                        wg: None,
                         h2: None,
                         mtproto_secret: None,
                     },
@@ -194,6 +217,7 @@ impl Node {
                         tag: Tag::Mtproto,
                         stream_settings: None,
                         wg: None,
+                        awg: None,
                         h2: None,
                         mtproto_secret: Some(config.secret[0].key.clone()),
                     },
@@ -208,6 +232,7 @@ impl Node {
                         tag: Tag::Hysteria2,
                         stream_settings: None,
                         wg: None,
+                        awg: None,
                         h2: h2_config,
                         mtproto_secret: None,
                     },

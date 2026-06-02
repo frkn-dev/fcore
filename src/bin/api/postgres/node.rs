@@ -9,7 +9,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, warn};
 
 use fcore::{
-    H2Settings, Inbound, IpAddrMask, Node, NodeStatus, NodeType, Result, WgKeys, WireguardSettings,
+    AmneziaWgSettings, AwgInterfaceConfig, AwgObfuscationParams, H2Settings, Inbound, IpAddrMask,
+    Node, NodeStatus, NodeType, Result, WgKeys, WireguardSettings,
 };
 
 use super::pg::PgClientManager;
@@ -77,12 +78,14 @@ impl PgNode {
         let inbound_query = "
         INSERT INTO inbounds (
             id, node_id, tag, port, stream_settings,
-            wg_privkey, wg_interface, wg_address, dns, h2, mtproto_secret
+            wg_privkey, wg_interface, wg_address, dns, h2, mtproto_secret,
+            awg_privkey, awg_interface, awg_address, awg_dns, awg_obfuscation
         )
         VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8,
-            $9, $10, $11
+            $9, $10, $11,
+            $12, $13, $14, $15, $16
         )
         ON CONFLICT (node_id, tag) DO UPDATE SET
             port = EXCLUDED.port,
@@ -92,7 +95,12 @@ impl PgNode {
             wg_address = EXCLUDED.wg_address,
             dns = EXCLUDED.dns,
             h2 = EXCLUDED.h2,
-            mtproto_secret = EXCLUDED.mtproto_secret
+            mtproto_secret = EXCLUDED.mtproto_secret,
+            awg_privkey = EXCLUDED.awg_privkey,
+            awg_interface = EXCLUDED.awg_interface,
+            awg_address = EXCLUDED.awg_address,
+            awg_dns = EXCLUDED.awg_dns,
+            awg_obfuscation = EXCLUDED.awg_obfuscation
     ";
 
         for inbound in node.inbounds.values() {
@@ -119,6 +127,27 @@ impl PgNode {
                 })
                 .unwrap_or((None, None, None, None));
 
+            let (awg_privkey, awg_interface, awg_address, awg_dns, awg_obfuscation) = inbound
+                .awg
+                .as_ref()
+                .map(|awg| {
+                    (
+                        Some(&awg.interface.private_key.privkey),
+                        Some(&awg.interface.interface),
+                        Some(awg.interface.address.to_string()),
+                        Some(
+                            awg.interface
+                                .dns
+                                .iter()
+                                .cloned()
+                                .map(IpAddr::V4)
+                                .collect::<Vec<IpAddr>>(),
+                        ),
+                        serde_json::to_value(&awg.obfuscation).ok(),
+                    )
+                })
+                .unwrap_or((None, None, None, None, None));
+
             tx.execute(
                 inbound_query,
                 &[
@@ -133,6 +162,11 @@ impl PgNode {
                     &dns,
                     &h2_settings,
                     &inbound.mtproto_secret,
+                    &awg_privkey,
+                    &awg_interface,
+                    &awg_address,
+                    &awg_dns,
+                    &awg_obfuscation,
                 ],
             )
             .await?;
@@ -149,13 +183,41 @@ impl PgNode {
         let rows = client
             .query(
                 "SELECT
-                n.id AS node_id, n.uuid, n.env, n.hostname, n.address, n.status,
-                n.created_at, n.modified_at, n.label, n.interface,
-                n.cores, n.max_bandwidth_bps, n.country, n.node_type, i.id
+                      n.id AS node_id,
+                      n.uuid,
+                      n.env,
+                      n.hostname,
+                      n.address,
+                      n.status,
+                      n.created_at,
+                      n.modified_at,
+                      n.label,
+                      n.interface,
+                      n.cores,
+                      n.max_bandwidth_bps,
+                      n.country,
+                      n.node_type,
 
-             AS inbound_id, i.tag, i.port, i.stream_settings, i.wg_privkey, i.wg_interface, i.wg_address, i.dns, i.h2, i.mtproto_secret
-             FROM nodes n
-             LEFT JOIN inbounds i ON n.id = i.node_id",
+                      i.id AS inbound_id,
+                      i.tag,
+                      i.port,
+                      i.stream_settings,
+
+                      i.wg_privkey,
+                      i.wg_interface,
+                      i.wg_address,
+                      i.dns,
+
+                      i.awg_privkey,
+                      i.awg_interface,
+                      i.awg_address,
+                      i.awg_dns,
+                      i.awg_obfuscation,
+
+                      i.h2,
+                      i.mtproto_secret
+                 FROM nodes n
+                 LEFT JOIN inbounds i ON n.id = i.node_id",
                 &[],
             )
             .await?;
@@ -181,6 +243,24 @@ impl PgNode {
             let wg_address: Option<IpAddrMask> = row
                 .get::<_, Option<String>>("wg_address")
                 .and_then(|s| s.parse().ok());
+
+            let awg_address: Option<IpAddrMask> = row
+                .get::<_, Option<String>>("awg_address")
+                .and_then(|s| s.parse().ok());
+
+            let awg_dns: Option<Vec<Ipv4Addr>> =
+                row.get::<_, Option<Vec<IpAddr>>>("awg_dns").map(|ips| {
+                    ips.into_iter()
+                        .filter_map(|ip| match ip {
+                            IpAddr::V4(v4) => Some(v4),
+                            _ => None,
+                        })
+                        .collect()
+                });
+
+            let awg_obfuscation: Option<AwgObfuscationParams> = row
+                .get::<_, Option<serde_json::Value>>("awg_obfuscation")
+                .and_then(|v| serde_json::from_value(v).ok());
 
             let dns: Option<Vec<Ipv4Addr>> = row.get::<_, Option<Vec<IpAddr>>>("dns").map(|ips| {
                 ips.into_iter()
@@ -233,6 +313,29 @@ impl PgNode {
                         _ => None,
                     };
 
+                    let awg = match (
+                        row.get::<_, Option<String>>("awg_privkey"),
+                        row.get::<_, Option<String>>("awg_interface"),
+                        awg_address,
+                        awg_dns,
+                    ) {
+                        (Some(private_key), Some(interface), Some(address), Some(dns)) => {
+                            Some(AmneziaWgSettings {
+                                interface: AwgInterfaceConfig {
+                                    interface,
+                                    address,
+                                    listen_port: row.get::<_, i32>("port") as u16,
+                                    private_key: WgKeys {
+                                        privkey: private_key,
+                                    },
+                                    dns,
+                                },
+                                obfuscation: awg_obfuscation,
+                            })
+                        }
+                        _ => None,
+                    };
+
                     let mtproto_secret = row.get::<_, Option<String>>("mtproto_secret");
 
                     let inbound = Inbound {
@@ -243,6 +346,7 @@ impl PgNode {
                             .and_then(|v| serde_json::from_value(v).ok()),
 
                         wg,
+                        awg,
                         h2,
                         mtproto_secret,
                     };

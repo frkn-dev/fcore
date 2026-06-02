@@ -21,6 +21,7 @@ pub trait Operations {
     fn get_deleted(&self) -> bool;
 
     fn get_wireguard(&self) -> Option<&WgParam>;
+    fn get_amneziawg(&self) -> Option<&WgParam>;
     fn get_password(&self) -> Option<String>;
     fn get_token(&self) -> Option<uuid::Uuid>;
     fn set_password(&mut self, password: Option<String>) -> Result<()>;
@@ -76,6 +77,13 @@ impl Operations for Base {
     fn get_wireguard(&self) -> Option<&WgParam> {
         match &self.proto {
             Proto::Wireguard { param, .. } => Some(param),
+            _ => None,
+        }
+    }
+
+    fn get_amneziawg(&self) -> Option<&WgParam> {
+        match &self.proto {
+            Proto::AmneziaWg { param, .. } => Some(param),
             _ => None,
         }
     }
@@ -140,6 +148,13 @@ impl Operations for Conn {
     fn get_wireguard(&self) -> Option<&WgParam> {
         match &self.proto {
             Proto::Wireguard { param, .. } => Some(param),
+            _ => None,
+        }
+    }
+
+    fn get_amneziawg(&self) -> Option<&WgParam> {
+        match &self.proto {
+            Proto::AmneziaWg { param, .. } => Some(param),
             _ => None,
         }
     }

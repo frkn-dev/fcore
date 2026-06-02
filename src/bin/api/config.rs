@@ -47,6 +47,8 @@ pub struct ServiceConfig {
     pub cors_origins: Vec<String>,
     #[serde(default = "default_wg_network")]
     pub wireguard_network: IpAddrMask,
+    #[serde(default = "default_wg_network")]
+    pub amnezia_wireguard_network: IpAddrMask,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     pub updates_endpoint_zmq: String,

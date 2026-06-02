@@ -6,7 +6,7 @@ use tokio::time::Duration;
 use tonic::Status;
 
 use fcore::{Action, BaseConnection as Connection, Message, Metrics, Topic};
-#[cfg(any(feature = "xray", feature = "wireguard"))]
+#[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use fcore::{ConnectionStorageBaseOperations, Proto, Tag};
 use fcore::{Error, Result};
 #[cfg(feature = "xray")]
@@ -17,6 +17,14 @@ use fcore::ConnectionBaseOperations;
 #[cfg(any(feature = "xray", feature = "wireguard"))]
 use super::metrics::BusinessMetrics;
 use super::node::Node;
+
+#[cfg(feature = "amnezia-wg")]
+use netlink_packet_amnezia_wireguard::{
+    WireguardAddressFamily, WireguardAllowedIpAttr, WireguardPeer, WireguardPeerAttribute,
+};
+
+#[cfg(feature = "amnezia-wg")]
+use fcore::AwgInterface;
 
 #[async_trait]
 pub trait Tasks {
@@ -119,10 +127,78 @@ where
     async fn handle_message(&self, msg: Message) -> Result<()> {
         match msg.action {
             Action::Create | Action::Update => {
-                #[cfg(any(feature = "xray", feature = "wireguard"))]
+                #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
                 let conn_id: uuid::Uuid = msg.conn_id;
 
                 match msg.tag {
+                    #[cfg(feature = "amnezia-wg")]
+                    Tag::AmneziaWg => {
+                        let awg = msg.wg.clone().ok_or_else(|| {
+                            Error::Custom("Missing Amnezia WireGuard keys".into())
+                        })?;
+
+                        let proto = Proto::new_awg(&awg);
+
+                        let conn = Connection::new(
+                            proto,
+                            msg.expires_at.map(Into::into),
+                            msg.subscription_id,
+                        );
+
+                        {
+                            let mut mem = self.memory.write().await;
+                            mem.add(&conn_id, conn.clone().into()).map_err(|err| {
+                                Error::Custom(format!(
+                                    "Failed to add Amnezia WireGuard conn {}: {}",
+                                    conn_id, err
+                                ))
+                            })?;
+                        }
+
+                        let awg_api = self.awg_client.as_ref().ok_or_else(|| {
+                            Error::Custom("Amnezia WireGuard API is unavailable".into())
+                        })?;
+
+                        // pubkey
+                        let pubkey = awg
+                            .keys
+                            .pubkey()
+                            .map_err(|e| Error::Custom(format!("Invalid AWG pubkey: {}", e)))?;
+
+                        let pubkey = AwgInterface::decode_pubkey(&pubkey)?;
+
+                        // optional: check existence via netlink
+                        let device = awg_api.get_device().map_err(|e| {
+                            Error::Custom(format!("Failed to read AWG device: {}", e))
+                        })?;
+
+                        let exists = device.peers.iter().any(|p| {
+                            p.0.iter().any(|attr| {
+            matches!(attr, WireguardPeerAttribute::PublicKey(k) if k == &pubkey)
+        })
+                        });
+
+                        if exists {
+                            return Err(Error::Custom("AWG user already exists".into()));
+                        }
+
+                        let peer = WireguardPeer(vec![
+                            WireguardPeerAttribute::PublicKey(pubkey),
+                            WireguardPeerAttribute::AllowedIps(vec![awg.address.into()]),
+                        ]);
+
+                        tracing::error!("{:#?}", peer);
+                        awg_api.add_peer(peer).map_err(|e| {
+                            Error::Custom(format!(
+                                "Failed to create AmneziaWG peer via netlink: {}",
+                                e
+                            ))
+                        })?;
+
+                        tracing::debug!("AWG connection created {}", conn);
+
+                        return Ok(());
+                    }
                     #[cfg(feature = "wireguard")]
                     Tag::Wireguard => {
                         let wg = msg
@@ -250,9 +326,32 @@ where
             }
             Action::Delete => {
                 let tag = msg.tag;
-                #[cfg(any(feature = "xray", feature = "wireguard"))]
+                #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
                 let conn_id = msg.conn_id;
                 match tag {
+                    #[cfg(feature = "amnezia-wg")]
+                    Tag::AmneziaWg => {
+                        let awg_api = self
+                            .awg_client
+                            .as_ref()
+                            .ok_or_else(|| Error::Custom("AWG API is unavailable".into()))?;
+
+                        let wg = msg
+                            .wg
+                            .clone()
+                            .ok_or_else(|| Error::Custom("Missing AWG keys in message".into()))?;
+
+                        let pubkey = wg.keys.pubkey()?;
+                        let pubkey = AwgInterface::decode_pubkey(&pubkey)?;
+                        awg_api.remove_peer(pubkey).map_err(|e| {
+                            Error::Custom(format!("Failed to remove AWG peer: {}", e))
+                        })?;
+
+                        let mut mem = self.memory.write().await;
+                        let _ = mem.remove(&conn_id);
+
+                        return Ok(());
+                    }
                     #[cfg(feature = "wireguard")]
                     Tag::Wireguard => {
                         let wg_api = self

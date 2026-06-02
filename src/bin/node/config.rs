@@ -20,6 +20,9 @@ pub struct ServiceSettings {
     #[cfg(feature = "wireguard")]
     #[serde(default)]
     pub wg: WgConfig,
+    #[cfg(feature = "amnezia-wg")]
+    #[serde(default)]
+    pub awg: AmneziaWgConfig,
     #[serde(default)]
     pub h2: H2Config,
     #[serde(default)]
@@ -64,6 +67,14 @@ pub struct H2Config {
 #[cfg(feature = "wireguard")]
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct WgConfig {
+    #[serde(default = "default_disabled")]
+    pub enabled: bool,
+    pub path: String,
+}
+
+#[cfg(feature = "amnezia-wg")]
+#[derive(Clone, Default, Debug, Deserialize)]
+pub struct AmneziaWgConfig {
     #[serde(default = "default_disabled")]
     pub enabled: bool,
     pub path: String,

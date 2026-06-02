@@ -6,6 +6,11 @@ use std::{
     str::FromStr,
 };
 
+#[cfg(feature = "amnezia-wg")]
+use netlink_packet_amnezia_wireguard::{
+    WireguardAddressFamily, WireguardAllowedIp, WireguardAllowedIpAttr,
+};
+
 use rand::rngs::OsRng;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -311,5 +316,21 @@ impl<'de> Deserialize<'de> for IpAddrMask {
 impl Default for IpAddrMask {
     fn default() -> Self {
         "10.0.0.0/8".parse().expect("valid default network")
+    }
+}
+
+#[cfg(feature = "amnezia-wg")]
+impl From<IpAddrMask> for WireguardAllowedIp {
+    fn from(ip: IpAddrMask) -> Self {
+        let family = match ip.address {
+            std::net::IpAddr::V4(_) => WireguardAddressFamily::Ipv4,
+            std::net::IpAddr::V6(_) => WireguardAddressFamily::Ipv6,
+        };
+
+        WireguardAllowedIp(vec![
+            WireguardAllowedIpAttr::Family(family),
+            WireguardAllowedIpAttr::IpAddr(ip.address),
+            WireguardAllowedIpAttr::Cidr(ip.cidr),
+        ])
     }
 }

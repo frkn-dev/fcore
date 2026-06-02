@@ -56,7 +56,7 @@ jobs:
           cargo zigbuild  --release \
             --bin node \
             --target ${{ matrix.target }} \
-            --features xray,wireguard
+            --features xray,wireguard,amnezia-wg
 
       - name: Verify static binary
         run: |

@@ -17,6 +17,9 @@ use fcore::{XrayClient, XrayHandlerClient, XraySettings, XrayStatsClient};
 #[cfg(feature = "wireguard")]
 use fcore::{WgApi, WireguardServerConfig, WireguardSettings};
 
+#[cfg(feature = "amnezia-wg")]
+use fcore::{AmneziaWgServerConfig, AmneziaWgSettings, AwgInterface, Error};
+
 use fcore::{
     utils::measure_time, BaseConnection as Connection, ConnectionBaseOperations, Connections,
     MetricBuffer, Node as MemNode, Publisher, Result, SnapshotManager, Subscriber, Tag, Topic,
@@ -26,7 +29,7 @@ use fcore::{H2Settings, Hysteria2Settings, MtprotoSettings, NodeConfig, Settings
 
 use super::config::ServiceSettings;
 use super::http::ApiRequests;
-#[cfg(any(feature = "xray", feature = "wireguard"))]
+#[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use super::snapshot::SnapshotRestore;
 use super::tasks::Tasks;
 
@@ -44,6 +47,8 @@ where
     pub handler_client: Option<Arc<Mutex<XrayHandlerClient>>>,
     #[cfg(feature = "wireguard")]
     pub wg_client: Option<WgApi>,
+    #[cfg(feature = "amnezia-wg")]
+    pub awg_client: Option<AwgInterface>,
 }
 
 impl<C> Node<C>
@@ -57,6 +62,7 @@ where
         #[cfg(feature = "xray")] stats_client: Option<Arc<Mutex<XrayStatsClient>>>,
         #[cfg(feature = "xray")] handler_client: Option<Arc<Mutex<XrayHandlerClient>>>,
         #[cfg(feature = "wireguard")] wg_client: Option<WgApi>,
+        #[cfg(feature = "amnezia-wg")] awg_client: Option<AwgInterface>,
     ) -> Self {
         let memory = Arc::new(RwLock::new(Connections::default()));
         Self {
@@ -70,6 +76,8 @@ where
             handler_client,
             #[cfg(feature = "wireguard")]
             wg_client,
+            #[cfg(feature = "amnezia-wg")]
+            awg_client,
         }
     }
 }
@@ -128,6 +136,26 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         (None, None)
     };
 
+    #[cfg(feature = "amnezia-wg")]
+    let (awg_client, awg_config) = if settings.awg.enabled {
+        let raw_config = AmneziaWgServerConfig::from_file(&settings.awg.path)?;
+        let awg: AmneziaWgSettings = raw_config.try_into()?;
+
+        debug!("{:?}", awg);
+
+        let client = AwgInterface::connect(awg.interface.interface.clone())
+            .map_err(|e| Error::Custom(format!("Cannot create AWG client: {}", e)))?;
+
+        // optional: validate via real netlink call
+        let _device = client
+            .get_device()
+            .map_err(|e| Error::Custom(format!("Cannot validate AWG client: {}", e)))?;
+
+        (Some(client), Some(awg))
+    } else {
+        (None, None)
+    };
+
     // Init Hysteria2
     let h2_config = if settings.h2.enabled {
         match Hysteria2Settings::from_file(&settings.h2.path) {
@@ -169,6 +197,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         xray_config,
         #[cfg(feature = "wireguard")]
         wg_config,
+        #[cfg(feature = "amnezia-wg")]
+        awg_config,
         h2_config,
         mtproto_config,
     );
@@ -197,6 +227,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         handler_client.clone(),
         #[cfg(feature = "wireguard")]
         wg_client.clone(),
+        #[cfg(feature = "amnezia-wg")]
+        awg_client.clone(),
     ));
 
     let snapshot_path = settings.service.snapshot_path.clone();

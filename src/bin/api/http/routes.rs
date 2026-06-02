@@ -151,6 +151,12 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(wireguard_connections_handler);
 
+        let get_awg_connections_info_route = warp::path!("info" / "connections" / "amneziawg")
+            .and(warp::get())
+            .and(warp::query::<ConnectionInfoRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(amnezia_wireguard_connections_handler);
+
         let get_mtproto_connections_info_route = warp::path!("info" / "connections" / "mtproto")
             .and(warp::get())
             .and(warp::query::<ConnectionInfoRequest>())
@@ -172,6 +178,9 @@ where
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
             .and_then(create_connection_handler);
 
         let delete_connection_route = warp::delete()
@@ -217,6 +226,9 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_email_store(self.email_store.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
             .and(with_param_vec_string(params.system_refer_codes.clone()))
             .and(with_param_envs(params.enabled_envs.clone()))
             .and(with_param_tags(params.enabled_tags.clone()))
@@ -254,6 +266,7 @@ where
             .or(delete_connection_route)
             .or(get_mtproto_connections_info_route)
             .or(get_wg_connections_info_route)
+            .or(get_awg_connections_info_route)
             .or(get_a_connection_route)
             // Key
             .or(get_key_validation_route)
