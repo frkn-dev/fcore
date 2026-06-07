@@ -43,22 +43,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Install musl cross toolchain (aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
-          tar xf aarch64-linux-musl-cross.tgz
-          echo "CC_aarch64_unknown_linux_musl=$PWD/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc" >> $GITHUB_ENV
-          echo "AR_aarch64_unknown_linux_musl=$PWD/aarch64-linux-musl-cross/bin/aarch64-linux-musl-ar" >> $GITHUB_ENV
+      - name: Install cross
+        run: cargo install cross
 
       - name: Build Node
         run: |
-          cargo build --release \
+          cross build --release \
             --bin node \
             --target ${{ matrix.target }} \
             --features xray,wireguard,amnezia-wg
@@ -86,14 +79,19 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: api
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install cross
+        run: cargo install cross
 
       - name: Build API
         run: |
-          cargo build --release \
+          cross build --release \
              --bin api \
              --no-default-features \
              --target x86_64-unknown-linux-musl
@@ -121,14 +119,19 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: auth
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install cross
+        run: cargo install cross
 
       - name: Build Auth
         run: |
-          cargo build --release \
+          cross build --release \
             --bin auth \
             --no-default-features \
             --target x86_64-unknown-linux-musl
