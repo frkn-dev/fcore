@@ -47,18 +47,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler musl-tools
-          pip3 install ziglang
-          cargo install cargo-zigbuild
 
-      - name: Build Node (static)
+      - name: Install musl cross toolchain (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          cargo zigbuild --release \
+          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
+          tar xf aarch64-linux-musl-cross.tgz
+          echo "CC_aarch64_unknown_linux_musl=$PWD/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc" >> $GITHUB_ENV
+          echo "AR_aarch64_unknown_linux_musl=$PWD/aarch64-linux-musl-cross/bin/aarch64-linux-musl-ar" >> $GITHUB_ENV
+
+      - name: Build Node
+        run: |
+          cargo build --release \
             --bin node \
             --target ${{ matrix.target }} \
             --features xray,wireguard,amnezia-wg
 
-      - name: Verify static binary
+      - name: Verify binary
         run: |
+          file target/${{ matrix.target }}/release/node
           ldd target/${{ matrix.target }}/release/node || true
 
       - name: Upload Artifact
@@ -83,19 +90,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler musl-tools
-          pip3 install ziglang
-          cargo install cargo-zigbuild
 
-      - name: Build API (static)
+      - name: Build API
         run: |
-          RUSTFLAGS="-C target-feature=+crt-static" \
-          cargo zigbuild --release \
+          cargo build --release \
              --bin api \
              --no-default-features \
              --target x86_64-unknown-linux-musl
 
-      - name: Verify static binary
+      - name: Verify binary
         run: |
+          file target/x86_64-unknown-linux-musl/release/api
           ldd target/x86_64-unknown-linux-musl/release/api || true
 
       - name: Upload Artifact
@@ -120,19 +125,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler musl-tools
-          pip3 install ziglang
-          cargo install cargo-zigbuild
 
-      - name: Build Auth (static)
+      - name: Build Auth
         run: |
-          RUSTFLAGS="-C target-feature=+crt-static" \
-          cargo zigbuild --release \
+          cargo build --release \
             --bin auth \
             --no-default-features \
             --target x86_64-unknown-linux-musl
 
-      - name: Verify static binary
+      - name: Verify binary
         run: |
+          file target/x86_64-unknown-linux-musl/release/auth
           ldd target/x86_64-unknown-linux-musl/release/auth || true
 
       - name: Upload Artifact
