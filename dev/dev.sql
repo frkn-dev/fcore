@@ -143,3 +143,6 @@ ALTER TABLE inbounds
 
 ALTER TYPE proto
 ADD VALUE 'amnezia_wg';
+
+
+

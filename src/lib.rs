@@ -36,7 +36,7 @@ pub use config::{
     },
     clash::InboundClashConfig,
     h2::{H2Settings, Hysteria2Settings},
-    inbound::{Inbound, InboundConnLink, Settings as XraySettings},
+    inbound::{Inbound, InboundConnLink, Network, Settings as XraySettings},
     mtproto::MtprotoSettings,
     settings::{ApiAccessConfig, MetricsTxConfig, NodeConfig, NodeConfigRaw, Settings},
     wireguard::{WireguardServerConfig, WireguardSettings},

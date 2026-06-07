@@ -62,8 +62,6 @@ netlink-packet-generic = { version = "0.4", optional = true }
 netlink-sys = { version = "0.8", optional = true }
 
 
-
-
 [build-dependencies]
 tonic-build = {version = "0.12", optional = true}
 walkdir = "2.0"

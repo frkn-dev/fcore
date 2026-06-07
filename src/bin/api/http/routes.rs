@@ -13,7 +13,7 @@ use super::{
     super::service::Service,
     filters::*,
     handlers::{
-        connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*, trial::*,
+        amnezia::*, connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*, trial::*,
     },
     param::*,
     rejection,
@@ -237,6 +237,31 @@ where
             .and(with_i64(params.trial_limit_bytes))
             .and_then(post_trial_handler);
 
+        // Amnezia gateway routes
+        let post_amnezia_services_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("services"))
+            .and(warp::path::end())
+            .and(warp::body::json::<GatewayServicesRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(gateway_services_handler);
+
+        let post_amnezia_account_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("account_info"))
+            .and(warp::path::end())
+            .and(warp::body::json::<GatewayAccountInfoRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(gateway_account_info_handler);
+
+        let post_amnezia_config_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("config"))
+            .and(warp::path::end())
+            .and(warp::body::json::<GatewayConfigRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(gateway_config_handler);
+
         //Metrics
 
         let ws_route = warp::path("ws")
@@ -274,6 +299,10 @@ where
             .or(post_activate_key_route)
             //Trial
             .or(post_trial_route)
+            // Amnezia
+            .or(post_amnezia_services_route)
+            .or(post_amnezia_account_route)
+            .or(post_amnezia_config_route)
             // Metrics
             .or(ws_route)
             .recover(rejection)
