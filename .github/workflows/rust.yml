@@ -52,8 +52,7 @@ jobs:
 
       - name: Build Node (static)
         run: |
-          RUSTFLAGS="-C target-feature=+crt-static" \
-          cargo zigbuild  --release \
+          cargo zigbuild --release \
             --bin node \
             --target ${{ matrix.target }} \
             --features xray,wireguard,amnezia-wg
