@@ -162,10 +162,8 @@ pub struct GatewayConfigRequest {
     pub service_protocol: String,
     #[serde(rename = "auth_data")]
     pub auth_data: serde_json::Value,
-    #[serde(rename = "wireguard_client_pub_key")]
-    pub wireguard_client_pub_key: Option<String>,
-    #[serde(rename = "xray_uuid")]
-    pub xray_uuid: Option<String>,
+    #[serde(rename = "public_key")]
+    pub public_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -721,7 +719,7 @@ where
 
             build_awg_server_config(
                 &link,
-                req.wireguard_client_pub_key.as_deref().unwrap_or(""),
+                req.public_key.as_deref().unwrap_or(""),
                 &node.hostname,
                 port,
             )
@@ -733,6 +731,8 @@ where
                 .find(|i| proto_matches(i.tag, "vless"))
                 .ok_or_else(|| warp::reject::not_found())?;
 
+            let xray_uuid = req.public_key.as_deref().unwrap_or("");
+            let conn_id = uuid::Uuid::parse_str(xray_uuid).unwrap_or(conn_id);
             build_vless_server_config(inbound, &conn_id, &node.hostname)
                 .map_err(|_| warp::reject::not_found())?
         }
