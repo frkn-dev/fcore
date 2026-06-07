@@ -65,6 +65,7 @@ netlink-sys = { version = "0.8", optional = true }
 [build-dependencies]
 tonic-build = {version = "0.12", optional = true}
 walkdir = "2.0"
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tracing = "0.1"

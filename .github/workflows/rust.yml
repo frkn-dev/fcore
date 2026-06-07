@@ -18,9 +18,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Test Lib
         run: cargo test --lib
 
@@ -42,9 +39,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install cross
         run: cargo install cross
@@ -83,9 +77,6 @@ jobs:
         with:
           key: api
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Install cross
         run: cargo install cross
 
@@ -122,9 +113,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: auth
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install cross
         run: cargo install cross

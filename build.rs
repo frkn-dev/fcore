@@ -17,6 +17,8 @@ fn main() {
             .map(|entry| entry.path().to_str().unwrap().to_string())
             .collect();
 
+        std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
+
         tonic_build::configure()
             .build_client(true)
             .build_server(false)
