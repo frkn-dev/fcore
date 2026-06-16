@@ -8,7 +8,7 @@ use std::{
 
 #[cfg(feature = "amnezia-wg")]
 use netlink_packet_amnezia_wireguard::{
-    WireguardAddressFamily, WireguardAllowedIp, WireguardAllowedIpAttr,
+    AmneziaWireguardAddressFamily, AmneziaWireguardAllowedIp, AmneziaWireguardAllowedIpAttr,
 };
 
 use rand::rngs::OsRng;
@@ -320,17 +320,17 @@ impl Default for IpAddrMask {
 }
 
 #[cfg(feature = "amnezia-wg")]
-impl From<IpAddrMask> for WireguardAllowedIp {
+impl From<IpAddrMask> for AmneziaWireguardAllowedIp {
     fn from(ip: IpAddrMask) -> Self {
         let family = match ip.address {
-            std::net::IpAddr::V4(_) => WireguardAddressFamily::Ipv4,
-            std::net::IpAddr::V6(_) => WireguardAddressFamily::Ipv6,
+            std::net::IpAddr::V4(_) => AmneziaWireguardAddressFamily::Ipv4,
+            std::net::IpAddr::V6(_) => AmneziaWireguardAddressFamily::Ipv6,
         };
 
-        WireguardAllowedIp(vec![
-            WireguardAllowedIpAttr::Family(family),
-            WireguardAllowedIpAttr::IpAddr(ip.address),
-            WireguardAllowedIpAttr::Cidr(ip.cidr),
+        AmneziaWireguardAllowedIp(vec![
+            AmneziaWireguardAllowedIpAttr::Family(family),
+            AmneziaWireguardAllowedIpAttr::IpAddr(ip.address),
+            AmneziaWireguardAllowedIpAttr::Cidr(ip.cidr),
         ])
     }
 }

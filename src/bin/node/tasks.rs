@@ -20,7 +20,7 @@ use super::node::Node;
 
 #[cfg(feature = "amnezia-wg")]
 use netlink_packet_amnezia_wireguard::{
-    WireguardAddressFamily, WireguardAllowedIpAttr, WireguardPeer, WireguardPeerAttribute,
+    AmneziaWireguardPeer, AmneziaWireguardPeerAttribute,
 };
 
 #[cfg(feature = "amnezia-wg")]
@@ -174,7 +174,7 @@ where
 
                         let exists = device.peers.iter().any(|p| {
                             p.0.iter().any(|attr| {
-            matches!(attr, WireguardPeerAttribute::PublicKey(k) if k == &pubkey)
+            matches!(attr, AmneziaWireguardPeerAttribute::PublicKey(k) if k == &pubkey)
         })
                         });
 
@@ -182,9 +182,9 @@ where
                             return Err(Error::Custom("AWG user already exists".into()));
                         }
 
-                        let peer = WireguardPeer(vec![
-                            WireguardPeerAttribute::PublicKey(pubkey),
-                            WireguardPeerAttribute::AllowedIps(vec![awg.address.into()]),
+                        let peer = AmneziaWireguardPeer(vec![
+                            AmneziaWireguardPeerAttribute::PublicKey(pubkey),
+                            AmneziaWireguardPeerAttribute::AllowedIps(vec![awg.address.into()]),
                         ]);
 
                         tracing::error!("{:#?}", peer);

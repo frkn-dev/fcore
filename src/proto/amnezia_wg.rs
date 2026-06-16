@@ -1,8 +1,8 @@
 use crate::error::{Error, Result as MyResult};
 use base64::{engine::general_purpose, Engine as _};
 use netlink_packet_amnezia_wireguard::{
-    AmneziaWg, AmneziaWgAttribute, WireguardCmd, WireguardMessage, WireguardPeer,
-    WireguardPeerAttribute,
+    AmneziaWireguardAttribute, AmneziaWireguardCmd, AmneziaWireguardMessage,
+    AmneziaWireguardPeer, AmneziaWireguardPeerAttribute,
 };
 use netlink_packet_core::{
     NetlinkDeserializable, NetlinkMessage, NetlinkPayload, NetlinkSerializable, NLM_F_ACK,
@@ -42,7 +42,7 @@ pub struct PeerStats {
 pub struct AwgDevice {
     pub ifname: String,
     pub listen_port: Option<u16>,
-    pub peers: Vec<WireguardPeer>,
+    pub peers: Vec<AmneziaWireguardPeer>,
 }
 
 const WGPEER_F_REMOVE_ME: u32 = 1;
@@ -113,9 +113,9 @@ impl AwgInterface {
 
     pub fn get_device(&self) -> MyResult<AwgDevice> {
         let ifname = &self.interface;
-        let msg = WireguardMessage::<AmneziaWg> {
-            cmd: WireguardCmd::GetDevice,
-            attributes: vec![AmneziaWgAttribute::IfName(ifname.into())],
+        let msg = AmneziaWireguardMessage {
+            cmd: AmneziaWireguardCmd::GetDevice,
+            attributes: vec![AmneziaWireguardAttribute::IfName(ifname.into())],
         };
 
         let genlmsg = GenlMessage::from_payload(msg);
@@ -135,11 +135,11 @@ impl AwgInterface {
 
             for attr in attrs {
                 match attr {
-                    AmneziaWgAttribute::ListenPort(port) => {
+                    AmneziaWireguardAttribute::ListenPort(port) => {
                         device.listen_port = Some(*port);
                     }
 
-                    AmneziaWgAttribute::Peers(peers) => {
+                    AmneziaWireguardAttribute::Peers(peers) => {
                         device.peers.extend(peers.clone());
                     }
 
@@ -151,13 +151,13 @@ impl AwgInterface {
         Ok(device)
     }
 
-    pub fn add_peer(&self, peer: WireguardPeer) -> MyResult<()> {
+    pub fn add_peer(&self, peer: AmneziaWireguardPeer) -> MyResult<()> {
         let ifname = &self.interface;
-        let msg = WireguardMessage::<AmneziaWg> {
-            cmd: WireguardCmd::SetDevice,
+        let msg = AmneziaWireguardMessage {
+            cmd: AmneziaWireguardCmd::SetDevice,
             attributes: vec![
-                AmneziaWgAttribute::IfName(ifname.into()),
-                AmneziaWgAttribute::Peers(vec![peer]),
+                AmneziaWireguardAttribute::IfName(ifname.into()),
+                AmneziaWireguardAttribute::Peers(vec![peer]),
             ],
         };
 
@@ -168,18 +168,18 @@ impl AwgInterface {
     }
 
     pub fn remove_peer(&self, public_key: [u8; 32]) -> MyResult<()> {
-        let peer = WireguardPeer(vec![
-            WireguardPeerAttribute::PublicKey(public_key),
-            WireguardPeerAttribute::Flags(WGPEER_F_REMOVE_ME),
+        let peer = AmneziaWireguardPeer(vec![
+            AmneziaWireguardPeerAttribute::PublicKey(public_key),
+            AmneziaWireguardPeerAttribute::Flags(WGPEER_F_REMOVE_ME),
         ]);
 
         let ifname = &self.interface;
 
-        let msg = WireguardMessage::<AmneziaWg> {
-            cmd: WireguardCmd::SetDevice,
+        let msg = AmneziaWireguardMessage {
+            cmd: AmneziaWireguardCmd::SetDevice,
             attributes: vec![
-                AmneziaWgAttribute::IfName(ifname.into()),
-                AmneziaWgAttribute::Peers(vec![peer]),
+                AmneziaWireguardAttribute::IfName(ifname.into()),
+                AmneziaWireguardAttribute::Peers(vec![peer]),
             ],
         };
 
@@ -203,19 +203,19 @@ impl AwgInterface {
 
             for attr in peer.0 {
                 match attr {
-                    WireguardPeerAttribute::PublicKey(key) => {
+                    AmneziaWireguardPeerAttribute::PublicKey(key) => {
                         pubkey = Some(key);
                     }
 
-                    WireguardPeerAttribute::RxBytes(v) => {
+                    AmneziaWireguardPeerAttribute::RxBytes(v) => {
                         rx = v;
                     }
 
-                    WireguardPeerAttribute::TxBytes(v) => {
+                    AmneziaWireguardPeerAttribute::TxBytes(v) => {
                         tx = v;
                     }
 
-                    WireguardPeerAttribute::LastHandshake(time) => {
+                    AmneziaWireguardPeerAttribute::LastHandshake(time) => {
                         hs = Some((time.seconds * 1_000_000_000 + time.nano_seconds) as u64);
                     }
 

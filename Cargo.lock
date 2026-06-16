@@ -1934,8 +1934,9 @@ dependencies = [
 
 [[package]]
 name = "netlink-packet-amnezia-wireguard"
-version = "0.1.0"
-source = "git+https://github.com/frkn-dev/netlink-packet-amnezia-wireguard.git?rev=9c4fecd3c5de2f477ae7577bed2d8d5212af0207#9c4fecd3c5de2f477ae7577bed2d8d5212af0207"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1534de16677bfa386fccfe5358049deb7d1a5d896a55f368fd399b5ee6db81fd"
 dependencies = [
  "libc",
  "log",
