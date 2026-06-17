@@ -1,4 +1,6 @@
 use crate::error::{Error, Result as MyResult};
+#[cfg(feature = "amnezia-wg")]
+use crate::AwgObfuscationParams;
 use base64::{engine::general_purpose, Engine as _};
 use netlink_packet_amnezia_wireguard::{
     AmneziaWireguardAttribute, AmneziaWireguardCmd, AmneziaWireguardMessage,
@@ -109,6 +111,59 @@ impl AwgInterface {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(arr)
+    }
+
+    pub fn set_obfuscation_params(&self, params: &AwgObfuscationParams) -> MyResult<()> {
+        let ifname = &self.interface;
+
+        let mut attributes = vec![AmneziaWireguardAttribute::IfName(ifname.into())];
+
+        attributes.push(AmneziaWireguardAttribute::JC(params.jc));
+        attributes.push(AmneziaWireguardAttribute::Jmin(params.jmin));
+        attributes.push(AmneziaWireguardAttribute::Jmax(params.jmax));
+        attributes.push(AmneziaWireguardAttribute::S1(params.s1));
+        attributes.push(AmneziaWireguardAttribute::S2(params.s2));
+        attributes.push(AmneziaWireguardAttribute::S3(params.s3));
+        attributes.push(AmneziaWireguardAttribute::S4(params.s4));
+
+        if !params.h1.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::H1(params.h1.clone()));
+        }
+        if !params.h2.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::H2(params.h2.clone()));
+        }
+        if !params.h3.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::H3(params.h3.clone()));
+        }
+        if !params.h4.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::H4(params.h4.clone()));
+        }
+
+        if !params.i1.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::I1(params.i1.clone()));
+        }
+        if !params.i2.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::I2(params.i2.clone()));
+        }
+        if !params.i3.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::I3(params.i3.clone()));
+        }
+        if !params.i4.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::I4(params.i4.clone()));
+        }
+        if !params.i5.is_empty() {
+            attributes.push(AmneziaWireguardAttribute::I5(params.i5.clone()));
+        }
+
+        let msg = AmneziaWireguardMessage {
+            cmd: AmneziaWireguardCmd::SetDevice,
+            attributes,
+        };
+
+        let genlmsg = GenlMessage::from_payload(msg);
+        netlink_request_genl(genlmsg, NLM_F_REQUEST | NLM_F_ACK)?;
+
+        Ok(())
     }
 
     pub fn get_device(&self) -> MyResult<AwgDevice> {

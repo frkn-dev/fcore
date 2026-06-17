@@ -10,8 +10,8 @@ use fcore::{
         {request::ConnType, response::Instance},
     },
     utils, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, InboundConnLink, IpAddrMask, NodeStorageOperations, Proto,
-    Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations, Tag, Topic,
+    ConnectionStorageApiOperations, InboundConnLink, IpAddrMask, NodeStatus, NodeStorageOperations,
+    Proto, Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations, Tag, Topic,
     WgKeys, WgParam,
 };
 
@@ -443,6 +443,9 @@ where
 
             if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
                 for node in nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&Tag::Wireguard) {
                         let c: Connection = conn.clone().into();
 
@@ -525,6 +528,9 @@ where
 
             if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
                 for node in nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&Tag::AmneziaWg) {
                         let c: Connection = conn.clone().into();
 
@@ -607,6 +613,9 @@ where
 
             if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
                 for node in nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&Tag::Mtproto) {
                         let link = inbound.mtproto(&node.hostname, &node.address, &node.label);
 

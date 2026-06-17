@@ -3,8 +3,8 @@ use base64::Engine;
 use fcore::{
     http::helpers as http,
     Connection, ConnectionApiOperations, ConnectionBaseOperations, ConnectionStorageApiOperations,
-    InboundConnLink, NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations,
-    Tag,
+    InboundConnLink, NodeStatus, NodeStorageOperations, SubscriptionOperations,
+    SubscriptionStorageOperations, Tag,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -233,10 +233,17 @@ fn build_awg_server_config(
         "Jmax": ini.get("Jmax").unwrap_or(&"70"),
         "S1": ini.get("S1").unwrap_or(&"0"),
         "S2": ini.get("S2").unwrap_or(&"0"),
+        "S3": ini.get("S3").unwrap_or(&"0"),
+        "S4": ini.get("S4").unwrap_or(&"0"),
         "H1": ini.get("H1").unwrap_or(&"1"),
         "H2": ini.get("H2").unwrap_or(&"2"),
         "H3": ini.get("H3").unwrap_or(&"3"),
         "H4": ini.get("H4").unwrap_or(&"4"),
+        "I1": ini.get("I1").unwrap_or(&"0"),
+        "I2": ini.get("I2").unwrap_or(&"0"),
+        "I3": ini.get("I3").unwrap_or(&"0"),
+        "I4": ini.get("I4").unwrap_or(&"0"),
+        "I5": ini.get("I5").unwrap_or(&"0"),
     });
 
     serde_json::json!({
@@ -251,10 +258,17 @@ fn build_awg_server_config(
                     "Jmax": ini.get("Jmax").unwrap_or(&"70"),
                     "S1": ini.get("S1").unwrap_or(&"0"),
                     "S2": ini.get("S2").unwrap_or(&"0"),
+                    "S3": ini.get("S3").unwrap_or(&"0"),
+                    "S4": ini.get("S4").unwrap_or(&"0"),
                     "H1": ini.get("H1").unwrap_or(&"1"),
                     "H2": ini.get("H2").unwrap_or(&"2"),
                     "H3": ini.get("H3").unwrap_or(&"3"),
                     "H4": ini.get("H4").unwrap_or(&"4"),
+                    "I1": ini.get("I1").unwrap_or(&"0"),
+                    "I2": ini.get("I2").unwrap_or(&"0"),
+                    "I3": ini.get("I3").unwrap_or(&"0"),
+                    "I4": ini.get("I4").unwrap_or(&"0"),
+                    "I5": ini.get("I5").unwrap_or(&"0"),
                 }
             }
         ],
@@ -673,6 +687,10 @@ where
 
         if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
             for node in nodes {
+                if node.status != NodeStatus::Online {
+                    continue;
+                }
+
                 let has_inbound = node
                     .inbounds
                     .values()

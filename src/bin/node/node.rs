@@ -151,6 +151,12 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
             .get_device()
             .map_err(|e| Error::Custom(format!("Cannot validate AWG client: {}", e)))?;
 
+        if let Some(ref obf) = awg.obfuscation {
+            client
+                .set_obfuscation_params(obf)
+                .map_err(|e| Error::Custom(format!("Cannot configure AWG obfuscation: {}", e)))?;
+        }
+
         (Some(client), Some(awg))
     } else {
         (None, None)

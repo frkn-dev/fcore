@@ -266,12 +266,34 @@ Jmin = {}
 Jmax = {}
 S1 = {}
 S2 = {}
+S3 = {}
+S4 = {}
 H1 = {}
 H2 = {}
 H3 = {}
 H4 = {}
+I1 = {}
+I2 = {}
+I3 = {}
+I4 = {}
+I5 = {}
 "#,
-                        obf.jc, obf.jmin, obf.jmax, obf.s1, obf.s2, obf.h1, obf.h2, obf.h3, obf.h4,
+                        obf.jc,
+                        obf.jmin,
+                        obf.jmax,
+                        obf.s1,
+                        obf.s2,
+                        obf.s3,
+                        obf.s4,
+                        obf.h1,
+                        obf.h2,
+                        obf.h3,
+                        obf.h4,
+                        obf.i1,
+                        obf.i2,
+                        obf.i3,
+                        obf.i4,
+                        obf.i5,
                     ));
                 }
 
