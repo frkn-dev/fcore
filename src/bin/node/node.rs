@@ -248,6 +248,11 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                     error!("Couldn't restore connections from memory, {}", e);
                 }
 
+                #[cfg(feature = "amnezia-wg")]
+                if let Err(e) = snapshot_manager.restore_awg_connections(awg_client.clone()).await {
+                    error!("Couldn't restore AmneziaWG connections from memory, {}", e);
+                }
+
                 #[cfg(feature = "xray")]
                 if let Err(e) = snapshot_manager
                     .restore_xray_connections(handler_client)
