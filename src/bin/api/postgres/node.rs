@@ -145,7 +145,7 @@ impl PgNode {
                                     .map(IpAddr::V4)
                                     .collect::<Vec<IpAddr>>(),
                             ),
-                            awg.interface.mtu.map(|m| m as i32),
+                            awg.interface.mtu.map(|m| m as i16),
                             serde_json::to_value(&awg.obfuscation).ok(),
                         )
                     })
@@ -331,7 +331,7 @@ impl PgNode {
                                     address,
                                     listen_port: row.get::<_, i32>("port") as u16,
                                     mtu: row
-                                        .get::<_, Option<i32>>("awg_mtu")
+                                        .get::<_, Option<i16>>("awg_mtu")
                                         .map(|m| m as u16),
                                     private_key: WgKeys {
                                         privkey: private_key,
