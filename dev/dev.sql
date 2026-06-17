@@ -141,6 +141,9 @@ ALTER TABLE inbounds
     ADD COLUMN awg_dns INET[],
     ADD COLUMN awg_obfuscation JSONB;
 
+ALTER TABLE inbounds
+    ADD COLUMN awg_mtu SMALLINT;
+
 ALTER TYPE proto
 ADD VALUE 'amnezia_wg';
 

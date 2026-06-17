@@ -179,6 +179,7 @@ pub struct AwgInterfaceConfig {
     pub interface: String,
     pub address: IpAddrMask,
     pub listen_port: u16,
+    pub mtu: Option<u16>,
     pub private_key: WgKeys,
     pub dns: Vec<Ipv4Addr>,
 }
@@ -204,6 +205,7 @@ pub struct AmneziaWgServerConfig {
     pub port: u16,
     pub private_key: String,
     pub dns: Option<Vec<Ipv4Addr>>,
+    pub mtu: Option<u16>,
 
     pub obfuscation: Option<AwgObfuscationParams>,
 }
@@ -227,6 +229,7 @@ impl AmneziaWgServerConfig {
         let mut address = None;
         let mut dns: Vec<Ipv4Addr> = vec![];
         let mut port = None;
+        let mut mtu: Option<u16> = None;
 
         let mut jc: Option<u16> = None;
         let mut jmin: Option<u16> = None;
@@ -265,6 +268,10 @@ impl AmneziaWgServerConfig {
 
                 "ListenPort" => {
                     port = value.parse::<u16>().ok();
+                }
+
+                "MTU" => {
+                    mtu = value.parse::<u16>().ok();
                 }
 
                 "DNS" => {
@@ -324,6 +331,7 @@ impl AmneziaWgServerConfig {
             private_key: private_key.ok_or_else(|| Error::Custom("no PrivateKey".into()))?,
             address: address.ok_or_else(|| Error::Custom("no Address".into()))?,
             dns: Some(dns),
+            mtu,
             obfuscation,
         })
     }
@@ -353,6 +361,7 @@ impl TryFrom<AmneziaWgServerConfig> for AmneziaWgSettings {
                 interface: cfg.interface,
                 address,
                 listen_port: cfg.port,
+                mtu: cfg.mtu,
                 private_key: keys,
                 dns,
             },

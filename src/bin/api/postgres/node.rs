@@ -79,13 +79,13 @@ impl PgNode {
         INSERT INTO inbounds (
             id, node_id, tag, port, stream_settings,
             wg_privkey, wg_interface, wg_address, dns, h2, mtproto_secret,
-            awg_privkey, awg_interface, awg_address, awg_dns, awg_obfuscation
+            awg_privkey, awg_interface, awg_address, awg_dns, awg_mtu, awg_obfuscation
         )
         VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8,
             $9, $10, $11,
-            $12, $13, $14, $15, $16
+            $12, $13, $14, $15, $16, $17
         )
         ON CONFLICT (node_id, tag) DO UPDATE SET
             port = EXCLUDED.port,
@@ -100,6 +100,7 @@ impl PgNode {
             awg_interface = EXCLUDED.awg_interface,
             awg_address = EXCLUDED.awg_address,
             awg_dns = EXCLUDED.awg_dns,
+            awg_mtu = EXCLUDED.awg_mtu,
             awg_obfuscation = EXCLUDED.awg_obfuscation
     ";
 
@@ -127,26 +128,28 @@ impl PgNode {
                 })
                 .unwrap_or((None, None, None, None));
 
-            let (awg_privkey, awg_interface, awg_address, awg_dns, awg_obfuscation) = inbound
-                .awg
-                .as_ref()
-                .map(|awg| {
-                    (
-                        Some(&awg.interface.private_key.privkey),
-                        Some(&awg.interface.interface),
-                        Some(awg.interface.address.to_string()),
-                        Some(
-                            awg.interface
-                                .dns
-                                .iter()
-                                .cloned()
-                                .map(IpAddr::V4)
-                                .collect::<Vec<IpAddr>>(),
-                        ),
-                        serde_json::to_value(&awg.obfuscation).ok(),
-                    )
-                })
-                .unwrap_or((None, None, None, None, None));
+            let (awg_privkey, awg_interface, awg_address, awg_dns, awg_mtu, awg_obfuscation) =
+                inbound
+                    .awg
+                    .as_ref()
+                    .map(|awg| {
+                        (
+                            Some(&awg.interface.private_key.privkey),
+                            Some(&awg.interface.interface),
+                            Some(awg.interface.address.to_string()),
+                            Some(
+                                awg.interface
+                                    .dns
+                                    .iter()
+                                    .cloned()
+                                    .map(IpAddr::V4)
+                                    .collect::<Vec<IpAddr>>(),
+                            ),
+                            awg.interface.mtu.map(|m| m as i32),
+                            serde_json::to_value(&awg.obfuscation).ok(),
+                        )
+                    })
+                    .unwrap_or((None, None, None, None, None, None));
 
             tx.execute(
                 inbound_query,
@@ -166,6 +169,7 @@ impl PgNode {
                     &awg_interface,
                     &awg_address,
                     &awg_dns,
+                    &awg_mtu,
                     &awg_obfuscation,
                 ],
             )
@@ -212,6 +216,7 @@ impl PgNode {
                       i.awg_interface,
                       i.awg_address,
                       i.awg_dns,
+                      i.awg_mtu,
                       i.awg_obfuscation,
 
                       i.h2,
@@ -325,6 +330,9 @@ impl PgNode {
                                     interface,
                                     address,
                                     listen_port: row.get::<_, i32>("port") as u16,
+                                    mtu: row
+                                        .get::<_, Option<i32>>("awg_mtu")
+                                        .map(|m| m as u16),
                                     private_key: WgKeys {
                                         privkey: private_key,
                                     },

@@ -254,6 +254,10 @@ Address = {client_ip}
 "#,
                 );
 
+                if let Some(mtu) = awg.interface.mtu {
+                    config.push_str(&format!("MTU = {}\n", mtu));
+                }
+
                 if !dns.is_empty() {
                     config.push_str(&format!("DNS = {}\n", dns));
                 }
