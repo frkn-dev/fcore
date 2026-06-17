@@ -93,6 +93,27 @@ where
     }
 }
 
+fn parse_rotation(rotation: &str) -> Rotation {
+    match rotation.to_lowercase().as_str() {
+        "minutely" => Rotation::MINUTELY,
+        "hourly" => Rotation::HOURLY,
+        "daily" => Rotation::DAILY,
+        "never" => Rotation::NEVER,
+        _ => Rotation::DAILY,
+    }
+}
+
+fn parse_level(level: &str) -> Option<tracing::Level> {
+    match level.to_lowercase().as_str() {
+        "trace" => Some(tracing::Level::TRACE),
+        "debug" => Some(tracing::Level::DEBUG),
+        "info" => Some(tracing::Level::INFO),
+        "warn" | "warning" => Some(tracing::Level::WARN),
+        "error" => Some(tracing::Level::ERROR),
+        _ => None,
+    }
+}
+
 pub fn init_tracing(settings: ServiceSettings) {
     let level = level_from_settings(&settings.service.log_level);
 
@@ -103,25 +124,30 @@ pub fn init_tracing(settings: ServiceSettings) {
             !metadata.target().starts_with("metrics") && !metadata.target().starts_with("sqlx")
         }));
 
-    let log_directory = settings.metrics.log.directory;
-    let log_file = settings.metrics.log.file;
+    let registry = tracing_subscriber::registry().with(stdout_layer);
 
-    let metrics_file = RollingFileAppender::new(Rotation::DAILY, log_directory, log_file);
+    if settings.metrics.log.enabled {
+        let log_directory = settings.metrics.log.directory;
+        let log_file = settings.metrics.log.file;
+        let rotation = parse_rotation(&settings.metrics.log.rotation);
+        let metrics_level = parse_level(&settings.metrics.log.level).unwrap_or(tracing::Level::INFO);
 
-    let metrics_layer = fmt::layer()
-        .with_ansi(false)
-        .with_target(true)
-        .with_writer(metrics_file)
-        .with_filter(
-            Targets::new()
-                .with_target("metrics", tracing::Level::DEBUG)
-                .with_target("metrics.ingest", tracing::Level::DEBUG)
-                .with_target("metrics.gc", tracing::Level::DEBUG)
-                .with_target("metrics.heartbeat", tracing::Level::DEBUG),
-        );
+        let metrics_file = RollingFileAppender::new(rotation, log_directory, log_file);
 
-    tracing_subscriber::registry()
-        .with(stdout_layer)
-        .with(metrics_layer)
-        .init();
+        let metrics_layer = fmt::layer()
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(metrics_file)
+            .with_filter(
+                Targets::new()
+                    .with_target("metrics", metrics_level)
+                    .with_target("metrics.ingest", metrics_level)
+                    .with_target("metrics.gc", metrics_level)
+                    .with_target("metrics.heartbeat", metrics_level),
+            );
+
+        registry.with(metrics_layer).init();
+    } else {
+        registry.init();
+    }
 }
