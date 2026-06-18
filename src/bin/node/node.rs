@@ -237,8 +237,34 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         awg_client.clone(),
     ));
 
+    let metrics_endpoint = settings.metrics.endpoint.clone();
+    let metrics_enabled = settings.metrics.enabled;
+
     let snapshot_path = settings.service.snapshot_path.clone();
     let snapshot_manager = SnapshotManager::new(snapshot_path, node.memory.clone());
+
+    let metrics_server_handle = if metrics_enabled {
+        let addr = metrics_endpoint
+            .parse::<std::net::SocketAddr>()
+            .expect("Invalid metrics.endpoint address");
+        let node = node.clone();
+        let mut shutdown = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            info!("Node metrics HTTP server listening on {}", addr);
+            let routes = crate::metrics_http::routes(node);
+            let (_, server) = warp::serve(routes)
+                .bind_with_graceful_shutdown(addr, async move {
+                    let _ = shutdown.recv().await;
+                });
+            server.await;
+            info!("Node metrics HTTP server shut down");
+        }))
+    } else {
+        None
+    };
+    if let Some(h) = metrics_server_handle {
+        tasks.push(h);
+    }
 
     let snapshot_timestamp = if Path::new(&snapshot_manager.snapshot_path).exists() {
         match snapshot_manager.load_snapshot().await {

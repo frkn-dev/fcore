@@ -18,7 +18,7 @@ where
     }
 }
 
-#[cfg(any(feature = "xray", feature = "wireguard"))]
+#[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 #[async_trait::async_trait]
 pub trait BusinessMetrics {
     #[cfg(feature = "xray")]
@@ -27,9 +27,11 @@ pub trait BusinessMetrics {
     async fn collect_user_metrics(&self);
     #[cfg(feature = "wireguard")]
     async fn collect_wg_metrics(&self);
+    #[cfg(feature = "amnezia-wg")]
+    async fn collect_awg_metrics(&self);
 }
 
-#[cfg(any(feature = "xray", feature = "wireguard"))]
+#[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 #[async_trait::async_trait]
 impl<C> BusinessMetrics for Node<C>
 where
@@ -163,6 +165,67 @@ where
                         .push(node_uuid, "user.traffic.uplink", uplink as f64, metric_tags);
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "amnezia-wg")]
+    async fn collect_awg_metrics(&self) {
+        let awg_client = match &self.awg_client {
+            Some(c) => c,
+            None => return,
+        };
+
+        let node_uuid = self.node.uuid;
+        let base_tags = self.node.get_base_tags();
+
+        let all_stats = match awg_client.peer_stats() {
+            Ok(stats) => stats,
+            Err(e) => {
+                tracing::error!("Failed to read AmneziaWG peer stats: {}", e);
+                return;
+            }
+        };
+
+        let awg_conns = {
+            let mem = self.memory.read().await;
+            mem.iter()
+                .filter_map(|(id, conn)| {
+                    conn.get_amneziawg()
+                        .map(|awg| (*id, conn.get_subscription_id(), awg.keys.pubkey()))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (conn_id, subscription_id, pubkey) in awg_conns {
+            let Ok(pubkey) = pubkey else {
+                continue;
+            };
+            let Ok(decoded) = fcore::AwgInterface::decode_pubkey(&pubkey) else {
+                continue;
+            };
+            let Some(stats) = all_stats.get(&decoded) else {
+                continue;
+            };
+
+            let mut metric_tags = base_tags.clone();
+            metric_tags.insert("conn_id".to_string(), conn_id.to_string());
+            metric_tags.insert("proto".to_string(), "amneziawg".to_string());
+            if let Some(subscription_id) = subscription_id {
+                metric_tags.insert("subscription_id".to_string(), subscription_id.to_string());
+            }
+
+            self.metrics.push(
+                node_uuid,
+                "user.traffic.downlink",
+                stats.tx_bytes as f64,
+                metric_tags.clone(),
+            );
+            self.metrics.push(
+                node_uuid,
+                "user.traffic.uplink",
+                stats.rx_bytes as f64,
+                metric_tags,
+            );
         }
     }
 }

@@ -97,6 +97,7 @@ impl Inbound {
             stream_settings: self.stream_settings.clone(),
             tag: self.tag,
             wg: self.wg.clone(),
+            awg: self.awg.clone(),
             h2: self.h2.clone(),
             mtproto_secret: self.mtproto_secret.clone(),
         }
@@ -109,6 +110,7 @@ pub struct InboundResponse {
     pub port: u16,
     pub stream_settings: Option<StreamSettings>,
     pub wg: Option<WireguardSettings>,
+    pub awg: Option<AmneziaWgSettings>,
     pub h2: Option<H2Settings>,
     pub mtproto_secret: Option<String>,
 }

@@ -14,7 +14,7 @@ use fcore::{StatsOp, XrayHandlerActions};
 
 use fcore::ConnectionBaseOperations;
 
-#[cfg(any(feature = "xray", feature = "wireguard"))]
+#[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use super::metrics::BusinessMetrics;
 use super::node::Node;
 
@@ -432,6 +432,10 @@ where
         #[cfg(feature = "wireguard")]
         if self.wg_client.is_some() {
             self.collect_wg_metrics().await;
+        }
+        #[cfg(feature = "amnezia-wg")]
+        if self.awg_client.is_some() {
+            self.collect_awg_metrics().await;
         }
     }
 }

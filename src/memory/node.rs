@@ -21,7 +21,7 @@ use crate::config::inbound::Settings as XraySettings;
 #[cfg(feature = "amnezia-wg")]
 use crate::config::amnezia_wg::AmneziaWgSettings;
 
-use crate::config::inbound::Inbound;
+use crate::config::inbound::{Inbound, InboundResponse};
 use crate::config::mtproto::MtprotoSettings;
 use crate::config::settings::NodeConfig;
 
@@ -112,7 +112,7 @@ pub struct NodeResponse {
     pub hostname: String,
     pub interface: String,
     pub address: Ipv4Addr,
-    pub inbounds: Vec<Tag>,
+    pub inbounds: Vec<InboundResponse>,
     pub status: Status,
     pub label: String,
     pub cores: usize,
@@ -275,7 +275,11 @@ impl Node {
     }
 
     pub fn as_node_response(&self) -> NodeResponse {
-        let tags: Vec<Tag> = self.inbounds.keys().cloned().collect();
+        let inbounds: Vec<InboundResponse> = self
+            .inbounds
+            .values()
+            .map(|inbound| inbound.as_inbound_response())
+            .collect();
 
         NodeResponse {
             env: self.env.to_string(),
@@ -283,7 +287,7 @@ impl Node {
             interface: self.interface.clone(),
             address: self.address,
             uuid: self.uuid,
-            inbounds: tags,
+            inbounds,
             status: self.status,
             label: self.label.clone(),
             cores: self.cores,
@@ -301,5 +305,51 @@ impl Node {
 
     pub fn inbound(&self, tag: Tag) -> Option<&Inbound> {
         self.inbounds.values().find(|i| i.tag == tag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::inbound::Inbound;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_as_node_response_includes_inbound_settings() {
+        let inbound = Inbound {
+            tag: Tag::VlessTcpReality,
+            port: 443,
+            stream_settings: None,
+            wg: None,
+            awg: None,
+            h2: None,
+            mtproto_secret: None,
+        };
+
+        let mut inbounds = HashMap::new();
+        inbounds.insert(Tag::VlessTcpReality, inbound.clone());
+
+        let node = Node {
+            uuid: uuid::Uuid::parse_str("ab514c21-aaaa-bbbb-cccc-32f8cb1ada40").unwrap(),
+            env: Env::Experimental,
+            hostname: "test-node".to_string(),
+            address: "192.168.1.100".parse().unwrap(),
+            status: Status::Online,
+            label: "Test".to_string(),
+            interface: "eth0".to_string(),
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            inbounds,
+            cores: 4,
+            max_bandwidth_bps: 1_000_000_000,
+            country: "RU".to_string(),
+            r#type: Type::Node,
+        };
+
+        let response = node.as_node_response();
+        assert_eq!(response.inbounds.len(), 1);
+        assert_eq!(response.inbounds[0].tag, Tag::VlessTcpReality);
+        assert_eq!(response.inbounds[0].port, 443);
     }
 }
