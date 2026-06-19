@@ -10,6 +10,7 @@ use crate::memory::connection::operation::base::Operations;
 use crate::memory::tag::ProtoTag as Tag;
 use crate::utils::get_uuid_last_octet_simple;
 
+use crate::config::amnezia_wg::AmneziaWgSettings;
 use crate::config::h2::H2Settings;
 use crate::config::wireguard::WireguardSettings;
 
@@ -84,6 +85,7 @@ pub struct Inbound {
     #[serde(rename = "streamSettings")]
     pub stream_settings: Option<StreamSettings>,
     pub wg: Option<WireguardSettings>,
+    pub awg: Option<AmneziaWgSettings>,
     pub h2: Option<H2Settings>,
     pub mtproto_secret: Option<String>,
 }
@@ -95,6 +97,7 @@ impl Inbound {
             stream_settings: self.stream_settings.clone(),
             tag: self.tag,
             wg: self.wg.clone(),
+            awg: self.awg.clone(),
             h2: self.h2.clone(),
             mtproto_secret: self.mtproto_secret.clone(),
         }
@@ -107,6 +110,7 @@ pub struct InboundResponse {
     pub port: u16,
     pub stream_settings: Option<StreamSettings>,
     pub wg: Option<WireguardSettings>,
+    pub awg: Option<AmneziaWgSettings>,
     pub h2: Option<H2Settings>,
     pub mtproto_secret: Option<String>,
 }
@@ -186,6 +190,14 @@ pub trait InboundConnLink {
         address: &Ipv4Addr,
         label: &str,
     ) -> Result<String>;
+    fn amneziawg(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: &Connection,
+        _hostname: &str,
+        address: &Ipv4Addr,
+        label: &str,
+    ) -> Result<String>;
 }
 
 impl InboundConnLink for Inbound {
@@ -203,9 +215,112 @@ impl InboundConnLink for Inbound {
             Tag::VlessXhttpReality => self.vless_xhttp(conn_id, hostname, address, label),
             Tag::Hysteria2 => self.h2(hostname, label, conn),
             Tag::Wireguard => self.wireguard(conn_id, conn, hostname, address, label),
+            Tag::AmneziaWg => self.amneziawg(conn_id, conn, hostname, address, label),
             Tag::Mtproto => self.mtproto(hostname, address, label),
             Tag::Vmess => self.vmess(conn_id, hostname, address, label),
             _ => Err(Error::Custom("Unsupported protocol tag".into())),
+        }
+    }
+
+    fn amneziawg(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: &Connection,
+        _hostname: &str,
+        address: &Ipv4Addr,
+        label: &str,
+    ) -> Result<String> {
+        tracing::debug!("Trying to print AWG conn");
+
+        if let Some(awg_conn) = conn.get_amneziawg() {
+            let private_key = awg_conn.keys.privkey.clone();
+            let client_ip = awg_conn.address.clone();
+
+            if let Some(awg) = &self.awg {
+                let server_pubkey = awg.interface.private_key.pubkey()?;
+                let host = address;
+                let port = awg.interface.listen_port;
+
+                let dns = awg
+                    .interface
+                    .dns
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+
+                let mut config = format!(
+                    r#"[Interface]
+PrivateKey = {private_key}
+Address = {client_ip}
+"#,
+                );
+
+                if let Some(mtu) = awg.interface.mtu {
+                    config.push_str(&format!("MTU = {}\n", mtu));
+                }
+
+                if !dns.is_empty() {
+                    config.push_str(&format!("DNS = {}\n", dns));
+                }
+
+                if let Some(obf) = &awg.obfuscation {
+                    config.push_str(&format!(
+                        r#"
+Jc = {}
+Jmin = {}
+Jmax = {}
+S1 = {}
+S2 = {}
+S3 = {}
+S4 = {}
+H1 = {}
+H2 = {}
+H3 = {}
+H4 = {}
+I1 = {}
+I2 = {}
+I3 = {}
+I4 = {}
+I5 = {}
+"#,
+                        obf.jc,
+                        obf.jmin,
+                        obf.jmax,
+                        obf.s1,
+                        obf.s2,
+                        obf.s3,
+                        obf.s4,
+                        obf.h1,
+                        obf.h2,
+                        obf.h3,
+                        obf.h4,
+                        obf.i1,
+                        obf.i2,
+                        obf.i3,
+                        obf.i4,
+                        obf.i5,
+                    ));
+                }
+
+                config.push_str(&format!(
+                    r#"
+[Peer]
+PublicKey = {server_pubkey}
+Endpoint = {host}:{port}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+"#
+                ));
+
+                config.push_str(&format!("\n# {} — conn_id: {}\n", label, conn_id));
+
+                Ok(config)
+            } else {
+                Err(Error::Custom("AWG Inbound is not configured".into()))
+            }
+        } else {
+            Err(Error::Custom("AWG Conn is not configured".into()))
         }
     }
 

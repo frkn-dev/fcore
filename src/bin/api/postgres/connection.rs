@@ -28,6 +28,7 @@ pub struct ConnRow {
 
 impl From<(uuid::Uuid, Connection)> for ConnRow {
     fn from((conn_id, conn): (uuid::Uuid, Connection)) -> Self {
+        let wg = conn.get_wireguard().or_else(|| conn.get_amneziawg());
         ConnRow {
             conn_id,
             password: conn.get_password(),
@@ -36,7 +37,7 @@ impl From<(uuid::Uuid, Connection)> for ConnRow {
             modified_at: conn.modified_at,
             expires_at: conn.expires_at,
             subscription_id: conn.subscription_id,
-            wg: conn.get_wireguard().cloned(),
+            wg: wg.cloned(),
             proto: conn.get_proto().proto(),
             token: conn.get_token(),
             is_deleted: conn.is_deleted,
@@ -49,6 +50,14 @@ impl TryFrom<ConnRow> for Connection {
 
     fn try_from(row: ConnRow) -> Result<Self> {
         let proto = match row.proto {
+            Tag::AmneziaWg => {
+                let wg = row
+                    .wg
+                    .ok_or_else(|| Error::Custom("Missing Wireguard param".into()))?;
+
+                Proto::new_awg(&wg)
+            }
+
             Tag::Wireguard => {
                 let wg = row
                     .wg

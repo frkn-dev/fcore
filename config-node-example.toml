@@ -7,6 +7,8 @@ updates_endpoint_zmq = "tcp://localhost:3001"
 [metrics]
 interval = 100
 publisher = "tcp://localhost:3002"
+endpoint = "0.0.0.0:3000"
+enabled = true
 
 [xray]
 enabled = true

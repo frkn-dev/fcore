@@ -47,6 +47,8 @@ pub struct ServiceConfig {
     pub cors_origins: Vec<String>,
     #[serde(default = "default_wg_network")]
     pub wireguard_network: IpAddrMask,
+    #[serde(default = "default_wg_network")]
+    pub amnezia_wireguard_network: IpAddrMask,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     pub updates_endpoint_zmq: String,
@@ -78,7 +80,8 @@ pub struct TasksConfig {
     pub heartbeat_node_offline_threshold_sec: u64,
 }
 
-#[derive(Clone, Default, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct MetricsLogConfig {
     pub enabled: bool,
     pub directory: String,
@@ -87,11 +90,24 @@ pub struct MetricsLogConfig {
     pub level: String,
 }
 
+impl Default for MetricsLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            directory: "logs".to_string(),
+            file: "metrics.log".to_string(),
+            rotation: "daily".to_string(),
+            level: "debug".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct MetricsRxConfig {
     pub reciever: String,
     pub max_points: usize,
     pub retention_seconds: i64,
+    #[serde(default)]
     pub log: MetricsLogConfig,
     pub snapshot_path: String,
 }

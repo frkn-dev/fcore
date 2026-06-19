@@ -48,7 +48,7 @@ jobs:
           cargo install cargo-zigbuild
 
       - name: Build Node
-        run: cargo zigbuild --release --target ${{ matrix.target }} --bin node --features xray,wireguard
+        run: cargo zigbuild --release --target ${{ matrix.target }} --bin node --features xray,wireguard,amnezia-wg
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

@@ -134,62 +134,18 @@ alter table inbounds drop column  wg_pubkey;
 alter table inbounds drop column  wg_network;
 
 
+ALTER TABLE inbounds
+    ADD COLUMN awg_privkey TEXT,
+    ADD COLUMN awg_interface TEXT,
+    ADD COLUMN awg_address TEXT,
+    ADD COLUMN awg_dns INET[],
+    ADD COLUMN awg_obfuscation JSONB;
 
--- TIMESCALE METRICS (SINGLE SOURCE OF TRUTH)
+ALTER TABLE inbounds
+    ADD COLUMN awg_mtu SMALLINT;
 
-CREATE EXTENSION IF NOT EXISTS timescaledb;
-
-CREATE TABLE node_metrics (
-    time TIMESTAMPTZ NOT NULL,
-    node_id UUID NOT NULL,
-    metric TEXT NOT NULL,
-    value DOUBLE PRECISION NOT NULL,
-    labels JSONB NOT NULL
-);
-
-SELECT create_hypertable('node_metrics', 'time');
-
--- индексы
-CREATE INDEX idx_node_metrics_time ON node_metrics (time DESC);
-CREATE INDEX idx_node_metrics_node ON node_metrics (node_id);
-CREATE INDEX idx_node_metrics_metric ON node_metrics (metric);
-
--- GIN индекс для фильтрации по labels
-CREATE INDEX idx_node_metrics_labels ON node_metrics USING GIN (labels);
-
--- compression (очень важно для прод)
-ALTER TABLE node_metrics SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'node_id, metric'
-);
-
-SELECT add_compression_policy('node_metrics', INTERVAL '7 days');
-
--- retention (опционально)
-SELECT add_retention_policy('node_metrics', INTERVAL '90 days');
-
-ALTER TABLE node_metrics ADD PRIMARY KEY (time, node_id, metric);
-CREATE INDEX ON node_metrics (node_id, time DESC);
-
-SELECT set_chunk_time_interval('node_metrics', INTERVAL '1 day');
+ALTER TYPE proto
+ADD VALUE 'amnezia_wg';
 
 
-CREATE INDEX idx_node_metrics_grafana
-ON node_metrics (metric, node_id, time DESC);
 
-ALTER TABLE node_metrics SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'node_id, metric',
-  timescaledb.compress_orderby = 'time DESC'
-);
-
-
-CREATE MATERIALIZED VIEW node_metrics_1m
-WITH (timescaledb.continuous) AS
-SELECT
-  time_bucket('1 minute', time) AS bucket,
-  node_id,
-  metric,
-  avg(value) AS value
-FROM node_metrics
-GROUP BY bucket, node_id, metric;

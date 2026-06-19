@@ -25,6 +25,13 @@ reciever = "tcp://0.0.0.0:3002"
 max_points = 10000
 retention_seconds = 604800 # 7 days
 
+[metrics.log]
+enabled = true
+directory = "logs/"
+file = "metrics.log"
+rotation = "daily"
+level = "info"
+
 [tasks]
 db_sync_interval_sec = 1000
 subscription_restore_interval = 600

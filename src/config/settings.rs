@@ -13,10 +13,22 @@ pub struct ApiAccessConfig {
     pub token: String,
 }
 
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+fn default_metrics_endpoint() -> String {
+    "0.0.0.0:3000".to_string()
+}
+
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct MetricsTxConfig {
     pub publisher: String,
     pub interval: u64,
+    #[serde(default = "default_metrics_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_endpoint")]
+    pub endpoint: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

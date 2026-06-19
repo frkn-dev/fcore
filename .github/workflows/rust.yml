@@ -18,9 +18,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Test Lib
         run: cargo test --lib
 
@@ -43,23 +40,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools
-          pip3 install ziglang
-          cargo install cargo-zigbuild
+      - name: Install cross
+        run: cargo install cross
 
-      - name: Build Node (static)
+      - name: Build Node
         run: |
-          RUSTFLAGS="-C target-feature=+crt-static" \
-          cargo zigbuild  --release \
+          cross build --release \
             --bin node \
             --target ${{ matrix.target }} \
-            --features xray,wireguard
+            --features xray,wireguard,amnezia-wg
 
-      - name: Verify static binary
+      - name: Verify binary
         run: |
+          file target/${{ matrix.target }}/release/node
           ldd target/${{ matrix.target }}/release/node || true
 
       - name: Upload Artifact
@@ -80,23 +73,23 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools
-          pip3 install ziglang
-          cargo install cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: api
 
-      - name: Build API (static)
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build API
         run: |
-          RUSTFLAGS="-C target-feature=+crt-static" \
-          cargo zigbuild --release \
+          cross build --release \
              --bin api \
              --no-default-features \
              --target x86_64-unknown-linux-musl
 
-      - name: Verify static binary
+      - name: Verify binary
         run: |
+          file target/x86_64-unknown-linux-musl/release/api
           ldd target/x86_64-unknown-linux-musl/release/api || true
 
       - name: Upload Artifact
@@ -117,23 +110,23 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools
-          pip3 install ziglang
-          cargo install cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: auth
 
-      - name: Build Auth (static)
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build Auth
         run: |
-          RUSTFLAGS="-C target-feature=+crt-static" \
-          cargo zigbuild --release \
+          cross build --release \
             --bin auth \
             --no-default-features \
             --target x86_64-unknown-linux-musl
 
-      - name: Verify static binary
+      - name: Verify binary
         run: |
+          file target/x86_64-unknown-linux-musl/release/auth
           ldd target/x86_64-unknown-linux-musl/release/auth || true
 
       - name: Upload Artifact

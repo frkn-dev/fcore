@@ -1,6 +1,7 @@
 mod config;
 mod http;
 mod metrics;
+mod metrics_http;
 mod node;
 mod snapshot;
 #[cfg(feature = "xray")]

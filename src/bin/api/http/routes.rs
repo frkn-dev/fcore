@@ -13,7 +13,7 @@ use super::{
     super::service::Service,
     filters::*,
     handlers::{
-        connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*, trial::*,
+        amnezia::*, connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*, trial::*,
     },
     param::*,
     rejection,
@@ -151,6 +151,12 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(wireguard_connections_handler);
 
+        let get_awg_connections_info_route = warp::path!("info" / "connections" / "amneziawg")
+            .and(warp::get())
+            .and(warp::query::<ConnectionInfoRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(amnezia_wireguard_connections_handler);
+
         let get_mtproto_connections_info_route = warp::path!("info" / "connections" / "mtproto")
             .and(warp::get())
             .and(warp::query::<ConnectionInfoRequest>())
@@ -172,6 +178,9 @@ where
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
             .and_then(create_connection_handler);
 
         let delete_connection_route = warp::delete()
@@ -217,6 +226,9 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_email_store(self.email_store.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
             .and(with_param_vec_string(params.system_refer_codes.clone()))
             .and(with_param_envs(params.enabled_envs.clone()))
             .and(with_param_tags(params.enabled_tags.clone()))
@@ -224,6 +236,31 @@ where
             .and(with_i64(params.bonus_days))
             .and(with_i64(params.trial_limit_bytes))
             .and_then(post_trial_handler);
+
+        // Amnezia gateway routes
+        let post_amnezia_services_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("services"))
+            .and(warp::path::end())
+            .and(warp::body::json::<GatewayServicesRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(gateway_services_handler);
+
+        let post_amnezia_account_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("account_info"))
+            .and(warp::path::end())
+            .and(warp::body::json::<GatewayAccountInfoRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(gateway_account_info_handler);
+
+        let post_amnezia_config_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("config"))
+            .and(warp::path::end())
+            .and(warp::body::json::<GatewayConfigRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(gateway_config_handler);
 
         //Metrics
 
@@ -254,6 +291,7 @@ where
             .or(delete_connection_route)
             .or(get_mtproto_connections_info_route)
             .or(get_wg_connections_info_route)
+            .or(get_awg_connections_info_route)
             .or(get_a_connection_route)
             // Key
             .or(get_key_validation_route)
@@ -261,6 +299,10 @@ where
             .or(post_activate_key_route)
             //Trial
             .or(post_trial_route)
+            // Amnezia
+            .or(post_amnezia_services_route)
+            .or(post_amnezia_account_route)
+            .or(post_amnezia_config_route)
             // Metrics
             .or(ws_route)
             .recover(rejection)

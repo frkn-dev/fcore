@@ -25,6 +25,9 @@ pub enum TagReq {
     #[serde(alias = "wireguard", alias = "Wireguard")]
     Wireguard,
 
+    #[serde(alias = "amneziawg", alias = "Amneziawg")]
+    AmneziaWg,
+
     #[serde(alias = "VlessTcpReality")]
     VlessTcpReality,
 
@@ -72,6 +75,7 @@ impl TagReq {
                 Tag::Hysteria2,
             ],
             TagReq::Wireguard => vec![Tag::Wireguard],
+            TagReq::AmneziaWg => vec![Tag::AmneziaWg],
             TagReq::Hysteria2 => vec![Tag::Hysteria2],
             TagReq::VlessTcpReality => vec![Tag::VlessTcpReality],
             TagReq::VlessGrpcReality => vec![Tag::VlessGrpcReality],
@@ -198,6 +202,7 @@ impl SubscriptionInfoRequest {
             Xray => [Txt, Base64, Clash].into(),
             Proxy => [Txt, Base64].into(),
             Wireguard => [].into(),
+            AmneziaWg => [].into(),
             Hysteria2 => [Txt, Base64].into(),
             VlessTcpReality => [Txt, Base64, Clash].into(),
             VlessGrpcReality => [Txt, Base64, Clash].into(),

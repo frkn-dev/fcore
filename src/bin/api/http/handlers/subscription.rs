@@ -208,6 +208,7 @@ where
             let mut has_h2 = false;
             let mut has_mtproto = false;
             let mut has_wg = false;
+            let mut has_awg = false;
 
             let nodes = mem.nodes.get_by_env(&env);
 
@@ -236,6 +237,12 @@ where
                     .any(|n| n.inbounds.values().any(|i| i.tag == Tag::Wireguard))
             });
 
+            let awg_nodes = nodes.clone();
+            let awg_node_exist = awg_nodes.is_some_and(|ns| {
+                ns.iter()
+                    .any(|n| n.inbounds.values().any(|i| i.tag == Tag::AmneziaWg))
+            });
+
             let h2_node_exists = nodes.is_some_and(|ns| {
                 ns.iter()
                     .any(|n| n.inbounds.values().any(|i| i.tag == Tag::Hysteria2))
@@ -255,6 +262,10 @@ where
                         has_wg = true;
                     }
 
+                    if awg_node_exist && proto == Tag::AmneziaWg {
+                        has_awg = true;
+                    }
+
                     if mtproto_node_exist && proto == Tag::Mtproto {
                         has_mtproto = true;
                     }
@@ -267,6 +278,7 @@ where
                 has_h2,
                 has_mtproto,
                 has_wg,
+                has_awg,
             });
         }
     }

@@ -54,4 +54,5 @@ pub struct EnvInfo {
     pub has_h2: bool,
     pub has_mtproto: bool,
     pub has_wg: bool,
+    pub has_awg: bool,
 }

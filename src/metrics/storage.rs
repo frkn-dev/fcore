@@ -78,6 +78,69 @@ impl MetricBuffer {
             tracing::error!("Batch publish failed: {}", e);
         }
     }
+
+    /// Return the current batch contents as Prometheus text exposition.
+    /// The batch is read but not cleared, so regular ZMQ flushing continues.
+    pub fn to_prometheus(&self, node_id: uuid::Uuid) -> String {
+        let batch = self.batch.lock();
+        let mut out = String::new();
+
+        for e in batch.iter() {
+            let name = sanitize_prometheus_name(&e.name);
+            let mut tags = e.tags.clone();
+            tags.insert("node_id".to_string(), node_id.to_string());
+            let labels = format_prometheus_labels(&tags);
+
+            out.push_str(&format!("{}{} {}\n", name, labels, e.value));
+        }
+
+        out
+    }
+}
+
+fn sanitize_prometheus_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_alphanumeric() || c == ':' || c == '_' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+        // Leading digit is illegal; prefix with underscore if needed.
+        if i == 0 && c.is_ascii_digit() {
+            out.insert(0, '_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("metric");
+    }
+    out
+}
+
+fn format_prometheus_labels(tags: &std::collections::BTreeMap<String, String>) -> String {
+    if tags.is_empty() {
+        return String::new();
+    }
+
+    let labels: Vec<String> = tags
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}=\"{}\"",
+                sanitize_prometheus_name(k),
+                escape_prometheus_label(v)
+            )
+        })
+        .collect();
+
+    format!("{{{}}}", labels.join(","))
+}
+
+fn escape_prometheus_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 pub struct MetricStorage {
@@ -377,5 +440,63 @@ impl MetricStorage {
         let downlink = self.sum_metric("user.traffic.downlink", &tags);
 
         (uplink, downlink)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_sanitize_prometheus_name() {
+        assert_eq!(sanitize_prometheus_name("sys.mem_free"), "sys_mem_free");
+        assert_eq!(
+            sanitize_prometheus_name("net.ens3.tx_bps"),
+            "net_ens3_tx_bps"
+        );
+        assert_eq!(sanitize_prometheus_name("123metric"), "_123metric");
+        assert_eq!(sanitize_prometheus_name(""), "metric");
+    }
+
+    #[test]
+    fn test_format_prometheus_labels() {
+        let mut tags = BTreeMap::new();
+        tags.insert("hostname".to_string(), "darkmachine".to_string());
+        tags.insert("env".to_string(), "experimental".to_string());
+        let labels = format_prometheus_labels(&tags);
+        assert!(labels.contains("hostname=\"darkmachine\""));
+        assert!(labels.contains("env=\"experimental\""));
+        assert!(labels.starts_with('{') && labels.ends_with('}'));
+    }
+
+    #[test]
+    fn test_escape_prometheus_label() {
+        assert_eq!(escape_prometheus_label("a\"b"), "a\\\"b");
+        assert_eq!(escape_prometheus_label("a\\b"), "a\\\\b");
+        assert_eq!(escape_prometheus_label("a\nb"), "a\\nb");
+    }
+
+    #[tokio::test]
+    async fn test_metric_buffer_to_prometheus() {
+        let publisher = Publisher::connect("inproc://test-metric-buffer-prometheus")
+            .await
+            .expect("connect publisher");
+        let buffer = MetricBuffer {
+            batch: parking_lot::Mutex::new(Vec::new()),
+            publisher,
+        };
+
+        let node_id = uuid::Uuid::parse_str("ab514c21-aaaa-bbbb-cccc-32f8cb1ada40").unwrap();
+        let mut tags = BTreeMap::new();
+        tags.insert("hostname".to_string(), "test-node".to_string());
+
+        buffer.push(node_id, "sys.mem_free", 1024.0, tags);
+
+        let output = buffer.to_prometheus(node_id);
+        assert!(output.contains("sys_mem_free"));
+        assert!(output.contains("node_id=\"ab514c21-aaaa-bbbb-cccc-32f8cb1ada40\""));
+        assert!(output.contains("hostname=\"test-node\""));
+        assert!(output.contains("1024"));
     }
 }

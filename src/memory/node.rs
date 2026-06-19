@@ -12,14 +12,19 @@ use serde::{Deserialize, Serialize};
 
 use super::env::Env;
 use super::tag::ProtoTag as Tag;
+
 use crate::config::h2::H2Settings;
 
 #[cfg(feature = "xray")]
 use crate::config::inbound::Settings as XraySettings;
 
-use crate::config::inbound::Inbound;
+#[cfg(feature = "amnezia-wg")]
+use crate::config::amnezia_wg::AmneziaWgSettings;
+
+use crate::config::inbound::{Inbound, InboundResponse};
 use crate::config::mtproto::MtprotoSettings;
 use crate::config::settings::NodeConfig;
+
 #[cfg(feature = "wireguard")]
 use crate::config::wireguard::WireguardSettings;
 
@@ -107,7 +112,7 @@ pub struct NodeResponse {
     pub hostname: String,
     pub interface: String,
     pub address: Ipv4Addr,
-    pub inbounds: Vec<Tag>,
+    pub inbounds: Vec<InboundResponse>,
     pub status: Status,
     pub label: String,
     pub cores: usize,
@@ -153,6 +158,7 @@ impl Node {
         settings: NodeConfig,
         #[cfg(feature = "xray")] xray_config: Option<XraySettings>,
         #[cfg(feature = "wireguard")] wg_config: Option<WireguardSettings>,
+        #[cfg(feature = "amnezia-wg")] awg_config: Option<AmneziaWgSettings>,
         h2_config: Option<H2Settings>,
         mtproto_config: Option<MtprotoSettings>,
     ) -> Self {
@@ -179,7 +185,24 @@ impl Node {
                         port: config.port,
                         tag: Tag::Wireguard,
                         stream_settings: None,
+                        awg: None,
                         wg: wg_config,
+                        h2: None,
+                        mtproto_secret: None,
+                    },
+                );
+            }
+
+            #[cfg(feature = "amnezia-wg")]
+            if let Some(ref config) = awg_config {
+                inbounds.insert(
+                    Tag::AmneziaWg,
+                    Inbound {
+                        port: config.interface.listen_port,
+                        tag: Tag::AmneziaWg,
+                        stream_settings: None,
+                        awg: awg_config,
+                        wg: None,
                         h2: None,
                         mtproto_secret: None,
                     },
@@ -194,6 +217,7 @@ impl Node {
                         tag: Tag::Mtproto,
                         stream_settings: None,
                         wg: None,
+                        awg: None,
                         h2: None,
                         mtproto_secret: Some(config.secret[0].key.clone()),
                     },
@@ -208,6 +232,7 @@ impl Node {
                         tag: Tag::Hysteria2,
                         stream_settings: None,
                         wg: None,
+                        awg: None,
                         h2: h2_config,
                         mtproto_secret: None,
                     },
@@ -250,7 +275,11 @@ impl Node {
     }
 
     pub fn as_node_response(&self) -> NodeResponse {
-        let tags: Vec<Tag> = self.inbounds.keys().cloned().collect();
+        let inbounds: Vec<InboundResponse> = self
+            .inbounds
+            .values()
+            .map(|inbound| inbound.as_inbound_response())
+            .collect();
 
         NodeResponse {
             env: self.env.to_string(),
@@ -258,7 +287,7 @@ impl Node {
             interface: self.interface.clone(),
             address: self.address,
             uuid: self.uuid,
-            inbounds: tags,
+            inbounds,
             status: self.status,
             label: self.label.clone(),
             cores: self.cores,
@@ -276,5 +305,51 @@ impl Node {
 
     pub fn inbound(&self, tag: Tag) -> Option<&Inbound> {
         self.inbounds.values().find(|i| i.tag == tag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::inbound::Inbound;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_as_node_response_includes_inbound_settings() {
+        let inbound = Inbound {
+            tag: Tag::VlessTcpReality,
+            port: 443,
+            stream_settings: None,
+            wg: None,
+            awg: None,
+            h2: None,
+            mtproto_secret: None,
+        };
+
+        let mut inbounds = HashMap::new();
+        inbounds.insert(Tag::VlessTcpReality, inbound.clone());
+
+        let node = Node {
+            uuid: uuid::Uuid::parse_str("ab514c21-aaaa-bbbb-cccc-32f8cb1ada40").unwrap(),
+            env: Env::Experimental,
+            hostname: "test-node".to_string(),
+            address: "192.168.1.100".parse().unwrap(),
+            status: Status::Online,
+            label: "Test".to_string(),
+            interface: "eth0".to_string(),
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            inbounds,
+            cores: 4,
+            max_bandwidth_bps: 1_000_000_000,
+            country: "RU".to_string(),
+            r#type: Type::Node,
+        };
+
+        let response = node.as_node_response();
+        assert_eq!(response.inbounds.len(), 1);
+        assert_eq!(response.inbounds[0].tag, Tag::VlessTcpReality);
+        assert_eq!(response.inbounds[0].port, 443);
     }
 }

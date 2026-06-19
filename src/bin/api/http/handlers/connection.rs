@@ -10,8 +10,8 @@ use fcore::{
         {request::ConnType, response::Instance},
     },
     utils, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, InboundConnLink, IpAddrMask, NodeStorageOperations, Proto,
-    Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations, Tag, Topic,
+    ConnectionStorageApiOperations, InboundConnLink, IpAddrMask, NodeStatus, NodeStorageOperations,
+    Proto, Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations, Tag, Topic,
     WgKeys, WgParam,
 };
 
@@ -107,6 +107,7 @@ pub async fn create_connection_handler<N, C, S>(
     conn_req: ConnCreateRequest,
     memory: MemSync<N, C, S>,
     wg_network: IpAddrMask,
+    awg_network: IpAddrMask,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -177,6 +178,36 @@ where
             }
 
             Proto::Wireguard {
+                param: WgParam {
+                    keys: WgKeys::default(),
+                    address: IpAddrMask {
+                        address: IpAddr::V4(next),
+                        cidr: 32,
+                    },
+                },
+            }
+        }
+        Tag::AmneziaWg => {
+            let last_ip: Option<Ipv4Addr> = mem
+                .connections
+                .get_last_awg_addr()
+                .and_then(|mask| mask.as_ipv4());
+
+            let next = match last_ip {
+                Some(ip) => IpAddrMask::increment_ipv4(ip),
+                None => awg_network.first_peer_ip(),
+            };
+
+            let next = match next {
+                Some(ip) => ip,
+                None => return Ok(http::internal_error("Failed to allocate IP")),
+            };
+
+            if !awg_network.contains_ipv4(next) {
+                return Ok(http::internal_error("IP out of range"));
+            }
+
+            Proto::AmneziaWg {
                 param: WgParam {
                     keys: WgKeys::default(),
                     address: IpAddrMask {
@@ -412,7 +443,95 @@ where
 
             if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
                 for node in nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&Tag::Wireguard) {
+                        let c: Connection = conn.clone().into();
+
+                        if let Ok(link) = inbound.create_link(
+                            &conn_id,
+                            &c,
+                            &node.hostname,
+                            &node.address,
+                            &node.label,
+                        ) {
+                            result.push(serde_json::json!({
+                                "conn_id": conn_id,
+                                "label": node.label,
+                                "env": node.env,
+                                "config": link
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    drop(mem);
+
+    Ok(Box::new(warp::reply::json(&serde_json::json!({
+        "nodes": result
+    }))))
+}
+
+pub async fn amnezia_wireguard_connections_handler<N, C, S>(
+    req: ConnectionInfoRequest,
+    memory: MemSync<N, C, S>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    Connection: From<C>,
+{
+    if let Err(e) = req.validate() {
+        return Ok(Box::new(http::bad_request(&format!("Bad Request: {}", e))));
+    };
+
+    let mem = memory.memory.read().await;
+
+    if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
+        if !sub.is_active() {
+            return Ok(Box::new(http::not_found(&format!(
+                "Subscription {} is expired",
+                req.id
+            ))));
+        }
+    }
+
+    let conns = mem.connections.get_by_subscription_id(&req.id);
+
+    if conns.is_none() {
+        return Ok(Box::new(http::not_found("No connections")));
+    }
+
+    let mut result = vec![];
+
+    if let Some(conns) = conns {
+        for (conn_id, conn) in conns {
+            if conn.get_deleted() || conn.get_env() != req.env {
+                continue;
+            }
+
+            if conn.get_proto().proto() != Tag::AmneziaWg {
+                continue;
+            }
+
+            if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
+                for node in nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
+                    if let Some(inbound) = node.inbounds.get(&Tag::AmneziaWg) {
                         let c: Connection = conn.clone().into();
 
                         if let Ok(link) = inbound.create_link(
@@ -494,6 +613,9 @@ where
 
             if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
                 for node in nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&Tag::Mtproto) {
                         let link = inbound.mtproto(&node.hostname, &node.address, &node.label);
 
