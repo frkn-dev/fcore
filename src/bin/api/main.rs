@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::collections::HashMap;
 
 use fcore::{Connection, Env, Node, Result, Settings, Subscription, BANNER, VERSION};
