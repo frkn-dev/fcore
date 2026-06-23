@@ -156,6 +156,8 @@ impl MetricStorage {
                 | "net.inbound.VlessTcpReality.downlink"
                 | "net.inbound.VlessXhttpReality.uplink"
                 | "net.inbound.VlessXhttpReality.downlink"
+                | "net.inbound.VlessXhttpCdn.uplink"
+                | "net.inbound.VlessXhttpCdn.downlink"
                 | "net.inbound.VlessGrpcReality.uplink"
                 | "net.inbound.VlessGrpcReality.downlink"
         )

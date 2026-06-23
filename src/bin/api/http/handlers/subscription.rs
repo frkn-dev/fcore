@@ -1,7 +1,6 @@
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 use warp::http::{Response, StatusCode};
 
@@ -216,6 +215,7 @@ where
                 Tag::VlessGrpcReality,
                 Tag::VlessTcpReality,
                 Tag::VlessXhttpReality,
+                Tag::VlessXhttpCdn,
                 Tag::Vmess,
             ];
 
@@ -379,7 +379,7 @@ where
     // -------------------------
     // Build inbound list
     // -------------------------
-    let mut inbounds_list: Vec<(Inbound, uuid::Uuid, Connection, String, Ipv4Addr, String)> =
+    let mut inbounds_list: Vec<(Inbound, uuid::Uuid, Connection, String, String, String)> =
         Vec::new();
 
     match env_filter {
@@ -401,7 +401,7 @@ where
                             *conn_id,
                             conn.clone(),
                             node.hostname.clone(),
-                            node.address,
+                            node.connection_host(),
                             node.label.clone(),
                         ));
                     }
@@ -426,7 +426,7 @@ where
                             *conn_id,
                             conn.clone(),
                             node.hostname.clone(),
-                            node.address,
+                            node.connection_host(),
                             node.label.clone(),
                         ));
                     }
@@ -434,6 +434,16 @@ where
             }
         }
     }
+
+    // -------------------------
+    // Deduplicate nodes that belong to the same cluster
+    // -------------------------
+    inbounds_list.sort_by(|a, b| {
+        a.4.cmp(&b.4)
+            .then_with(|| a.0.tag.to_string().cmp(&b.0.tag.to_string()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    inbounds_list.dedup_by(|a, b| a.4 == b.4 && a.0.tag == b.0.tag && a.1 == b.1);
 
     // -------------------------
     // Empty check
@@ -477,8 +487,8 @@ where
         FormatReq::Txt => {
             let links: Result<Vec<_>, _> = inbounds_list
                 .iter()
-                .map(|(inbound, conn_id, conn, hostname, address, label)| {
-                    inbound.create_link(conn_id, conn, hostname, address, label)
+                .map(|(inbound, conn_id, conn, hostname, host, label)| {
+                    inbound.create_link(conn_id, conn, hostname, host, label)
                 })
                 .collect();
 
@@ -493,8 +503,8 @@ where
         FormatReq::Base64 => {
             let links: Result<Vec<_>, _> = inbounds_list
                 .iter()
-                .map(|(inbound, conn_id, conn, hostname, address, label)| {
-                    inbound.create_link(conn_id, conn, hostname, address, label)
+                .map(|(inbound, conn_id, conn, hostname, host, label)| {
+                    inbound.create_link(conn_id, conn, hostname, host, label)
                 })
                 .collect();
 
@@ -511,8 +521,8 @@ where
         FormatReq::Clash => {
             let proxies: Vec<_> = inbounds_list
                 .iter()
-                .filter_map(|(inbound, conn_id, _conn, hostname, address, label)| {
-                    inbound.proxy(conn_id, hostname, address, label)
+                .filter_map(|(inbound, conn_id, _conn, hostname, host, label)| {
+                    inbound.proxy(conn_id, hostname, host, label)
                 })
                 .collect();
 

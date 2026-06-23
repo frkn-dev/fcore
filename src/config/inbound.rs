@@ -1,6 +1,5 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
 use std::{fs::File, io::Read};
 use url::Url;
 
@@ -34,6 +33,8 @@ pub struct StreamSettings {
     pub grpc_settings: Option<GrpcSettings>,
     #[serde(rename = "xhttpSettings")]
     pub xhttp_settings: Option<XhttpSettings>,
+    #[serde(rename = "tlsSettings")]
+    pub tls_settings: Option<TlsSettings>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -58,6 +59,23 @@ pub struct RealitySettings {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XhttpSettings {
     pub path: String,
+    pub mode: Option<String>,
+    pub extra: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TlsSettings {
+    #[serde(rename = "serverName")]
+    pub server_name: Option<String>,
+    pub certificates: Vec<Certificate>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Certificate {
+    #[serde(rename = "certificateFile")]
+    pub certificate_file: String,
+    #[serde(rename = "keyFile")]
+    pub key_file: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -149,28 +167,35 @@ pub trait InboundConnLink {
         conn_id: &uuid::Uuid,
         conn: &Connection,
         hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String>;
     fn vless_xtls(
         &self,
         conn_id: &uuid::Uuid,
         hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String>;
     fn vless_grpc(
         &self,
         conn_id: &uuid::Uuid,
         hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String>;
     fn vless_xhttp(
         &self,
         conn_id: &uuid::Uuid,
         hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
+        label: &str,
+    ) -> Result<String>;
+    fn vless_xhttp_cdn(
+        &self,
+        conn_id: &uuid::Uuid,
+        hostname: &str,
+        host: &str,
         label: &str,
     ) -> Result<String>;
     fn h2(&self, hostname: &str, label: &str, conn: &Connection) -> Result<String>;
@@ -178,16 +203,16 @@ pub trait InboundConnLink {
         &self,
         conn_id: &uuid::Uuid,
         hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String>;
-    fn mtproto(&self, hostname: &str, address: &Ipv4Addr, label: &str) -> Result<String>;
+    fn mtproto(&self, hostname: &str, host: &str, label: &str) -> Result<String>;
     fn wireguard(
         &self,
         conn_id: &uuid::Uuid,
         conn: &Connection,
         hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String>;
     fn amneziawg(
@@ -195,7 +220,7 @@ pub trait InboundConnLink {
         conn_id: &uuid::Uuid,
         conn: &Connection,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String>;
 }
@@ -206,18 +231,19 @@ impl InboundConnLink for Inbound {
         conn_id: &uuid::Uuid,
         conn: &Connection,
         hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String> {
         match self.tag {
-            Tag::VlessTcpReality => self.vless_xtls(conn_id, hostname, address, label),
-            Tag::VlessGrpcReality => self.vless_grpc(conn_id, hostname, address, label),
-            Tag::VlessXhttpReality => self.vless_xhttp(conn_id, hostname, address, label),
+            Tag::VlessTcpReality => self.vless_xtls(conn_id, hostname, host, label),
+            Tag::VlessGrpcReality => self.vless_grpc(conn_id, hostname, host, label),
+            Tag::VlessXhttpReality => self.vless_xhttp(conn_id, hostname, host, label),
+            Tag::VlessXhttpCdn => self.vless_xhttp_cdn(conn_id, hostname, host, label),
             Tag::Hysteria2 => self.h2(hostname, label, conn),
-            Tag::Wireguard => self.wireguard(conn_id, conn, hostname, address, label),
-            Tag::AmneziaWg => self.amneziawg(conn_id, conn, hostname, address, label),
-            Tag::Mtproto => self.mtproto(hostname, address, label),
-            Tag::Vmess => self.vmess(conn_id, hostname, address, label),
+            Tag::Wireguard => self.wireguard(conn_id, conn, hostname, host, label),
+            Tag::AmneziaWg => self.amneziawg(conn_id, conn, hostname, host, label),
+            Tag::Mtproto => self.mtproto(hostname, host, label),
+            Tag::Vmess => self.vmess(conn_id, hostname, host, label),
             _ => Err(Error::Custom("Unsupported protocol tag".into())),
         }
     }
@@ -227,7 +253,7 @@ impl InboundConnLink for Inbound {
         conn_id: &uuid::Uuid,
         conn: &Connection,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String> {
         tracing::debug!("Trying to print AWG conn");
@@ -238,7 +264,6 @@ impl InboundConnLink for Inbound {
 
             if let Some(awg) = &self.awg {
                 let server_pubkey = awg.interface.private_key.pubkey()?;
-                let host = address;
                 let port = awg.interface.listen_port;
 
                 let dns = awg
@@ -329,7 +354,7 @@ PersistentKeepalive = 25
         conn_id: &uuid::Uuid,
         conn: &Connection,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String> {
         tracing::debug!("Trying to print WG conn");
@@ -339,7 +364,6 @@ PersistentKeepalive = 25
 
             if let Some(wg) = &self.wg {
                 let server_pubkey = wg.keys.pubkey()?;
-                let host = address;
                 let port = wg.port;
 
                 let dns = wg
@@ -379,7 +403,7 @@ PersistentKeepalive = 25
         &self,
         conn_id: &uuid::Uuid,
         _hostname: &str,
-        address: &Ipv4Addr,
+        _host: &str,
         label: &str,
     ) -> Result<String> {
         let port = self.port;
@@ -429,7 +453,7 @@ PersistentKeepalive = 25
         let conn = VmessConnection {
             v: "2".into(),
             ps: format!("Vmess {}", label),
-            add: address.to_string(),
+            add: host.to_string(),
             port: port.to_string(),
             id: conn_id.to_string(),
             aid: "0".into(),
@@ -453,7 +477,7 @@ PersistentKeepalive = 25
         &self,
         conn_id: &uuid::Uuid,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String> {
         let s = self
@@ -475,7 +499,7 @@ PersistentKeepalive = 25
             .first()
             .ok_or(Error::Custom("Missing SNI".into()))?;
 
-        let mut url = Url::parse(&format!("vless://{conn_id}@{address}:{}", self.port))?;
+        let mut url = Url::parse(&format!("vless://{conn_id}@{host}:{}", self.port))?;
         url.query_pairs_mut()
             .append_pair("security", "reality")
             .append_pair("flow", "xtls-rprx-vision")
@@ -497,7 +521,7 @@ PersistentKeepalive = 25
         &self,
         conn_id: &uuid::Uuid,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String> {
         let s = self
@@ -513,7 +537,7 @@ PersistentKeepalive = 25
             .as_ref()
             .ok_or(Error::Custom("Missing gRPC settings".into()))?;
 
-        let mut url = Url::parse(&format!("vless://{conn_id}@{address}:{}", self.port))?;
+        let mut url = Url::parse(&format!("vless://{conn_id}@{host}:{}", self.port))?;
         url.query_pairs_mut()
             .append_pair("security", "reality")
             .append_pair("type", "grpc")
@@ -534,7 +558,7 @@ PersistentKeepalive = 25
         &self,
         conn_id: &uuid::Uuid,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Result<String> {
         let s = self
@@ -550,7 +574,7 @@ PersistentKeepalive = 25
             .as_ref()
             .ok_or(Error::Custom("Missing xHTTP settings".into()))?;
 
-        let mut url = Url::parse(&format!("vless://{conn_id}@{address}:{}", self.port))?;
+        let mut url = Url::parse(&format!("vless://{conn_id}@{host}:{}", self.port))?;
         url.query_pairs_mut()
             .append_pair("security", "reality")
             .append_pair("type", "xhttp")
@@ -559,6 +583,57 @@ PersistentKeepalive = 25
 
         url.set_fragment(Some(&format!(
             "{} | {} XHTTP",
+            label,
+            get_uuid_last_octet_simple(conn_id)
+        )));
+        Ok(url.to_string())
+    }
+
+    fn vless_xhttp_cdn(
+        &self,
+        conn_id: &uuid::Uuid,
+        _hostname: &str,
+        host: &str,
+        label: &str,
+    ) -> Result<String> {
+        let s = self
+            .stream_settings
+            .as_ref()
+            .ok_or(Error::Custom("Missing stream settings".into()))?;
+        let x = s
+            .xhttp_settings
+            .as_ref()
+            .ok_or(Error::Custom("Missing xHTTP settings".into()))?;
+
+        let cdn_host = s
+            .tls_settings
+            .as_ref()
+            .and_then(|t| t.server_name.clone())
+            .unwrap_or_else(|| host.to_string());
+
+        let mut url = Url::parse(&format!("vless://{conn_id}@{cdn_host}:{}", self.port))?;
+        let mut builder = url.query_pairs_mut();
+        builder
+            .append_pair("encryption", "none")
+            .append_pair("security", "tls")
+            .append_pair("type", "xhttp")
+            .append_pair("host", &cdn_host)
+            .append_pair("path", &x.path)
+            .append_pair("sni", &cdn_host);
+
+        if let Some(mode) = &x.mode {
+            builder.append_pair("mode", mode);
+        }
+
+        drop(builder);
+
+        if let Some(extra) = &x.extra {
+            let extra_json = serde_json::to_string(extra)?;
+            url.query_pairs_mut().append_pair("extra", &extra_json);
+        }
+
+        url.set_fragment(Some(&format!(
+            "{} | {} XHTTP-CDN",
             label,
             get_uuid_last_octet_simple(conn_id)
         )));
@@ -588,7 +663,7 @@ PersistentKeepalive = 25
         }
     }
 
-    fn mtproto(&self, _hostname: &str, address: &Ipv4Addr, label: &str) -> Result<String> {
+    fn mtproto(&self, _hostname: &str, host: &str, label: &str) -> Result<String> {
         let port = self.port;
 
         let secret = self
@@ -597,11 +672,79 @@ PersistentKeepalive = 25
             .ok_or(Error::Custom("Mtproto settings missing".into()))?;
 
         let mut url = Url::parse(&format!(
-            "https://t.me/proxy?server={address}&port={port}&secret={secret}"
+            "https://t.me/proxy?server={host}&port={port}&secret={secret}"
         ))?;
 
         url.set_fragment(Some(label));
 
         Ok(url.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vless_xhttp_cdn_link() {
+        let inbound = Inbound {
+            tag: Tag::VlessXhttpCdn,
+            port: 443,
+            stream_settings: Some(StreamSettings {
+                network: Network::Xhttp,
+                tcp_settings: None,
+                reality_settings: None,
+                grpc_settings: None,
+                xhttp_settings: Some(XhttpSettings {
+                    path: "/cdn".into(),
+                    mode: Some("auto".into()),
+                    extra: Some(serde_json::json!({"scMaxEachPostBytes": 1000000})),
+                }),
+                tls_settings: Some(TlsSettings {
+                    server_name: Some("cdn.example.com".into()),
+                    certificates: vec![],
+                }),
+            }),
+            wg: None,
+            awg: None,
+            h2: None,
+            mtproto_secret: None,
+        };
+
+        let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let link = inbound
+            .vless_xhttp_cdn(&conn_id, "node", "node.example.com", "Test")
+            .unwrap();
+
+        assert!(
+            link.starts_with("vless://550e8400-e29b-41d4-a716-446655440000@cdn.example.com:443?"),
+            "unexpected link start: {}",
+            link
+        );
+        assert!(
+            link.contains("encryption=none"),
+            "missing encryption: {}",
+            link
+        );
+        assert!(link.contains("security=tls"), "missing security: {}", link);
+        assert!(link.contains("type=xhttp"), "missing type: {}", link);
+        assert!(
+            link.contains("host=cdn.example.com"),
+            "missing host: {}",
+            link
+        );
+        assert!(link.contains("path=%2Fcdn"), "missing path: {}", link);
+        assert!(link.contains("mode=auto"), "missing mode: {}", link);
+        assert!(link.contains("extra="), "missing extra: {}", link);
+        assert!(
+            link.contains("sni=cdn.example.com"),
+            "missing sni: {}",
+            link
+        );
+        assert!(
+            link.ends_with("#Test%20|%20446655440000%20XHTTP-CDN"),
+            "unexpected fragment: {}",
+            link
+        );
     }
 }

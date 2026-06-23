@@ -1,7 +1,6 @@
 use crate::config::inbound::StreamSettings;
 use crate::get_uuid_last_octet_simple;
 use serde::Serialize;
-use std::net::Ipv4Addr;
 
 use super::inbound::Inbound;
 use super::inbound::Network;
@@ -42,8 +41,8 @@ pub enum ClashProxy {
         tls: bool,
         network: String,
         servername: String,
-        #[serde(rename = "reality-opts")]
-        reality_opts: RealityOpts,
+        #[serde(rename = "reality-opts", skip_serializing_if = "Option::is_none")]
+        reality_opts: Option<RealityOpts>,
         #[serde(rename = "grpc-opts", skip_serializing_if = "Option::is_none")]
         grpc_opts: Option<GrpcOpts>,
         #[serde(rename = "http-opts", skip_serializing_if = "Option::is_none")]
@@ -106,7 +105,7 @@ pub trait InboundClashConfig {
         &self,
         conn_id: &uuid::Uuid,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Option<ClashProxy>;
     fn clash(proxies: Vec<ClashProxy>) -> ClashConfig;
@@ -141,7 +140,7 @@ impl InboundClashConfig for Inbound {
         &self,
         conn_id: &uuid::Uuid,
         _hostname: &str,
-        address: &Ipv4Addr,
+        host: &str,
         label: &str,
     ) -> Option<ClashProxy> {
         let port = self.port;
@@ -161,7 +160,7 @@ impl InboundClashConfig for Inbound {
 
                 Some(ClashProxy::Vmess {
                     name,
-                    server: address.to_string(),
+                    server: host.to_string(),
                     port,
                     uuid: conn_id.to_string(),
                     cipher: "auto".to_string(),
@@ -224,7 +223,7 @@ impl InboundClashConfig for Inbound {
 
                 Some(ClashProxy::Vless {
                     name,
-                    server: address.to_string(),
+                    server: host.to_string(),
                     port,
                     uuid: conn_id.to_string(),
                     udp: true,
@@ -232,13 +231,44 @@ impl InboundClashConfig for Inbound {
                     network,
                     servername: reality.server_names.first().cloned().unwrap_or_default(),
                     client_fingerprint: "chrome".to_string(),
-                    reality_opts: RealityOpts {
+                    reality_opts: Some(RealityOpts {
                         public_key: reality.public_key.clone(),
                         short_id: reality.short_ids.first().cloned().unwrap_or_default(),
-                    },
+                    }),
                     grpc_opts,
                     http_opts,
                     flow,
+                })
+            }
+
+            Tag::VlessXhttpCdn => {
+                let xhttp = stream.xhttp_settings.as_ref()?;
+
+                let cdn_host = stream
+                    .tls_settings
+                    .as_ref()
+                    .and_then(|t| t.server_name.clone())
+                    .unwrap_or_else(|| host.to_string());
+
+                let prefix = get_uuid_last_octet_simple(conn_id);
+                let name = format!("{} [{}] {}", label, self.tag, prefix);
+
+                Some(ClashProxy::Vless {
+                    name,
+                    server: cdn_host.clone(),
+                    port,
+                    uuid: conn_id.to_string(),
+                    udp: true,
+                    tls: true,
+                    network: "xhttp".to_string(),
+                    servername: cdn_host,
+                    client_fingerprint: "chrome".to_string(),
+                    reality_opts: None,
+                    grpc_opts: None,
+                    http_opts: Some(XHttpOpts {
+                        path: vec![xhttp.path.clone()],
+                    }),
+                    flow: None,
                 })
             }
 

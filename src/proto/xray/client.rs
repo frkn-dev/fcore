@@ -112,6 +112,11 @@ impl HandlerActions for Arc<Mutex<HandlerClient>> {
                 user_info.create(self.clone()).await?;
                 Ok(())
             }
+            Tag::VlessXhttpCdn => {
+                let user_info = VlessConnInfo::new(conn_id, ConnFlow::None, Tag::VlessXhttpCdn);
+                user_info.create(self.clone()).await?;
+                Ok(())
+            }
             Tag::Vmess => {
                 let user_info = VmessConnInfo::new(conn_id);
                 user_info.create(self.clone()).await?;
@@ -150,6 +155,11 @@ impl HandlerActions for Arc<Mutex<HandlerClient>> {
                 Ok(())
             }
             Tag::VlessXhttpReality => {
+                let user_info = VlessConnInfo::new(conn_id, ConnFlow::None, tag);
+                let _ = user_info.remove(self.clone()).await;
+                Ok(())
+            }
+            Tag::VlessXhttpCdn => {
                 let user_info = VlessConnInfo::new(conn_id, ConnFlow::None, tag);
                 let _ = user_info.remove(self.clone()).await;
                 Ok(())

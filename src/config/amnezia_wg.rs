@@ -163,8 +163,8 @@ impl<'de> Deserialize<'de> for AwgObfuscationParams {
         }
 
         const FIELDS: &[&str] = &[
-            "jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4", "i1", "i2",
-            "i3", "i4", "i5",
+            "jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4", "i1", "i2", "i3",
+            "i4", "i5",
         ];
         deserializer.deserialize_struct("AwgObfuscationParams", FIELDS, AwgObfuscationParamsVisitor)
     }

@@ -130,7 +130,8 @@ pub fn init_tracing(settings: ServiceSettings) {
         let log_directory = settings.metrics.log.directory;
         let log_file = settings.metrics.log.file;
         let rotation = parse_rotation(&settings.metrics.log.rotation);
-        let metrics_level = parse_level(&settings.metrics.log.level).unwrap_or(tracing::Level::INFO);
+        let metrics_level =
+            parse_level(&settings.metrics.log.level).unwrap_or(tracing::Level::INFO);
 
         let metrics_file = RollingFileAppender::new(rotation, log_directory, log_file);
 

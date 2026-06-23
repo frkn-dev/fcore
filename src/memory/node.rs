@@ -120,6 +120,7 @@ pub struct NodeResponse {
     pub metrics: Vec<NodeMetricInfo>,
     pub country: String,
     pub r#type: Type,
+    pub cluster: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -151,6 +152,7 @@ pub struct Node {
     pub max_bandwidth_bps: i64,
     pub country: String,
     pub r#type: Type,
+    pub cluster: Option<String>,
 }
 
 impl Node {
@@ -254,6 +256,7 @@ impl Node {
             max_bandwidth_bps: settings.max_bandwidth_bps,
             country: settings.country,
             r#type: settings.r#type,
+            cluster: settings.cluster,
         }
     }
 
@@ -271,6 +274,9 @@ impl Node {
         );
         tags.insert("country".to_string(), self.country.clone());
         tags.insert("type".to_string(), self.r#type.to_string());
+        if let Some(cluster) = &self.cluster {
+            tags.insert("cluster".to_string(), cluster.clone());
+        }
         tags
     }
 
@@ -295,6 +301,7 @@ impl Node {
             metrics: [].to_vec(),
             country: self.country.clone(),
             r#type: self.r#type,
+            cluster: self.cluster.clone(),
         }
     }
 
@@ -305,6 +312,14 @@ impl Node {
 
     pub fn inbound(&self, tag: Tag) -> Option<&Inbound> {
         self.inbounds.values().find(|i| i.tag == tag)
+    }
+
+    /// Return the cluster domain if the node belongs to a cluster,
+    /// otherwise fall back to the node IPv4 address.
+    pub fn connection_host(&self) -> String {
+        self.cluster
+            .clone()
+            .unwrap_or_else(|| self.address.to_string())
     }
 }
 
@@ -345,11 +360,16 @@ mod tests {
             max_bandwidth_bps: 1_000_000_000,
             country: "RU".to_string(),
             r#type: Type::Node,
+            cluster: Some("test-cluster.example.com".to_string()),
         };
 
         let response = node.as_node_response();
         assert_eq!(response.inbounds.len(), 1);
         assert_eq!(response.inbounds[0].tag, Tag::VlessTcpReality);
         assert_eq!(response.inbounds[0].port, 443);
+        assert_eq!(
+            response.cluster,
+            Some("test-cluster.example.com".to_string())
+        );
     }
 }

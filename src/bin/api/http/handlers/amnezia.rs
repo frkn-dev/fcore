@@ -1,10 +1,9 @@
 use crate::sync::MemSync;
 use base64::Engine;
 use fcore::{
-    http::helpers as http,
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, ConnectionStorageApiOperations,
-    InboundConnLink, NodeStatus, NodeStorageOperations, SubscriptionOperations,
-    SubscriptionStorageOperations, Tag,
+    http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
+    ConnectionStorageApiOperations, InboundConnLink, NodeStatus, NodeStorageOperations,
+    SubscriptionOperations, SubscriptionStorageOperations, Tag,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -195,7 +194,10 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
         "awg" => tag == Tag::AmneziaWg,
         "vless" => matches!(
             tag,
-            Tag::VlessTcpReality | Tag::VlessGrpcReality | Tag::VlessXhttpReality
+            Tag::VlessTcpReality
+                | Tag::VlessGrpcReality
+                | Tag::VlessXhttpReality
+                | Tag::VlessXhttpCdn
         ),
         _ => false,
     }
@@ -294,6 +296,84 @@ fn build_vless_server_config(
         .stream_settings
         .as_ref()
         .ok_or_else(|| fcore::Error::Custom("Missing stream settings".into()))?;
+
+    if inbound.tag == Tag::VlessXhttpCdn {
+        let xhttp = stream
+            .xhttp_settings
+            .as_ref()
+            .ok_or_else(|| fcore::Error::Custom("Missing xhttp settings".into()))?;
+
+        let cdn_host = stream
+            .tls_settings
+            .as_ref()
+            .and_then(|t| t.server_name.clone())
+            .unwrap_or_else(|| hostname.to_string());
+
+        let mut xhttp_settings = serde_json::json!({ "path": xhttp.path });
+        if let Some(mode) = &xhttp.mode {
+            xhttp_settings["mode"] = mode.clone().into();
+        }
+        if let Some(extra) = &xhttp.extra {
+            xhttp_settings["extra"] = extra.clone();
+        }
+
+        let outbound = serde_json::json!({
+            "outbounds": [
+                {
+                    "protocol": "vless",
+                    "settings": {
+                        "vnext": [
+                            {
+                                "address": cdn_host,
+                                "port": inbound.port,
+                                "users": [
+                                    {
+                                        "id": conn_id,
+                                        "encryption": "none"
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "streamSettings": {
+                        "network": "xhttp",
+                        "security": "tls",
+                        "tlsSettings": {
+                            "serverName": cdn_host
+                        },
+                        "xhttpSettings": xhttp_settings
+                    }
+                }
+            ]
+        });
+
+        let last_config = serde_json::json!({
+            "config": outbound.to_string(),
+            "last_config": outbound.to_string(),
+            "isThirdPartyConfig": true
+        });
+
+        return Ok(serde_json::json!({
+            "containers": [
+                {
+                    "container": "amnezia-xray",
+                    "position": 2,
+                    "config": outbound.to_string(),
+                    "last_config": outbound.to_string(),
+                    "isThirdPartyConfig": true
+                }
+            ],
+            "defaultContainer": "amnezia-xray",
+            "dns1": "1.1.1.1",
+            "dns2": "1.0.0.1",
+            "hostName": cdn_host,
+            "description": "FRKN VLESS",
+            "name": "FRKN",
+            "config_version": 2,
+            "last_config": last_config
+        }));
+    }
+
     let reality = stream
         .reality_settings
         .as_ref()
@@ -345,9 +425,10 @@ fn build_vless_server_config(
             ]
         }),
         Network::Grpc => {
-            let grpc = stream.grpc_settings.as_ref().ok_or_else(|| {
-                fcore::Error::Custom("Missing grpc settings".into())
-            })?;
+            let grpc = stream
+                .grpc_settings
+                .as_ref()
+                .ok_or_else(|| fcore::Error::Custom("Missing grpc settings".into()))?;
             serde_json::json!({
                 "outbounds": [
                     {
@@ -386,9 +467,10 @@ fn build_vless_server_config(
             })
         }
         Network::Xhttp => {
-            let xhttp = stream.xhttp_settings.as_ref().ok_or_else(|| {
-                fcore::Error::Custom("Missing xhttp settings".into())
-            })?;
+            let xhttp = stream
+                .xhttp_settings
+                .as_ref()
+                .ok_or_else(|| fcore::Error::Custom("Missing xhttp settings".into()))?;
             serde_json::json!({
                 "outbounds": [
                     {
@@ -729,18 +811,14 @@ where
     let server_config_json = match req.service_protocol.as_str() {
         "awg" => {
             let inbound = node.inbounds.get(&Tag::AmneziaWg).unwrap();
+            let host = node.connection_host();
             let link = inbound
-                .create_link(&conn_id, &conn, &node.hostname, &node.address, &node.label)
+                .create_link(&conn_id, &conn, &node.hostname, &host, &node.label)
                 .map_err(|_| warp::reject::not_found())?;
 
             let port = inbound.port;
 
-            build_awg_server_config(
-                &link,
-                req.public_key.as_deref().unwrap_or(""),
-                &node.hostname,
-                port,
-            )
+            build_awg_server_config(&link, req.public_key.as_deref().unwrap_or(""), &host, port)
         }
         "vless" => {
             let inbound = node
@@ -751,7 +829,8 @@ where
 
             let xray_uuid = req.public_key.as_deref().unwrap_or("");
             let conn_id = uuid::Uuid::parse_str(xray_uuid).unwrap_or(conn_id);
-            build_vless_server_config(inbound, &conn_id, &node.hostname)
+            let host = node.connection_host();
+            build_vless_server_config(inbound, &conn_id, &host)
                 .map_err(|_| warp::reject::not_found())?
         }
         _ => unreachable!(),

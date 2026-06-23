@@ -13,7 +13,8 @@ use super::{
     super::service::Service,
     filters::*,
     handlers::{
-        amnezia::*, connection::*, healthcheck_handler, key::*, metrics::*, node::*, subscription::*, trial::*,
+        amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*, node::*,
+        subscription::*, trial::*,
     },
     param::*,
     rejection,
@@ -99,6 +100,19 @@ where
             .and(warp::body::json::<NodeRequest>())
             .and(with_sync(self.sync.clone()))
             .and_then(post_node_handler);
+
+        let get_clusters_route = warp::get()
+            .and(warp::path("clusters"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and_then(get_clusters_handler);
+
+        let get_cluster_nodes_route = warp::get()
+            .and(warp::path("cluster"))
+            .and(warp::path::param::<String>())
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and_then(get_cluster_nodes_handler);
 
         let get_subscription_route = warp::get()
             .and(warp::path("sub"))
@@ -285,6 +299,9 @@ where
             .or(get_nodes_route)
             .or(get_node_route)
             .or(post_node_register_route)
+            // Cluster
+            .or(get_clusters_route)
+            .or(get_cluster_nodes_route)
             // Connection
             .or(post_connection_route)
             .or(post_connections_sync_route)

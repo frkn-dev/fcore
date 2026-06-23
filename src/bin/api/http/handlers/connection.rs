@@ -221,9 +221,11 @@ where
             let password = utils::generate_random_password(15);
             Proto::Shadowsocks { password }
         }
-        Tag::VlessTcpReality | Tag::VlessGrpcReality | Tag::VlessXhttpReality | Tag::Vmess => {
-            Proto::Xray(conn_req.proto)
-        }
+        Tag::VlessTcpReality
+        | Tag::VlessGrpcReality
+        | Tag::VlessXhttpReality
+        | Tag::VlessXhttpCdn
+        | Tag::Vmess => Proto::Xray(conn_req.proto),
         Tag::Hysteria2 => {
             let token = uuid::Uuid::new_v4();
             Proto::Hysteria2 { token }
@@ -448,14 +450,11 @@ where
                     }
                     if let Some(inbound) = node.inbounds.get(&Tag::Wireguard) {
                         let c: Connection = conn.clone().into();
+                        let host = node.connection_host();
 
-                        if let Ok(link) = inbound.create_link(
-                            &conn_id,
-                            &c,
-                            &node.hostname,
-                            &node.address,
-                            &node.label,
-                        ) {
+                        if let Ok(link) =
+                            inbound.create_link(&conn_id, &c, &node.hostname, &host, &node.label)
+                        {
                             result.push(serde_json::json!({
                                 "conn_id": conn_id,
                                 "label": node.label,
@@ -533,14 +532,11 @@ where
                     }
                     if let Some(inbound) = node.inbounds.get(&Tag::AmneziaWg) {
                         let c: Connection = conn.clone().into();
+                        let host = node.connection_host();
 
-                        if let Ok(link) = inbound.create_link(
-                            &conn_id,
-                            &c,
-                            &node.hostname,
-                            &node.address,
-                            &node.label,
-                        ) {
+                        if let Ok(link) =
+                            inbound.create_link(&conn_id, &c, &node.hostname, &host, &node.label)
+                        {
                             result.push(serde_json::json!({
                                 "conn_id": conn_id,
                                 "label": node.label,
@@ -617,7 +613,8 @@ where
                         continue;
                     }
                     if let Some(inbound) = node.inbounds.get(&Tag::Mtproto) {
-                        let link = inbound.mtproto(&node.hostname, &node.address, &node.label);
+                        let host = node.connection_host();
+                        let link = inbound.mtproto(&node.hostname, &host, &node.label);
 
                         if let Ok(url) = link {
                             result.push(serde_json::json!({
