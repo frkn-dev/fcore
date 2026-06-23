@@ -27,6 +27,7 @@ pub struct NodeRequest {
     pub max_bandwidth_bps: i64,
     pub country: String,
     pub r#type: NodeType,
+    pub cluster: Option<String>,
 }
 
 #[async_trait]
@@ -142,6 +143,7 @@ where
             max_bandwidth_bps: node.max_bandwidth_bps,
             country: node.country,
             r#type: node.r#type,
+            cluster: node.cluster.clone(),
         };
 
         let res = HttpClient::new()

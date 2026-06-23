@@ -15,6 +15,8 @@ pub trait Operations {
     fn get_by_env(&self, env: &Env) -> Option<Vec<Node>>;
     fn get_mut_by_env(&mut self, env: &Env) -> Option<&mut Vec<Node>>;
     fn get_by_id(&self, id: &uuid::Uuid) -> Option<Node>;
+    fn get_by_cluster(&self, cluster: &str) -> Vec<Node>;
+    fn all_clusters(&self) -> Vec<String>;
     fn get(&self, env: &Env, uuid: &uuid::Uuid) -> Option<&Node>;
     fn get_mut(&mut self, env: &Env, uuid: &uuid::Uuid) -> Option<&mut Node>;
 }
@@ -75,6 +77,23 @@ impl Operations for HashMap<Env, Vec<Node>> {
             .flat_map(|nodes| nodes.iter())
             .find(|node| &node.uuid == node_id)
             .cloned()
+    }
+    fn get_by_cluster(&self, cluster: &str) -> Vec<Node> {
+        self.values()
+            .flat_map(|nodes| nodes.iter())
+            .filter(|node| node.cluster.as_deref() == Some(cluster))
+            .cloned()
+            .collect()
+    }
+    fn all_clusters(&self) -> Vec<String> {
+        let mut clusters: Vec<String> = self
+            .values()
+            .flat_map(|nodes| nodes.iter())
+            .filter_map(|node| node.cluster.clone())
+            .collect();
+        clusters.sort();
+        clusters.dedup();
+        clusters
     }
     fn all(&self) -> Option<Vec<Node>> {
         let nodes: Vec<Node> = self.values().flatten().cloned().collect();

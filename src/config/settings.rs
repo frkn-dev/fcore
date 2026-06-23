@@ -43,6 +43,7 @@ pub struct NodeConfig {
     pub cores: usize,
     pub country: String,
     pub r#type: Type,
+    pub cluster: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -56,6 +57,8 @@ pub struct NodeConfigRaw {
     pub max_bandwidth_bps: i64,
     pub country: String,
     pub r#type: String,
+    #[serde(default)]
+    pub cluster: Option<String>,
 }
 
 impl NodeConfig {
@@ -83,6 +86,7 @@ impl NodeConfig {
             cores: num_cpus,
             country: raw.country,
             r#type: raw.r#type.parse().unwrap_or(Type::Node),
+            cluster: raw.cluster,
         })
     }
 }

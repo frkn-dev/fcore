@@ -1,4 +1,5 @@
 pub mod amnezia;
+pub mod cluster;
 pub mod connection;
 pub mod key;
 pub mod metrics;

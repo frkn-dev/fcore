@@ -3,8 +3,8 @@ use crate::error::{Error, Result as MyResult};
 use crate::AwgObfuscationParams;
 use base64::{engine::general_purpose, Engine as _};
 use netlink_packet_amnezia_wireguard::{
-    AmneziaWireguardAttribute, AmneziaWireguardCmd, AmneziaWireguardMessage,
-    AmneziaWireguardPeer, AmneziaWireguardPeerAttribute,
+    AmneziaWireguardAttribute, AmneziaWireguardCmd, AmneziaWireguardMessage, AmneziaWireguardPeer,
+    AmneziaWireguardPeerAttribute,
 };
 use netlink_packet_core::{
     NetlinkDeserializable, NetlinkMessage, NetlinkPayload, NetlinkSerializable, NLM_F_ACK,

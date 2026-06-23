@@ -175,6 +175,7 @@ where
                 Tag::VlessTcpReality
                 | Tag::VlessGrpcReality
                 | Tag::VlessXhttpReality
+                | Tag::VlessXhttpCdn
                 | Tag::Vmess => Proto::Xray(*p),
                 Tag::Hysteria2 => {
                     let token = uuid::Uuid::new_v4();

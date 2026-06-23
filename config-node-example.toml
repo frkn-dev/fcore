@@ -36,6 +36,8 @@ label = "Darkmachine 🏴‍☠️ "
 max_bandwidth_bps = 1000000000
 country = "RU"
 type = "common"
+# Optional cluster FQDN. When set, client configs use this domain instead of the node IP.
+# cluster = "nl-cdn.example.com"
 
 [api]
 endpoint = "http://127.0.0.1:3000"

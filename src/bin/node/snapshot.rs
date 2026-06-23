@@ -165,6 +165,7 @@ where
                     Tag::VlessTcpReality
                         | Tag::VlessGrpcReality
                         | Tag::VlessXhttpReality
+                        | Tag::VlessXhttpCdn
                         | Tag::Vmess
                         | Tag::Shadowsocks
                 )

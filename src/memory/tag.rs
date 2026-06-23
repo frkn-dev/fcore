@@ -30,6 +30,8 @@ pub enum ProtoTag {
     VlessGrpcReality,
     #[serde(rename = "VlessXhttpReality")]
     VlessXhttpReality,
+    #[serde(rename = "VlessXhttpCdn")]
+    VlessXhttpCdn,
     #[serde(rename = "Vmess")]
     Vmess,
     #[serde(rename = "Shadowsocks")]
@@ -50,6 +52,7 @@ impl fmt::Display for ProtoTag {
             ProtoTag::VlessTcpReality => write!(f, "VlessTcpReality"),
             ProtoTag::VlessGrpcReality => write!(f, "VlessGrpcReality"),
             ProtoTag::VlessXhttpReality => write!(f, "VlessXhttpReality"),
+            ProtoTag::VlessXhttpCdn => write!(f, "VlessXhttpCdn"),
             ProtoTag::Vmess => write!(f, "Vmess"),
             ProtoTag::Shadowsocks => write!(f, "Shadowsocks"),
             ProtoTag::Wireguard => write!(f, "Wireguard"),
@@ -88,6 +91,7 @@ impl std::str::FromStr for ProtoTag {
             "VlessTcpReality" => Ok(ProtoTag::VlessTcpReality),
             "VlessGrpcReality" => Ok(ProtoTag::VlessGrpcReality),
             "VlessXhttpReality" => Ok(ProtoTag::VlessXhttpReality),
+            "VlessXhttpCdn" => Ok(ProtoTag::VlessXhttpCdn),
             "Vmess" => Ok(ProtoTag::Vmess),
             "Shadowsocks" => Ok(ProtoTag::Shadowsocks),
             "Wireguard" => Ok(ProtoTag::Wireguard),

@@ -34,10 +34,10 @@ impl PgNode {
 
         let node_query = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15
         )
         ON CONFLICT (id) DO UPDATE SET
             uuid = EXCLUDED.uuid,
@@ -51,7 +51,8 @@ impl PgNode {
             cores = EXCLUDED.cores,
             max_bandwidth_bps = EXCLUDED.max_bandwidth_bps,
             country = EXCLUDED.country,
-            node_type = EXCLUDED.node_type
+            node_type = EXCLUDED.node_type,
+            cluster = EXCLUDED.cluster
     ";
 
         tx.execute(
@@ -71,6 +72,7 @@ impl PgNode {
                 &node.max_bandwidth_bps,
                 &node.country,
                 &node.r#type,
+                &node.cluster,
             ],
         )
         .await?;
@@ -201,6 +203,7 @@ impl PgNode {
                       n.max_bandwidth_bps,
                       n.country,
                       n.node_type,
+                      n.cluster,
 
                       i.id AS inbound_id,
                       i.tag,
@@ -244,6 +247,7 @@ impl PgNode {
             let country: String = row.get("country");
             let max_bandwidth_bps: i64 = row.get("max_bandwidth_bps");
             let r#type: NodeType = row.get("node_type");
+            let cluster: Option<String> = row.get("cluster");
 
             let wg_address: Option<IpAddrMask> = row
                 .get::<_, Option<String>>("wg_address")
@@ -297,6 +301,7 @@ impl PgNode {
                     max_bandwidth_bps,
                     country,
                     r#type,
+                    cluster: cluster.clone(),
                 });
 
                 if let Some(_inbound_id) = inbound_id {
@@ -330,9 +335,7 @@ impl PgNode {
                                     interface,
                                     address,
                                     listen_port: row.get::<_, i32>("port") as u16,
-                                    mtu: row
-                                        .get::<_, Option<i16>>("awg_mtu")
-                                        .map(|m| m as u16),
+                                    mtu: row.get::<_, Option<i16>>("awg_mtu").map(|m| m as u16),
                                     private_key: WgKeys {
                                         privkey: private_key,
                                     },

@@ -19,9 +19,7 @@ use super::metrics::BusinessMetrics;
 use super::node::Node;
 
 #[cfg(feature = "amnezia-wg")]
-use netlink_packet_amnezia_wireguard::{
-    AmneziaWireguardPeer, AmneziaWireguardPeerAttribute,
-};
+use netlink_packet_amnezia_wireguard::{AmneziaWireguardPeer, AmneziaWireguardPeerAttribute};
 
 #[cfg(feature = "amnezia-wg")]
 use fcore::AwgInterface;
@@ -249,6 +247,7 @@ where
                     Tag::VlessTcpReality
                     | Tag::VlessGrpcReality
                     | Tag::VlessXhttpReality
+                    | Tag::VlessXhttpCdn
                     | Tag::Vmess => {
                         let proto = Proto::new_xray(&msg.tag);
                         let conn = Connection::new(
@@ -376,6 +375,7 @@ where
                     Tag::VlessTcpReality
                     | Tag::VlessGrpcReality
                     | Tag::VlessXhttpReality
+                    | Tag::VlessXhttpCdn
                     | Tag::Vmess
                     | Tag::Shadowsocks => {
                         let client = self.handler_client.as_ref().ok_or_else(|| {

@@ -37,6 +37,9 @@ pub enum TagReq {
     #[serde(alias = "VlessXhttpReality")]
     VlessXhttpReality,
 
+    #[serde(alias = "VlessXhttpCdn")]
+    VlessXhttpCdn,
+
     #[serde(alias = "hysteria2", alias = "Hysteria2")]
     Hysteria2,
 
@@ -63,6 +66,7 @@ impl TagReq {
                 Tag::VlessTcpReality,
                 Tag::VlessGrpcReality,
                 Tag::VlessXhttpReality,
+                Tag::VlessXhttpCdn,
                 Tag::Vmess,
                 Tag::Shadowsocks,
             ],
@@ -70,6 +74,7 @@ impl TagReq {
                 Tag::VlessTcpReality,
                 Tag::VlessGrpcReality,
                 Tag::VlessXhttpReality,
+                Tag::VlessXhttpCdn,
                 Tag::Vmess,
                 Tag::Shadowsocks,
                 Tag::Hysteria2,
@@ -80,6 +85,7 @@ impl TagReq {
             TagReq::VlessTcpReality => vec![Tag::VlessTcpReality],
             TagReq::VlessGrpcReality => vec![Tag::VlessGrpcReality],
             TagReq::VlessXhttpReality => vec![Tag::VlessXhttpReality],
+            TagReq::VlessXhttpCdn => vec![Tag::VlessXhttpCdn],
             TagReq::Mtproto => vec![Tag::Mtproto],
         }
     }
@@ -106,6 +112,8 @@ pub struct NodeRequest {
     pub max_bandwidth_bps: i64,
     pub country: String,
     pub r#type: Option<NodeType>,
+    #[serde(default)]
+    pub cluster: Option<String>,
 }
 
 impl NodeRequest {
@@ -132,6 +140,7 @@ impl NodeRequest {
             max_bandwidth_bps: self.max_bandwidth_bps,
             country: self.country.clone(),
             r#type: t,
+            cluster: self.cluster.clone(),
         }
     }
 }
@@ -207,6 +216,7 @@ impl SubscriptionInfoRequest {
             VlessTcpReality => [Txt, Base64, Clash].into(),
             VlessGrpcReality => [Txt, Base64, Clash].into(),
             VlessXhttpReality => [Txt, Base64, Clash].into(),
+            VlessXhttpCdn => [Txt, Base64, Clash].into(),
             Mtproto => [].into(),
         }
     }

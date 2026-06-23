@@ -144,8 +144,14 @@ ALTER TABLE inbounds
 ALTER TABLE inbounds
     ADD COLUMN awg_mtu SMALLINT;
 
+ALTER TABLE nodes
+    ADD COLUMN cluster TEXT;
+
 ALTER TYPE proto
 ADD VALUE 'amnezia_wg';
+
+ALTER TYPE proto
+ADD VALUE 'vless_xhttp_cdn';
 
 
 

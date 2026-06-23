@@ -252,10 +252,9 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         Some(tokio::spawn(async move {
             info!("Node metrics HTTP server listening on {}", addr);
             let routes = crate::metrics_http::routes(node);
-            let (_, server) = warp::serve(routes)
-                .bind_with_graceful_shutdown(addr, async move {
-                    let _ = shutdown.recv().await;
-                });
+            let (_, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async move {
+                let _ = shutdown.recv().await;
+            });
             server.await;
             info!("Node metrics HTTP server shut down");
         }))
@@ -275,7 +274,10 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                 }
 
                 #[cfg(feature = "amnezia-wg")]
-                if let Err(e) = snapshot_manager.restore_awg_connections(awg_client.clone()).await {
+                if let Err(e) = snapshot_manager
+                    .restore_awg_connections(awg_client.clone())
+                    .await
+                {
                     error!("Couldn't restore AmneziaWG connections from memory, {}", e);
                 }
 
