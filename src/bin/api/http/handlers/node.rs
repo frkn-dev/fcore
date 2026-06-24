@@ -227,3 +227,57 @@ where
         ))
     }
 }
+
+/// Delete node handler
+// DELETE /node/<uuid>
+pub async fn delete_node_handler<N, C, S>(
+    node_id: uuid::Uuid,
+    memory: MemSync<N, C, S>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let status = match SyncOp::delete_node(&memory, &node_id).await {
+        Ok(Status::Ok(id)) => ResponseMessage::<Option<uuid::Uuid>> {
+            status: StatusCode::OK.as_u16(),
+            message: "Node deleted".to_string(),
+            response: Some(id),
+        },
+        Ok(Status::NotFound(_)) => ResponseMessage::<Option<uuid::Uuid>> {
+            status: StatusCode::NOT_FOUND.as_u16(),
+            message: "Node not found".to_string(),
+            response: None,
+        },
+        Ok(other) => ResponseMessage::<Option<uuid::Uuid>> {
+            status: StatusCode::BAD_REQUEST.as_u16(),
+            message: format!("Unexpected status: {:?}", other),
+            response: None,
+        },
+        Err(e) => {
+            tracing::error!("Error deleting node {}: {}", node_id, e);
+            ResponseMessage::<Option<uuid::Uuid>> {
+                status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                message: format!("Failed to delete node: {}", e),
+                response: None,
+            }
+        }
+    };
+
+    let status_code =
+        StatusCode::from_u16(status.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&status),
+        status_code,
+    ))
+}

@@ -402,7 +402,7 @@ where
                             conn.clone(),
                             node.hostname.clone(),
                             node.connection_host(),
-                            node.label.clone(),
+                            node.cluster.clone().unwrap_or(node.label.clone()),
                         ));
                     }
                 }
@@ -427,7 +427,7 @@ where
                             conn.clone(),
                             node.hostname.clone(),
                             node.connection_host(),
-                            node.label.clone(),
+                            node.cluster.clone().unwrap_or(node.label.clone()),
                         ));
                     }
                 }

@@ -93,6 +93,12 @@ where
             .and(with_metrics(self.metrics.clone()))
             .and_then(get_node_handler);
 
+        let delete_node_route = warp::path!("node" / Uuid)
+            .and(warp::delete())
+            .and(auth.clone())
+            .and(with_sync(self.sync.clone()))
+            .and_then(delete_node_handler);
+
         let post_node_register_route = warp::post()
             .and(warp::path("node"))
             .and(warp::path::end())
@@ -298,6 +304,7 @@ where
             // Node
             .or(get_nodes_route)
             .or(get_node_route)
+            .or(delete_node_route)
             .or(post_node_register_route)
             // Cluster
             .or(get_clusters_route)

@@ -45,6 +45,7 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static,
 {
     async fn add_node(&self, node_id: &uuid::Uuid, node: Node) -> SyncResult<Status>;
+    async fn delete_node(&self, uuid: &uuid::Uuid) -> SyncResult<Status>;
     async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
     async fn delete_connection(&self, conn_id: &uuid::Uuid, conn: &C) -> SyncResult<Status>;
@@ -127,6 +128,35 @@ where
             }
             Err(e) => {
                 error!("Memory error adding node {}: {}", node_id, e);
+                Err(SyncError::Memory(e.to_string()))
+            }
+        }
+    }
+
+    async fn delete_node(&self, uuid: &uuid::Uuid) -> SyncResult<Status> {
+        info!("Deleting node: {}", uuid);
+
+        if let Err(e) = self.db.node().delete(uuid).await {
+            error!("Failed to delete node {} from database: {}", uuid, e);
+            return Err(SyncError::Database(e));
+        }
+
+        let result = {
+            let mut memory = self.memory.write().await;
+            memory.nodes.remove(uuid)
+        };
+
+        match result {
+            Ok(Some(_)) => {
+                info!("Successfully deleted node: {}", uuid);
+                Ok(Status::Ok(*uuid))
+            }
+            Ok(None) => {
+                warn!("Node {} not found in memory", uuid);
+                Ok(Status::NotFound(*uuid))
+            }
+            Err(e) => {
+                error!("Memory error deleting node {}: {}", uuid, e);
                 Err(SyncError::Memory(e.to_string()))
             }
         }

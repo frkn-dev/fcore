@@ -19,6 +19,7 @@ pub trait Operations {
     fn all_clusters(&self) -> Vec<String>;
     fn get(&self, env: &Env, uuid: &uuid::Uuid) -> Option<&Node>;
     fn get_mut(&mut self, env: &Env, uuid: &uuid::Uuid) -> Option<&mut Node>;
+    fn remove(&mut self, uuid: &uuid::Uuid) -> Result<Option<Node>>;
 }
 
 impl Operations for HashMap<Env, Vec<Node>> {
@@ -65,6 +66,32 @@ impl Operations for HashMap<Env, Vec<Node>> {
     }
     fn get_mut(&mut self, env: &Env, uuid: &uuid::Uuid) -> Option<&mut Node> {
         self.get_mut(env)?.iter_mut().find(|n| &n.uuid == uuid)
+    }
+    fn remove(&mut self, uuid: &uuid::Uuid) -> Result<Option<Node>> {
+        let mut removed = None;
+        let empty_envs: Vec<Env> = self
+            .iter_mut()
+            .filter_map(|(env, nodes)| {
+                let before = nodes.len();
+                nodes.retain(|n| {
+                    if &n.uuid == uuid {
+                        removed = Some(n.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if nodes.is_empty() && before > 0 {
+                    Some(env.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for env in empty_envs {
+            self.remove(&env);
+        }
+        Ok(removed)
     }
     fn get_by_env(&self, env: &Env) -> Option<Vec<Node>> {
         self.get(env).cloned()

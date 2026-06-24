@@ -370,6 +370,17 @@ impl PgNode {
         Ok(nodes_map.into_values().collect())
     }
 
+    pub async fn delete(&self, uuid: &uuid::Uuid) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let query = "DELETE FROM nodes WHERE uuid = $1";
+
+        client.execute(query, &[uuid]).await?;
+
+        Ok(())
+    }
+
     pub async fn update_status(&self, uuid: &uuid::Uuid, new_status: NodeStatus) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
