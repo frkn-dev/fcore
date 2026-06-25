@@ -436,19 +436,42 @@ where
             }
         };
 
-    let mut env_traffic: Vec<EnvTrafficInfo> = traffic
+    let mut env_traffic_map: HashMap<Env, EnvTrafficInfo> = traffic
         .by_env
         .into_iter()
-        .map(|(env_str, env)| EnvTrafficInfo {
-            env: traffic::parse_env(&env_str),
-            uplink: env.total.uplink as i64,
-            downlink: env.total.downlink as i64,
-            daily_uplink: env.daily.uplink as i64,
-            daily_downlink: env.daily.downlink as i64,
-            monthly_uplink: env.monthly.uplink as i64,
-            monthly_downlink: env.monthly.downlink as i64,
+        .map(|(env_str, env_traffic)| {
+            let env = traffic::parse_env(&env_str);
+            (
+                env.clone(),
+                EnvTrafficInfo {
+                    env,
+                    uplink: env_traffic.total.uplink as i64,
+                    downlink: env_traffic.total.downlink as i64,
+                    daily_uplink: env_traffic.daily.uplink as i64,
+                    daily_downlink: env_traffic.daily.downlink as i64,
+                    monthly_uplink: env_traffic.monthly.uplink as i64,
+                    monthly_downlink: env_traffic.monthly.downlink as i64,
+                },
+            )
         })
         .collect();
+
+    // Ensure every location from the subscription has an entry even if traffic is zero.
+    for loc in &locations {
+        env_traffic_map
+            .entry(loc.env.clone())
+            .or_insert_with(|| EnvTrafficInfo {
+                env: loc.env.clone(),
+                uplink: 0,
+                downlink: 0,
+                daily_uplink: 0,
+                daily_downlink: 0,
+                monthly_uplink: 0,
+                monthly_downlink: 0,
+            });
+    }
+
+    let mut env_traffic: Vec<EnvTrafficInfo> = env_traffic_map.into_values().collect();
     env_traffic.sort_by(|a, b| a.env.to_string().cmp(&b.env.to_string()));
 
     let sub_resp = SubscriptionResponse {
