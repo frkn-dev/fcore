@@ -67,8 +67,8 @@ impl PgTraffic {
             .query_one(
                 r#"
                 SELECT
-                    COALESCE(SUM(uplink_bytes), 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes), 0) AS downlink
+                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
                 FROM connection_traffic
                 WHERE subscription_id = $1 AND period = 'day'
                 "#,
@@ -93,8 +93,8 @@ impl PgTraffic {
                 r#"
                 SELECT
                     env,
-                    COALESCE(SUM(uplink_bytes), 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes), 0) AS downlink
+                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
                 FROM connection_traffic
                 WHERE subscription_id = $1 AND period = 'day'
                 GROUP BY env
@@ -128,8 +128,8 @@ impl PgTraffic {
                 SELECT
                     bucket,
                     env,
-                    COALESCE(SUM(uplink_bytes), 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes), 0) AS downlink
+                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
                 FROM connection_traffic
                 WHERE subscription_id = $1
                   AND period = $2
@@ -171,8 +171,8 @@ impl PgTraffic {
                 r#"
                 SELECT
                     env,
-                    COALESCE(SUM(uplink_bytes), 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes), 0) AS downlink
+                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
                 FROM connection_traffic
                 WHERE subscription_id = $1 AND period = $2 AND bucket = $3
                 GROUP BY env
