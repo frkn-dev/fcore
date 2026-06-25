@@ -44,7 +44,45 @@ pub struct SubscriptionResponse {
     pub locations: Vec<EnvInfo>,
     pub downlink: i64,
     pub uplink: i64,
+    pub daily_downlink: i64,
+    pub daily_uplink: i64,
+    pub monthly_downlink: i64,
+    pub monthly_uplink: i64,
     pub limit_bytes: i64,
+    pub env_traffic: Vec<EnvTrafficInfo>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct EnvTrafficInfo {
+    pub env: Env,
+    pub downlink: i64,
+    pub uplink: i64,
+    pub daily_downlink: i64,
+    pub daily_uplink: i64,
+    pub monthly_downlink: i64,
+    pub monthly_uplink: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SubscriptionTrafficHistoryResponse {
+    pub subscription_id: uuid::Uuid,
+    pub period: String,
+    pub buckets: Vec<TrafficHistoryBucket>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TrafficHistoryBucket {
+    pub bucket: DateTime<Utc>,
+    pub uplink: i64,
+    pub downlink: i64,
+    pub envs: Vec<EnvTrafficHistoryBucket>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct EnvTrafficHistoryBucket {
+    pub env: Env,
+    pub uplink: i64,
+    pub downlink: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

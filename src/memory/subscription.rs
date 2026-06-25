@@ -20,7 +20,6 @@ pub struct Subscription {
     pub is_deleted: bool,
 
     pub limit_bytes: Option<i64>,
-    pub downlink_bytes: Option<i64>,
 }
 
 impl Subscription {
@@ -42,7 +41,6 @@ impl Subscription {
             is_deleted: false,
 
             limit_bytes,
-            downlink_bytes: Some(0),
         }
     }
 }
@@ -63,7 +61,6 @@ impl Default for Subscription {
             updated_at: now,
             is_deleted: false,
             limit_bytes: None,
-            downlink_bytes: Some(0),
         }
     }
 }
@@ -75,7 +72,6 @@ impl From<tokio_postgres::Row> for Subscription {
         let updated_at: DateTime<Utc> = row.get::<_, DateTime<Utc>>("updated_at");
 
         let limit_bytes: Option<i64> = row.get("limit_bytes");
-        let downlink_bytes: Option<i64> = row.get("downlink_bytes");
 
         Self {
             id: row.get("id"),
@@ -86,7 +82,6 @@ impl From<tokio_postgres::Row> for Subscription {
             updated_at,
             is_deleted: row.get::<_, bool>("is_deleted"),
             limit_bytes,
-            downlink_bytes,
         }
     }
 }
@@ -138,6 +133,7 @@ pub trait Operations {
     fn extend(&mut self, days: i64);
     fn id(&self) -> uuid::Uuid;
     fn expires_at(&self) -> Option<DateTime<Utc>>;
+    fn created_at(&self) -> DateTime<Utc>;
     fn refer_code(&self) -> String;
     fn set_refer_code(&mut self, code: String);
     fn referred_by(&self) -> Option<&str>;
@@ -150,8 +146,6 @@ pub trait Operations {
 
     fn limit_bytes(&self) -> Option<i64>;
     fn set_limit_bytes(&mut self, bytes: i64);
-    fn downlink_bytes(&self) -> Option<i64>;
-    fn set_downlink_bytes(&mut self, bytes: i64);
 }
 
 impl Operations for Subscription {
@@ -184,6 +178,10 @@ impl Operations for Subscription {
 
     fn expires_at(&self) -> Option<DateTime<Utc>> {
         self.expires_at
+    }
+
+    fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
     }
 
     fn refer_code(&self) -> String {
@@ -231,12 +229,5 @@ impl Operations for Subscription {
 
     fn set_limit_bytes(&mut self, bytes: i64) {
         self.limit_bytes = Some(bytes)
-    }
-
-    fn downlink_bytes(&self) -> Option<i64> {
-        self.downlink_bytes
-    }
-    fn set_downlink_bytes(&mut self, bytes: i64) {
-        self.downlink_bytes = Some(bytes)
     }
 }

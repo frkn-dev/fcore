@@ -1,12 +1,16 @@
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use std::collections::HashSet;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use warp::http::{Response, StatusCode};
 
 use fcore::http::{
     helpers as http,
-    response::{EnvInfo, Instance, SubscriptionResponse},
+    response::{
+        EnvInfo, EnvTrafficHistoryBucket, EnvTrafficInfo, Instance, SubscriptionResponse,
+        SubscriptionTrafficHistoryResponse, TrafficHistoryBucket,
+    },
     ResponseMessage,
 };
 
@@ -23,6 +27,139 @@ use super::super::{
     request::EnvFilter,
     request::{FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
+
+#[derive(Debug, Deserialize)]
+pub struct TrafficHistoryQuery {
+    #[serde(default = "default_traffic_period")]
+    pub period: String,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+fn default_traffic_period() -> String {
+    "day".to_string()
+}
+
+use crate::traffic::{self, SubscriptionTraffic, TrafficValue};
+
+async fn build_subscription_traffic(
+    db: &crate::postgres::pg::PgContext,
+    metrics: &MetricStorage,
+    sub_id: uuid::Uuid,
+    created_at: DateTime<Utc>,
+) -> fcore::Result<SubscriptionTraffic> {
+    let mut result = SubscriptionTraffic::default();
+    let now = Utc::now();
+    let day_bucket = traffic::day_start(now);
+    let month_bucket = traffic::monthly_anchor(created_at, now);
+
+    // Persisted lifetime total.
+    let (total_up, total_down) = db.traffic().total_for_subscription(sub_id).await?;
+    result.total = TrafficValue {
+        uplink: total_up.max(0) as u64,
+        downlink: total_down.max(0) as u64,
+    };
+
+    // Env-level persisted totals.
+    let env_totals = db.traffic().env_totals_for_subscription(sub_id).await?;
+    let daily_rows = db
+        .traffic()
+        .env_breakdown(sub_id, "day", day_bucket)
+        .await?;
+    let monthly_rows = db
+        .traffic()
+        .env_breakdown(sub_id, "month", month_bucket)
+        .await?;
+
+    let mut daily_map: HashMap<String, (i64, i64)> = HashMap::new();
+    for (env, up, down) in daily_rows {
+        daily_map.insert(env, (up, down));
+    }
+    let mut monthly_map: HashMap<String, (i64, i64)> = HashMap::new();
+    for (env, up, down) in monthly_rows {
+        monthly_map.insert(env, (up, down));
+    }
+
+    for (env, up, down) in env_totals {
+        let (daily_up, daily_down) = daily_map.remove(&env).unwrap_or((0, 0));
+        let (monthly_up, monthly_down) = monthly_map.remove(&env).unwrap_or((0, 0));
+        result.add_persisted(
+            &env,
+            TrafficValue {
+                uplink: up.max(0) as u64,
+                downlink: down.max(0) as u64,
+            },
+            TrafficValue {
+                uplink: daily_up.max(0) as u64,
+                downlink: daily_down.max(0) as u64,
+            },
+            TrafficValue {
+                uplink: monthly_up.max(0) as u64,
+                downlink: monthly_down.max(0) as u64,
+            },
+        );
+    }
+
+    // Any env with only daily/monthly rows and no total rows.
+    for (env, (daily_up, daily_down)) in daily_map {
+        let (monthly_up, monthly_down) = monthly_map.remove(&env).unwrap_or((0, 0));
+        result.add_persisted(
+            &env,
+            TrafficValue::default(),
+            TrafficValue {
+                uplink: daily_up.max(0) as u64,
+                downlink: daily_down.max(0) as u64,
+            },
+            TrafficValue {
+                uplink: monthly_up.max(0) as u64,
+                downlink: monthly_down.max(0) as u64,
+            },
+        );
+    }
+    for (env, (monthly_up, monthly_down)) in monthly_map {
+        result.add_persisted(
+            &env,
+            TrafficValue::default(),
+            TrafficValue::default(),
+            TrafficValue {
+                uplink: monthly_up.max(0) as u64,
+                downlink: monthly_down.max(0) as u64,
+            },
+        );
+    }
+
+    // Live delta since the last persistence boundary.
+    let watermarks = db.conn().watermarks_for_subscription(sub_id).await?;
+    for wm in watermarks {
+        let segments = traffic::connection_deltas_between(
+            metrics,
+            &wm.conn_id,
+            created_at,
+            wm.last_persist_at,
+            now,
+        );
+
+        let mut conn_total = TrafficValue::default();
+        for seg in &segments {
+            result.add_live_segment(&wm.env, seg);
+            conn_total += TrafficValue {
+                uplink: seg.uplink,
+                downlink: seg.downlink,
+            };
+        }
+
+        result.total += conn_total;
+        if let Some(env_acc) = result.by_env.get_mut(&wm.env) {
+            env_acc.total += conn_total;
+        } else if conn_total.uplink > 0 || conn_total.downlink > 0 {
+            let mut env_acc = crate::traffic::EnvTraffic::default();
+            env_acc.total += conn_total;
+            result.by_env.insert(wm.env.clone(), env_acc);
+        }
+    }
+
+    Ok(result)
+}
 
 /// Handler creates subscription
 // POST /subscription
@@ -191,10 +328,6 @@ where
 
     let connections = mem.connections.get_by_subscription_id(&subscription_id);
     let mut locations = Vec::new();
-    let (uplink, downlink) = metrics.get_subscription_total_traffic(&subscription_id);
-
-    let downlink_i64 = downlink as i64;
-    let uplink_i64 = uplink as i64;
     if let Some(conns) = connections.clone() {
         let active_envs: HashSet<Env> = conns
             .iter()
@@ -284,17 +417,55 @@ where
     }
 
     let limit_bytes = sub.limit_bytes().unwrap_or(0);
+    let created_at = sub.created_at();
+    let sub_id = sub.id();
+    let expires = sub.expires_at().unwrap_or_default();
+    let days = sub.days_remaining().unwrap_or(0);
+    let ref_code = sub.refer_code();
+    let invited_count = mem.subscriptions.count_invited_by(&sub.refer_code());
+    drop(mem);
+
+    let traffic =
+        match build_subscription_traffic(&memory.db, &metrics, subscription_id, created_at).await {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(Box::new(http::internal_error(&format!(
+                    "Traffic aggregation failed: {}",
+                    e
+                ))));
+            }
+        };
+
+    let mut env_traffic: Vec<EnvTrafficInfo> = traffic
+        .by_env
+        .into_iter()
+        .map(|(env_str, env)| EnvTrafficInfo {
+            env: traffic::parse_env(&env_str),
+            uplink: env.total.uplink as i64,
+            downlink: env.total.downlink as i64,
+            daily_uplink: env.daily.uplink as i64,
+            daily_downlink: env.daily.downlink as i64,
+            monthly_uplink: env.monthly.uplink as i64,
+            monthly_downlink: env.monthly.downlink as i64,
+        })
+        .collect();
+    env_traffic.sort_by(|a, b| a.env.to_string().cmp(&b.env.to_string()));
 
     let sub_resp = SubscriptionResponse {
-        id: sub.id(),
-        expires: sub.expires_at().unwrap_or_default(),
-        days: sub.days_remaining().unwrap_or(0),
-        ref_code: sub.refer_code(),
-        invited_count: mem.subscriptions.count_invited_by(&sub.refer_code()),
+        id: sub_id,
+        expires,
+        days,
+        ref_code,
+        invited_count,
         locations,
-        downlink: downlink_i64,
-        uplink: uplink_i64,
+        downlink: traffic.total.downlink as i64,
+        uplink: traffic.total.uplink as i64,
+        daily_downlink: traffic.daily.downlink as i64,
+        daily_uplink: traffic.daily.uplink as i64,
+        monthly_downlink: traffic.monthly.downlink as i64,
+        monthly_uplink: traffic.monthly.uplink as i64,
         limit_bytes,
+        env_traffic,
     };
 
     Ok(Box::new(warp::reply::json(&sub_resp)))
@@ -458,12 +629,26 @@ where
     // -------------------------
     // Subscription metadata
     // -------------------------
+    let created_at = sub.created_at();
+    let sub_id = sub.id();
     let expires_at = sub.expires_at().map(|e| e.timestamp()).unwrap_or(0);
-
-    let traffic = metrics.get_subscription_total_traffic(&req.id);
     let limit = sub.limit_bytes();
+    drop(mem);
 
-    let sub_url = format!("{}/subscription?id={}", base_url, sub.id());
+    let traffic = match build_subscription_traffic(&memory.db, &metrics, req.id, created_at).await {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(Box::new(http::internal_error(&format!(
+                "Traffic aggregation failed: {}",
+                e
+            ))));
+        }
+    };
+
+    let upload = traffic.total.uplink;
+    let download = traffic.total.downlink;
+
+    let sub_url = format!("{}/subscription?id={}", base_url, sub_id);
 
     let meta = format!(
         "#profile-title: {}\n\
@@ -472,8 +657,8 @@ where
          #profile-web-page-url: {}\n\
          #support-url: {}\n",
         title,
-        traffic.0,
-        traffic.1,
+        upload,
+        download,
         limit.unwrap_or(0),
         expires_at,
         sub_url,
@@ -539,4 +724,103 @@ where
             Ok(Box::new(response))
         }
     }
+}
+
+/// GET /subscription/<id>/traffic
+/// Returns persisted traffic history for a subscription grouped by period bucket and env.
+pub async fn get_subscription_traffic_history<N, C, S>(
+    subscription_id: uuid::Uuid,
+    query: TrafficHistoryQuery,
+    memory: MemSync<N, C, S>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + PartialEq,
+{
+    {
+        let mem = memory.memory.read().await;
+        if mem.subscriptions.find_by_id(&subscription_id).is_none() {
+            return Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(&"Subscription not found"),
+                warp::http::StatusCode::NOT_FOUND,
+            )));
+        }
+    }
+
+    let period = match query.period.as_str() {
+        "day" | "month" => query.period,
+        _ => "day".to_string(),
+    };
+
+    let rows = match memory
+        .db
+        .traffic()
+        .history(subscription_id, &period, query.from, query.to)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Ok(Box::new(http::internal_error(&format!(
+                "Failed to load traffic history: {}",
+                e
+            ))));
+        }
+    };
+
+    let mut buckets = Vec::new();
+    let mut current_bucket: Option<DateTime<Utc>> = None;
+    let mut current_envs: Vec<EnvTrafficHistoryBucket> = Vec::new();
+    let mut current_up: i64 = 0;
+    let mut current_down: i64 = 0;
+
+    for (bucket, env_str, up, down) in rows {
+        if current_bucket != Some(bucket) {
+            if let Some(b) = current_bucket {
+                buckets.push(TrafficHistoryBucket {
+                    bucket: b,
+                    uplink: current_up,
+                    downlink: current_down,
+                    envs: current_envs,
+                });
+            }
+            current_bucket = Some(bucket);
+            current_envs = Vec::new();
+            current_up = 0;
+            current_down = 0;
+        }
+
+        let up = up.max(0);
+        let down = down.max(0);
+        current_up += up;
+        current_down += down;
+        current_envs.push(EnvTrafficHistoryBucket {
+            env: traffic::parse_env(&env_str),
+            uplink: up,
+            downlink: down,
+        });
+    }
+
+    if let Some(b) = current_bucket {
+        buckets.push(TrafficHistoryBucket {
+            bucket: b,
+            uplink: current_up,
+            downlink: current_down,
+            envs: current_envs,
+        });
+    }
+
+    let response = SubscriptionTrafficHistoryResponse {
+        subscription_id,
+        period,
+        buckets,
+    };
+
+    Ok(Box::new(warp::reply::json(&response)))
 }

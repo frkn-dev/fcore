@@ -124,6 +124,11 @@ alter table connections drop column "wg_pubkey";
 
 alter table subscriptions add column limit_bytes bigint;
 alter table subscriptions add column downlink_bytes bigint;
+alter table subscriptions add column uplink_bytes bigint;
+alter table subscriptions add column last_traffic_reset_at timestamptz;
+alter table subscriptions add column daily_start_uplink_bytes bigint;
+alter table subscriptions add column daily_start_downlink_bytes bigint;
+alter table subscriptions add column last_daily_reset_at timestamptz;
 
 
 alter table inbounds drop column  uplink;
@@ -153,5 +158,39 @@ ADD VALUE 'amnezia_wg';
 ALTER TYPE proto
 ADD VALUE 'vless_xhttp_cdn';
 
+-- Per-connection daily/monthly traffic.
+CREATE TABLE IF NOT EXISTS connection_traffic (
+    connection_id UUID NOT NULL,
+    subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    env TEXT NOT NULL,
+    period TEXT NOT NULL CHECK (period IN ('day', 'month')),
+    bucket TIMESTAMPTZ NOT NULL,
+    uplink_bytes BIGINT NOT NULL DEFAULT 0,
+    downlink_bytes BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (connection_id, period, bucket)
+);
 
+CREATE INDEX IF NOT EXISTS idx_connection_traffic_sub_bucket
+    ON connection_traffic(subscription_id, period, bucket);
+CREATE INDEX IF NOT EXISTS idx_connection_traffic_env
+    ON connection_traffic(subscription_id, env, period, bucket);
+
+-- Watermark for per-connection traffic persistence.
+ALTER TABLE connections
+    ADD COLUMN IF NOT EXISTS last_traffic_persist_at TIMESTAMPTZ;
+
+UPDATE connections
+    SET last_traffic_persist_at = now()
+    WHERE last_traffic_persist_at IS NULL;
+
+-- Subscription-level traffic counters are now kept in connection_traffic.
+ALTER TABLE subscriptions
+    DROP COLUMN IF EXISTS uplink_bytes,
+    DROP COLUMN IF EXISTS downlink_bytes,
+    DROP COLUMN IF EXISTS last_traffic_reset_at,
+    DROP COLUMN IF EXISTS daily_start_uplink_bytes,
+    DROP COLUMN IF EXISTS daily_start_downlink_bytes,
+    DROP COLUMN IF EXISTS last_daily_reset_at;
 

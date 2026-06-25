@@ -96,6 +96,16 @@ impl TryFrom<ConnRow> for Connection {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ConnWatermark {
+    pub conn_id: uuid::Uuid,
+    pub subscription_id: uuid::Uuid,
+    pub env: String,
+    pub uplink: i64,
+    pub downlink: i64,
+    pub last_persist_at: DateTime<Utc>,
+}
+
 pub struct PgConn {
     pub manager: Arc<Mutex<PgClientManager>>,
 }
@@ -256,5 +266,89 @@ impl PgConn {
                 Err(Error::Database(e))
             }
         }
+    }
+
+    pub async fn all_watermarks(&self) -> Result<Vec<ConnWatermark>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT
+                    id,
+                    subscription_id,
+                    env,
+                    uplink,
+                    downlink,
+                    COALESCE(last_traffic_persist_at, created_at) AS last_traffic_persist_at
+                FROM connections
+                WHERE subscription_id IS NOT NULL
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows.into_iter().map(Self::map_watermark_row).collect())
+    }
+
+    pub async fn watermarks_for_subscription(
+        &self,
+        subscription_id: uuid::Uuid,
+    ) -> Result<Vec<ConnWatermark>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT
+                    id,
+                    subscription_id,
+                    env,
+                    uplink,
+                    downlink,
+                    COALESCE(last_traffic_persist_at, created_at) AS last_traffic_persist_at
+                FROM connections
+                WHERE subscription_id = $1
+                "#,
+                &[&subscription_id],
+            )
+            .await?;
+
+        Ok(rows.into_iter().map(Self::map_watermark_row).collect())
+    }
+
+    fn map_watermark_row(row: tokio_postgres::Row) -> ConnWatermark {
+        ConnWatermark {
+            conn_id: row.get("id"),
+            subscription_id: row.get("subscription_id"),
+            env: row.get("env"),
+            uplink: row.get::<_, Option<i64>>("uplink").unwrap_or(0),
+            downlink: row.get::<_, Option<i64>>("downlink").unwrap_or(0),
+            last_persist_at: row
+                .get::<_, Option<DateTime<Utc>>>("last_traffic_persist_at")
+                .unwrap_or_else(Utc::now),
+        }
+    }
+
+    pub async fn update_watermark(
+        &self,
+        conn_id: uuid::Uuid,
+        uplink: i64,
+        downlink: i64,
+        last_persist_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        client
+            .execute(
+                "UPDATE connections SET uplink = $1, downlink = $2, last_traffic_persist_at = $3 WHERE id = $4",
+                &[&uplink, &downlink, &last_persist_at, &conn_id],
+            )
+            .await?;
+
+        Ok(())
     }
 }

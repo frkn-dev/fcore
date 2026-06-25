@@ -78,6 +78,8 @@ pub struct TasksConfig {
     pub connection_expire_interval: u64,
     pub monitor_nodes_interval: u64,
     pub heartbeat_node_offline_threshold_sec: u64,
+    #[serde(default = "default_traffic_persist_interval_sec")]
+    pub traffic_persist_interval_sec: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -110,6 +112,10 @@ pub struct MetricsRxConfig {
     #[serde(default)]
     pub log: MetricsLogConfig,
     pub snapshot_path: String,
+}
+
+fn default_traffic_persist_interval_sec() -> u64 {
+    3600
 }
 
 fn default_company_website() -> String {

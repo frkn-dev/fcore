@@ -138,6 +138,15 @@ where
             .and(with_metrics(self.metrics.clone()))
             .and_then(get_subscription_info_json);
 
+        let get_subscription_traffic_route = warp::get()
+            .and(warp::path!("subscription" / Uuid / "traffic"))
+            .and(warp::path::end())
+            .and(warp::query::<
+                crate::http::handlers::subscription::TrafficHistoryQuery,
+            >())
+            .and(with_sync(self.sync.clone()))
+            .and_then(get_subscription_traffic_history);
+
         let post_subscription_route = warp::post()
             .and(warp::path("subscription"))
             .and(warp::path::end())
@@ -299,6 +308,7 @@ where
             // Subscription
             .or(get_subscription_route)
             .or(get_subscription_info_route)
+            .or(get_subscription_traffic_route)
             .or(post_subscription_route)
             .or(put_subscription_route)
             // Node

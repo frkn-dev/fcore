@@ -1,5 +1,6 @@
 use chrono::Utc;
 use rand::Rng;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
@@ -7,13 +8,14 @@ use tracing::{debug, error, info, warn};
 use fcore::{
     measure_time, Connection, ConnectionApiOperations, ConnectionBaseOperations,
     ConnectionStorageApiOperations, Env, NodeStatus, NodeStorageOperations, Result, Status,
-    Subscription, SubscriptionOperations,
+    Subscription, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use super::{
-    postgres::pg::Tasks as MemoryCacheTasks,
+    postgres::{connection::ConnWatermark, pg::Tasks as MemoryCacheTasks},
     service::{Cache, Service},
     sync::tasks::SyncOp,
+    traffic,
 };
 
 #[async_trait::async_trait]
@@ -24,6 +26,7 @@ pub trait Tasks {
     async fn cleanup_expired_subscriptions(&self, interval_sec: u64);
     async fn restore_subscriptions(&self, interval_sec: u64);
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
+    async fn persist_connection_traffic(&self, interval_sec: u64);
 }
 
 #[async_trait::async_trait]
@@ -175,6 +178,165 @@ where
                     }
                 }
             }
+        }
+    }
+
+    async fn persist_connection_traffic(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            let now = Utc::now();
+
+            let watermarks = match self.sync.db.conn().all_watermarks().await {
+                Ok(w) => w,
+                Err(e) => {
+                    error!("Failed to load connection traffic watermarks: {}", e);
+                    continue;
+                }
+            };
+            let watermark_map: HashMap<uuid::Uuid, ConnWatermark> =
+                watermarks.into_iter().map(|w| (w.conn_id, w)).collect();
+
+            let conns: Vec<(uuid::Uuid, Connection)> = {
+                let memory = self.sync.memory.read().await;
+                memory
+                    .connections
+                    .iter()
+                    .filter_map(|(id, conn)| {
+                        if conn.get_deleted() || conn.get_subscription_id().is_none() {
+                            None
+                        } else {
+                            Some((*id, conn.clone().into()))
+                        }
+                    })
+                    .collect()
+            };
+
+            if conns.is_empty() {
+                continue;
+            }
+
+            debug!("Persisting traffic for {} connections", conns.len());
+            let mut persisted = 0usize;
+
+            for (conn_id, conn) in conns {
+                let sub_id = conn.get_subscription_id().unwrap();
+                let env = conn.get_env().to_string();
+
+                let created_at = {
+                    let memory = self.sync.memory.read().await;
+                    memory
+                        .subscriptions
+                        .find_by_id(&sub_id)
+                        .map(|s| s.created_at())
+                };
+                let Some(created_at) = created_at else {
+                    continue;
+                };
+
+                let wm = watermark_map
+                    .get(&conn_id)
+                    .cloned()
+                    .unwrap_or(ConnWatermark {
+                        conn_id,
+                        subscription_id: sub_id,
+                        env: env.clone(),
+                        uplink: 0,
+                        downlink: 0,
+                        last_persist_at: now,
+                    });
+
+                let segments = traffic::connection_deltas_between(
+                    &self.metrics,
+                    &conn_id,
+                    created_at,
+                    wm.last_persist_at,
+                    now,
+                );
+
+                let mut total_up: u64 = 0;
+                let mut total_down: u64 = 0;
+                let mut failed = false;
+
+                for seg in &segments {
+                    if let Err(e) = self
+                        .sync
+                        .db
+                        .traffic()
+                        .upsert_bucket(
+                            conn_id,
+                            sub_id,
+                            &env,
+                            "day",
+                            seg.day_bucket,
+                            seg.uplink as i64,
+                            seg.downlink as i64,
+                        )
+                        .await
+                    {
+                        error!(
+                            "Failed to persist daily traffic for connection {}: {}",
+                            conn_id, e
+                        );
+                        failed = true;
+                        break;
+                    }
+
+                    if let Err(e) = self
+                        .sync
+                        .db
+                        .traffic()
+                        .upsert_bucket(
+                            conn_id,
+                            sub_id,
+                            &env,
+                            "month",
+                            seg.month_bucket,
+                            seg.uplink as i64,
+                            seg.downlink as i64,
+                        )
+                        .await
+                    {
+                        error!(
+                            "Failed to persist monthly traffic for connection {}: {}",
+                            conn_id, e
+                        );
+                        failed = true;
+                        break;
+                    }
+
+                    total_up += seg.uplink;
+                    total_down += seg.downlink;
+                }
+
+                if failed {
+                    continue;
+                }
+
+                let new_uplink = wm.uplink.saturating_add(total_up as i64);
+                let new_downlink = wm.downlink.saturating_add(total_down as i64);
+
+                if let Err(e) = self
+                    .sync
+                    .db
+                    .conn()
+                    .update_watermark(conn_id, new_uplink, new_downlink, now)
+                    .await
+                {
+                    error!(
+                        "Failed to update traffic watermark for connection {}: {}",
+                        conn_id, e
+                    );
+                    continue;
+                }
+
+                if !segments.is_empty() {
+                    persisted += 1;
+                }
+            }
+
+            info!("Persisted traffic for {} connections", persisted);
         }
     }
 

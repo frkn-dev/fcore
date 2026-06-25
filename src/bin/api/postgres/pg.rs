@@ -17,6 +17,7 @@ use super::{
     keys::PgKey,
     node::PgNode,
     subscription::PgSubscription,
+    traffic::PgTraffic,
 };
 
 pub struct PgClientManager {
@@ -94,6 +95,10 @@ impl PgContext {
 
     pub fn sub(&self) -> PgSubscription {
         PgSubscription::new(self.manager.clone())
+    }
+
+    pub fn traffic(&self) -> PgTraffic {
+        PgTraffic::new(self.manager.clone())
     }
 
     pub fn key(&self) -> PgKey {

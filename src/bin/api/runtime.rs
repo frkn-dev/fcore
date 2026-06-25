@@ -138,6 +138,15 @@ where
             }
         });
 
+        spawn_task("persist_connection_traffic", {
+            let interval = self.settings.tasks.traffic_persist_interval_sec;
+            let service = Arc::clone(&self);
+
+            async move {
+                service.persist_connection_traffic(interval).await;
+            }
+        });
+
         spawn_task("metric_worker", {
             let metrics = Arc::clone(&self.metrics);
             let receiver = self.settings.metrics.reciever.clone();

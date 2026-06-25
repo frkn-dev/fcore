@@ -19,6 +19,7 @@ mod runtime;
 mod service;
 mod sync;
 mod tasks;
+mod traffic;
 
 pub type ApiService = Service<HashMap<Env, Vec<Node>>, Connection, Subscription>;
 

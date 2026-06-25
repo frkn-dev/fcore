@@ -432,14 +432,55 @@ impl MetricStorage {
         total
     }
 
-    pub fn get_subscription_total_traffic(&self, subscription_id: &uuid::Uuid) -> (u64, u64) {
+    pub fn get_connection_total_traffic(&self, conn_id: &uuid::Uuid) -> (u64, u64) {
         let mut tags = BTreeMap::new();
-        tags.insert("subscription_id".to_string(), subscription_id.to_string());
+        tags.insert("conn_id".to_string(), conn_id.to_string());
 
-        let uplink = self.sum_metric("user.traffic.uplink", &tags);
-        let downlink = self.sum_metric("user.traffic.downlink", &tags);
+        (
+            self.sum_metric("user.traffic.uplink", &tags),
+            self.sum_metric("user.traffic.downlink", &tags),
+        )
+    }
 
-        (uplink, downlink)
+    pub fn get_connection_delta_traffic(
+        &self,
+        conn_id: &uuid::Uuid,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> (u64, u64) {
+        let mut tags = BTreeMap::new();
+        tags.insert("conn_id".to_string(), conn_id.to_string());
+
+        (
+            self.delta_sum(Some("user.traffic.uplink"), &tags, from_ms, to_ms) as u64,
+            self.delta_sum(Some("user.traffic.downlink"), &tags, from_ms, to_ms) as u64,
+        )
+    }
+
+    pub fn reset_subscription_series(&self, subscription_id: &uuid::Uuid) {
+        let sub_id_str = subscription_id.to_string();
+        let hashes: std::collections::HashSet<u64> = self
+            .tag_index
+            .get("subscription_id")
+            .and_then(|index| index.get(&sub_id_str).map(|entry| entry.clone()))
+            .unwrap_or_default();
+
+        let hashes: Vec<u64> = hashes.iter().copied().collect();
+
+        if hashes.is_empty() {
+            return;
+        }
+
+        for node in self.inner.iter() {
+            let node_map = node.value();
+            for hash in &hashes {
+                if let Some(mut series) = node_map.get_mut(hash) {
+                    while series.len() > 1 {
+                        series.pop_front();
+                    }
+                }
+            }
+        }
     }
 }
 
