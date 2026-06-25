@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fcore admin</title>
+<style>
+  :root { --bg: #f5f6f8; --card: #fff; --text: #222; --muted: #666; --border: #ddd; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+  header { background: #1a1a2e; color: #fff; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { margin: 0; font-size: 1.2rem; }
+  main { padding: 1.5rem; max-width: 1400px; margin: 0 auto; }
+  .token-bar { background: var(--card); border: 1px solid var(--border); padding: 1rem; border-radius: 8px; margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center; }
+  .token-bar input { flex: 1; padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; }
+  .token-bar button { padding: 0.5rem 1rem; background: #1a1a2e; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  .token-bar button:hover { opacity: 0.9; }
+  #status { font-size: 0.85rem; color: var(--muted); margin-left: auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .card h3 { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--muted); text-transform: uppercase; }
+  .card .value { font-size: 1.8rem; font-weight: 600; }
+  .card .sub { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; overflow-x: auto; }
+  section h2 { margin: 0 0 1rem; font-size: 1.1rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th { background: #fafafa; font-weight: 600; }
+  tr:hover { background: #f9f9f9; }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+  .online { background: #d1fae5; color: #065f46; }
+  .offline { background: #fee2e2; color: #991b1b; }
+  .deleted { background: #f3f4f6; color: #6b7280; }
+  .active { background: #dbeafe; color: #1e40af; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+  .error { color: #991b1b; }
+</style>
+</head>
+<body>
+<header>
+  <h1>fcore admin</h1>
+</header>
+<main>
+  <div class="token-bar">
+    <input id="token" type="password" placeholder="admin token" autocomplete="off">
+    <button onclick="loadAll()">Connect / Refresh</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="grid" id="dashboard"></div>
+
+  <section>
+    <h2>Nodes</h2>
+    <div id="nodes"></div>
+  </section>
+
+  <section>
+    <h2>Connections</h2>
+    <div id="connections"></div>
+  </section>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let token = localStorage.getItem('fc_admin_token') || '';
+  const urlParams = new URLSearchParams(window.location.search);
+  const tokenFromUrl = urlParams.get('token');
+  if (tokenFromUrl) {
+    token = tokenFromUrl;
+    localStorage.setItem('fc_admin_token', token);
+  }
+  $('token').value = token;
+
+  async function api(path) {
+    const r = await fetch(path, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (r.status === 401) {
+      setStatus('Unauthorized — check token', true);
+      throw new Error('unauthorized');
+    }
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(text || r.statusText);
+    }
+    return r.json();
+  }
+
+  function setStatus(msg, isError) {
+    const el = $('status');
+    el.textContent = msg;
+    el.className = isError ? 'error' : '';
+  }
+
+  function renderState(s) {
+    $('dashboard').innerHTML = `
+      <div class="card"><h3>Nodes</h3><div class="value">${s.nodes.online}</div><div class="sub">online / ${s.nodes.total} total</div></div>
+      <div class="card"><h3>Connections</h3><div class="value">${s.connections.active}</div><div class="sub">active / ${s.connections.total} total</div></div>
+      <div class="card"><h3>Subscriptions</h3><div class="value">${s.subscriptions.active}</div><div class="sub">active / ${s.subscriptions.total} total</div></div>
+    `;
+  }
+
+  function renderNodes(data) {
+    const rows = data.nodes.map(n => `
+      <tr>
+        <td class="mono">${n.id}</td>
+        <td>${n.env}</td>
+        <td>${n.hostname}</td>
+        <td>${n.address}</td>
+        <td><span class="badge ${n.status.toLowerCase()}">${n.status}</span></td>
+        <td>${n.country}</td>
+        <td>${n.cluster || '-'}</td>
+      </tr>
+    `).join('');
+    $('nodes').innerHTML = rows
+      ? `<table><tr><th>ID</th><th>Env</th><th>Hostname</th><th>Address</th><th>Status</th><th>Country</th><th>Cluster</th></tr>${rows}</table>`
+      : '<p>No nodes</p>';
+  }
+
+  function renderConnections(data) {
+    const rows = data.connections.map(c => `
+      <tr>
+        <td class="mono">${c.id}</td>
+        <td>${c.env}</td>
+        <td class="mono">${c.subscription_id || '-'}</td>
+        <td>${c.proto}</td>
+        <td>${c.expires_at ? new Date(c.expires_at).toLocaleString() : '-'}</td>
+        <td><span class="badge ${c.is_deleted ? 'deleted' : 'active'}">${c.is_deleted ? 'deleted' : 'active'}</span></td>
+      </tr>
+    `).join('');
+    $('connections').innerHTML = rows
+      ? `<table><tr><th>ID</th><th>Env</th><th>Subscription</th><th>Proto</th><th>Expires</th><th>State</th></tr>${rows}</table>`
+      : '<p>No connections</p>';
+  }
+
+  async function loadAll() {
+    token = $('token').value.trim();
+    localStorage.setItem('fc_admin_token', token);
+    setStatus('loading...');
+    try {
+      const [state, nodes, conns] = await Promise.all([
+        api('/admin/api/state'),
+        api('/admin/api/nodes'),
+        api('/admin/api/connections')
+      ]);
+      renderState(state);
+      renderNodes(nodes);
+      renderConnections(conns);
+      setStatus('ok — ' + new Date().toLocaleTimeString());
+    } catch (e) {
+      if (e.message !== 'unauthorized') setStatus('error: ' + e.message, true);
+    }
+  }
+
+  loadAll();
+  setInterval(loadAll, 30000);
+</script>
+</body>
+</html>

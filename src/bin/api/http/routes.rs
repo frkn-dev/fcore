@@ -4,7 +4,7 @@ use uuid::Uuid;
 use warp::Filter;
 
 use fcore::{
-    http::filters::{auth, with_i64, with_param_string},
+    http::filters::{auth, with_i64, with_param_bool, with_param_string},
     Connection, ConnectionApiOperations, ConnectionBaseOperations, NodeStorageOperations, Result,
     Subscription, SubscriptionOperations,
 };
@@ -13,8 +13,8 @@ use super::{
     super::service::Service,
     filters::*,
     handlers::{
-        amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*, node::*,
-        subscription::*, trial::*,
+        admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*,
+        node::*, subscription::*, trial::*,
     },
     param::*,
     rejection,
@@ -146,6 +146,55 @@ where
             >())
             .and(with_sync(self.sync.clone()))
             .and_then(get_subscription_traffic_history);
+
+        // Admin routes
+        let admin_enabled = self.settings.service.admin_enabled;
+        let admin_token = self
+            .settings
+            .service
+            .admin_token
+            .clone()
+            .unwrap_or_default();
+
+        let admin_page_route = warp::get()
+            .and(warp::path("admin"))
+            .and(warp::path::end())
+            .and(warp::query::<crate::http::handlers::admin::AdminPageQuery>())
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and_then(admin_page_handler);
+
+        let admin_api_state_route = warp::get()
+            .and(warp::path!("admin" / "api" / "state"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_state_handler);
+
+        let admin_api_nodes_route = warp::get()
+            .and(warp::path!("admin" / "api" / "nodes"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_nodes_handler);
+
+        let admin_api_connections_route = warp::get()
+            .and(warp::path!("admin" / "api" / "connections"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_connections_handler);
+
+        let admin_routes = admin_page_route
+            .or(admin_api_state_route)
+            .or(admin_api_nodes_route)
+            .or(admin_api_connections_route);
 
         let post_subscription_route = warp::post()
             .and(warp::path("subscription"))
@@ -337,6 +386,8 @@ where
             .or(post_amnezia_services_route)
             .or(post_amnezia_account_route)
             .or(post_amnezia_config_route)
+            // Admin
+            .or(admin_routes)
             // Metrics
             .or(ws_route)
             .recover(rejection)

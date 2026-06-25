@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod amnezia;
 pub mod cluster;
 pub mod connection;

@@ -20,6 +20,8 @@ enabled_tags = [
     "Hysteria2",
     "Mtproto"
 ]
+admin_enabled = true
+admin_token = "change-me-in-production"
 
 [metrics]
 reciever = "tcp://0.0.0.0:3002"

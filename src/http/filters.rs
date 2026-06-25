@@ -41,3 +41,9 @@ pub fn with_u16(v: u16) -> impl Filter<Extract = (u16,), Error = std::convert::I
 pub fn with_i64(v: i64) -> impl Filter<Extract = (i64,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || v)
 }
+
+pub fn with_param_bool(
+    v: bool,
+) -> impl Filter<Extract = (bool,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || v)
+}

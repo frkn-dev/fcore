@@ -59,6 +59,9 @@ pub struct ServiceConfig {
     pub subscription_title: String,
     pub support_contact: String,
     pub base_url: String,
+    #[serde(default)]
+    pub admin_enabled: bool,
+    pub admin_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
