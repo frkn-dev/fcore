@@ -403,6 +403,86 @@ impl MetricStorage {
         None
     }
 
+    // ------------------------------------------------------------
+    // NODE SNAPSHOT HELPERS
+    // ------------------------------------------------------------
+
+    fn node_series_values<F>(&self, node_id: &uuid::Uuid, mut predicate: F) -> Vec<f64>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        let mut values = Vec::new();
+        let Some(node_map) = self.inner.get(node_id) else {
+            return values;
+        };
+
+        for entry in node_map.iter() {
+            let hash = *entry.key();
+            let Some(meta) = self.metadata.get(&hash) else {
+                continue;
+            };
+            let name = &meta.value().0;
+            if predicate(name) {
+                if let Some(last) = entry.value().back() {
+                    values.push(last.value);
+                }
+            }
+        }
+
+        values
+    }
+
+    pub fn node_latest_value(&self, node_id: &uuid::Uuid, metric: &str) -> Option<f64> {
+        let values = self.node_series_values(node_id, |name| name == metric);
+        values.into_iter().next()
+    }
+
+    pub fn node_cpu_avg(&self, node_id: &uuid::Uuid) -> Option<f64> {
+        let values = self.node_series_values(node_id, |name| name.starts_with("sys.cpu."));
+        if values.is_empty() {
+            return None;
+        }
+        let avg = values.iter().sum::<f64>() / values.len() as f64;
+        Some((avg * 100.0).round() / 100.0)
+    }
+
+    pub fn node_memory(&self, node_id: &uuid::Uuid) -> (Option<u64>, Option<u64>) {
+        let used = self
+            .node_latest_value(node_id, "sys.mem_used")
+            .map(|v| v.max(0.0) as u64);
+        let total = self
+            .node_latest_value(node_id, "sys.mem_total")
+            .map(|v| v.max(0.0) as u64);
+        (used, total)
+    }
+
+    pub fn node_disk_usage(&self, node_id: &uuid::Uuid, mount: &str) -> Option<f64> {
+        self.node_latest_value(node_id, &format!("sys.disk.{}.usage_percent", mount))
+    }
+
+    pub fn node_network_traffic(&self, node_id: &uuid::Uuid) -> (Option<f64>, Option<f64>) {
+        let rx_values = self.node_series_values(node_id, |name| {
+            let parts: Vec<&str> = name.split('.').collect();
+            parts.len() == 3 && parts[0] == "net" && parts[2] == "rx_bps"
+        });
+        let tx_values = self.node_series_values(node_id, |name| {
+            let parts: Vec<&str> = name.split('.').collect();
+            parts.len() == 3 && parts[0] == "net" && parts[2] == "tx_bps"
+        });
+
+        let rx = if rx_values.is_empty() {
+            None
+        } else {
+            Some(rx_values.iter().sum::<f64>())
+        };
+        let tx = if tx_values.is_empty() {
+            None
+        } else {
+            Some(tx_values.iter().sum::<f64>())
+        };
+        (rx, tx)
+    }
+
     fn sum_metric(&self, metric: &str, tags: &BTreeMap<String, String>) -> u64 {
         let hashes = self.series_for(Some(metric), tags);
 
@@ -435,6 +515,16 @@ impl MetricStorage {
     pub fn get_connection_total_traffic(&self, conn_id: &uuid::Uuid) -> (u64, u64) {
         let mut tags = BTreeMap::new();
         tags.insert("conn_id".to_string(), conn_id.to_string());
+
+        (
+            self.sum_metric("user.traffic.uplink", &tags),
+            self.sum_metric("user.traffic.downlink", &tags),
+        )
+    }
+
+    pub fn get_subscription_total_traffic(&self, subscription_id: &uuid::Uuid) -> (u64, u64) {
+        let mut tags = BTreeMap::new();
+        tags.insert("subscription_id".to_string(), subscription_id.to_string());
 
         (
             self.sum_metric("user.traffic.uplink", &tags),

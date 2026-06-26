@@ -22,6 +22,7 @@ enabled_tags = [
 ]
 admin_enabled = true
 admin_token = "change-me-in-production"
+# agw_private_key_path = "/path/to/agw_private.pem"
 
 [metrics]
 reciever = "tcp://0.0.0.0:3002"

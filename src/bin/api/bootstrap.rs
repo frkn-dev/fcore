@@ -1,3 +1,4 @@
+use openssl::pkey::PKey;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing_subscriber::Layer;
@@ -80,11 +81,26 @@ where
         let email_store = EmailStore::new(settings.smtp.clone());
         email_store.load_trials().await?;
 
+        let agw_private_key = settings
+            .service
+            .agw_private_key_path
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let pem = std::fs::read(p)
+                    .map_err(|e| fcore::Error::Custom(format!("Failed to read AGW private key: {e}")))?;
+                let key = PKey::private_key_from_pem(&pem)
+                    .map_err(|e| fcore::Error::Custom(format!("Failed to parse AGW private key: {e}")))?;
+                Ok::<_, fcore::Error>(Arc::new(key))
+            })
+            .transpose()?;
+
         let service = Service::new(
             mem_sync,
             settings.clone(),
             Arc::new(metric_storage),
             email_store,
+            agw_private_key,
         );
 
         measure_time(service.get_state_from_db(), "Init PostgreSQL DB").await?;

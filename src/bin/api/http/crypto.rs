@@ -1,0 +1,152 @@
+use base64::Engine;
+use openssl::pkey::{PKey, Private};
+use openssl::rsa::Padding;
+use openssl::symm::{decrypt as aes_decrypt, encrypt as aes_encrypt, Cipher};
+use std::sync::Arc;
+use warp::{Filter, Rejection};
+
+/// AES-контекст, полученный при расшифровке запроса. Используется для шифрования ответа.
+#[derive(Debug, Clone)]
+pub struct AesContext {
+    pub key: Vec<u8>,
+    pub iv: Vec<u8>,
+}
+
+/// Ошибка шифрования/расшифровки AGW.
+#[derive(Debug)]
+pub struct AgwCryptoError(pub String);
+impl warp::reject::Reject for AgwCryptoError {}
+
+/// Расшифровывает зашифрованный запрос. Если тело plain JSON, возвращает его как есть
+/// с пустым AES-контекстом.
+pub fn decrypt_request(
+    private_key: &PKey<Private>,
+    body: serde_json::Value,
+) -> Result<(serde_json::Value, Option<AesContext>), AgwCryptoError> {
+    let key_payload = body
+        .get("keyPayload")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let api_payload = body
+        .get("apiPayload")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let key_payload = key_payload
+        .ok_or_else(|| AgwCryptoError("keyPayload missing".to_string()))?;
+    let api_payload = api_payload
+        .ok_or_else(|| AgwCryptoError("apiPayload missing".to_string()))?;
+
+    let encrypted_key = base64::engine::general_purpose::STANDARD
+        .decode(key_payload)
+        .map_err(|e| AgwCryptoError(format!("keyPayload base64 decode failed: {e}")))?;
+
+    let rsa = private_key.rsa().map_err(|e| AgwCryptoError(e.to_string()))?;
+    let rsa_size = rsa.size() as usize;
+    let mut decrypted_key_buf = vec![0u8; rsa_size];
+    let decrypted_len = rsa
+        .private_decrypt(&encrypted_key, &mut decrypted_key_buf, Padding::PKCS1)
+        .map_err(|e| AgwCryptoError(format!("RSA decryption failed: {e}")))?;
+    decrypted_key_buf.truncate(decrypted_len);
+
+    let key_data: serde_json::Value = serde_json::from_slice(&decrypted_key_buf)
+        .map_err(|e| AgwCryptoError(format!("keyPayload JSON parse failed: {e}")))?;
+
+    let aes_key_b64 = key_data
+        .get("aes_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AgwCryptoError("aes_key missing".to_string()))?;
+    let aes_iv_b64 = key_data
+        .get("aes_iv")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AgwCryptoError("aes_iv missing".to_string()))?;
+    // aes_salt передаётся клиентом, но не используется для вывода ключа.
+
+    let aes_key = base64::engine::general_purpose::STANDARD
+        .decode(aes_key_b64)
+        .map_err(|e| AgwCryptoError(format!("aes_key base64 decode failed: {e}")))?;
+    let aes_iv = base64::engine::general_purpose::STANDARD
+        .decode(aes_iv_b64)
+        .map_err(|e| AgwCryptoError(format!("aes_iv base64 decode failed: {e}")))?;
+
+    let encrypted_api = base64::engine::general_purpose::STANDARD
+        .decode(api_payload)
+        .map_err(|e| AgwCryptoError(format!("apiPayload base64 decode failed: {e}")))?;
+
+    let decrypted_api = aes_decrypt(Cipher::aes_256_cbc(), &aes_key, Some(&aes_iv), &encrypted_api)
+        .map_err(|e| AgwCryptoError(format!("AES decryption failed: {e}")))?;
+
+    let api_json: serde_json::Value = serde_json::from_slice(&decrypted_api)
+        .map_err(|e| AgwCryptoError(format!("apiPayload JSON parse failed: {e}")))?;
+
+    Ok((
+        api_json,
+        Some(AesContext {
+            key: aes_key,
+            iv: aes_iv,
+        }),
+    ))
+}
+
+/// Шифрует ответ тем же AES-256-CBC с PKCS#7 padding.
+pub fn encrypt_response(ctx: &AesContext, plaintext: &[u8]) -> Result<Vec<u8>, AgwCryptoError> {
+    aes_encrypt(Cipher::aes_256_cbc(), &ctx.key, Some(&ctx.iv), plaintext)
+        .map_err(|e| AgwCryptoError(format!("AES encryption failed: {e}")))
+}
+
+/// Warp-фильтр: автоматически определяет зашифрованное тело и расшифровывает его.
+/// Если приватный ключ не настроен, а тело зашифровано — возвращает ошибку.
+pub fn with_agw_decryption<T>(
+    private_key: Option<Arc<PKey<Private>>>,
+) -> impl Filter<Extract = (T, Option<AesContext>), Error = Rejection> + Clone
+where
+    T: serde::de::DeserializeOwned + Send + 'static,
+{
+    warp::body::json::<serde_json::Value>()
+        .and_then(move |body: serde_json::Value| {
+            let key = private_key.clone();
+            async move {
+                let key = key.ok_or_else(|| {
+                    warp::reject::custom(AgwCryptoError(
+                        "AGW private key is not configured".to_string(),
+                    ))
+                })?;
+
+                let (decrypted, ctx) = decrypt_request(&key, body).map_err(warp::reject::custom)?;
+
+                let typed: T = serde_json::from_value(decrypted)
+                    .map_err(|e| warp::reject::custom(AgwCryptoError(format!("JSON parse failed: {e}"))))?;
+
+                Ok::<_, Rejection>((typed, ctx))
+            }
+        })
+        .untuple_one()
+}
+
+/// Шифрует исходящий ответ, если был AES-контекст. Иначе возвращает ответ как есть.
+pub async fn encrypt_gateway_reply(
+    response: warp::reply::Response,
+    aes_ctx: Option<AesContext>,
+) -> Result<warp::reply::Response, Rejection> {
+    match aes_ctx {
+        Some(ctx) => {
+            let body_bytes = warp::hyper::body::to_bytes(response.into_body())
+                .await
+                .map_err(|e| warp::reject::custom(AgwCryptoError(format!("Failed to read response body: {e}"))))?;
+
+            let encrypted = encrypt_response(&ctx, &body_bytes)?;
+
+            let response = warp::http::Response::builder()
+                .status(warp::http::StatusCode::OK)
+                .header(
+                    warp::http::header::CONTENT_TYPE,
+                    warp::http::HeaderValue::from_static("application/octet-stream"),
+                )
+                .body(warp::hyper::Body::from(encrypted))
+                .map_err(|e| warp::reject::custom(AgwCryptoError(format!("Failed to build response: {e}"))))?;
+
+            Ok(response)
+        }
+        None => Ok(response),
+    }
+}

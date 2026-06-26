@@ -1,8 +1,10 @@
 use warp::reject;
 use warp::{http::StatusCode, Rejection, Reply};
 
+use super::http::crypto::AgwCryptoError;
 use fcore::http::{AuthError, MethodError};
 
+pub(crate) mod crypto;
 mod filters;
 pub(crate) mod handlers;
 pub(crate) mod param;
@@ -35,6 +37,16 @@ pub async fn rejection(reject: Rejection) -> Result<impl Reply, Rejection> {
         ))
     } else if let Some(err) = reject.find::<JsonError>() {
         tracing::debug!("[REJECTION] Reason BAD_REQUEST");
+
+        let error_response = warp::reply::json(&serde_json::json!({
+            "error": err.0
+        }));
+        Ok(warp::reply::with_status(
+            error_response,
+            StatusCode::BAD_REQUEST,
+        ))
+    } else if let Some(err) = reject.find::<AgwCryptoError>() {
+        tracing::debug!("[REJECTION] Reason AGW_CRYPTO_ERROR");
 
         let error_response = warp::reply::json(&serde_json::json!({
             "error": err.0

@@ -7,6 +7,7 @@ use fcore::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use warp::Reply;
 
 // ============================================================================
 // DTOs
@@ -577,7 +578,7 @@ fn build_vless_server_config(
 pub async fn gateway_services_handler<N, C, S>(
     req: GatewayServicesRequest,
     memory: MemSync<N, C, S>,
-) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -641,16 +642,17 @@ where
         subscription: GatewaySubscriptionMeta { end_date },
     });
 
-    Ok(Box::new(warp::reply::json(&GatewayServicesResponse {
+    Ok(warp::reply::json(&GatewayServicesResponse {
         user_country_code: "RU".to_string(),
         services,
-    })))
+    })
+    .into_response())
 }
 
 pub async fn gateway_account_info_handler<N, C, S>(
     req: GatewayAccountInfoRequest,
     memory: MemSync<N, C, S>,
-) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -667,10 +669,11 @@ where
     let sub_id = match extract_subscription_id(&req.auth_data) {
         Some(id) => id,
         None => {
-            return Ok(Box::new(warp::reply::with_status(
+            return Ok(warp::reply::with_status(
                 "Missing subscription id in auth_data",
                 warp::http::StatusCode::BAD_REQUEST,
-            )))
+            )
+            .into_response())
         }
     };
 
@@ -678,11 +681,11 @@ where
 
     let sub = match mem.subscriptions.find_by_id(&sub_id) {
         Some(s) => s,
-        None => return Ok(Box::new(http::not_found("Subscription not found"))),
+        None => return Ok(http::not_found("Subscription not found").into_response()),
     };
 
     if !sub.is_active() {
-        return Ok(Box::new(http::not_found("Subscription expired")));
+        return Ok(http::not_found("Subscription expired").into_response());
     }
 
     let conns = mem.connections.get_by_subscription_id(&sub_id);
@@ -716,7 +719,7 @@ where
         .map(|d| d.to_rfc3339())
         .unwrap_or_else(|| "2099-01-01T00:00:00Z".to_string());
 
-    Ok(Box::new(warp::reply::json(&GatewayAccountInfoResponse {
+    Ok(warp::reply::json(&GatewayAccountInfoResponse {
         supported_protocols: vec!["vless".to_string(), "awg".to_string()],
         available_countries: vec![
             GatewayCountry {
@@ -740,13 +743,13 @@ where
             website_name: "FRKN".to_string(),
             telegram: "https://t.me/frkn_org".to_string(),
         },
-    })))
+    }).into_response())
 }
 
 pub async fn gateway_config_handler<N, C, S>(
     req: GatewayConfigRequest,
     memory: MemSync<N, C, S>,
-) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -763,10 +766,11 @@ where
     let sub_id = match extract_subscription_id(&req.auth_data) {
         Some(id) => id,
         None => {
-            return Ok(Box::new(warp::reply::with_status(
+            return Ok(warp::reply::with_status(
                 "Missing subscription id in auth_data",
                 warp::http::StatusCode::BAD_REQUEST,
-            )))
+            )
+            .into_response())
         }
     };
 
@@ -774,16 +778,16 @@ where
 
     let sub = match mem.subscriptions.find_by_id(&sub_id) {
         Some(s) => s,
-        None => return Ok(Box::new(http::not_found("Subscription not found"))),
+        None => return Ok(http::not_found("Subscription not found").into_response()),
     };
 
     if !sub.is_active() {
-        return Ok(Box::new(http::not_found("Subscription expired")));
+        return Ok(http::not_found("Subscription expired").into_response());
     }
 
     let conns = match mem.connections.get_by_subscription_id(&sub_id) {
         Some(c) => c,
-        None => return Ok(Box::new(http::not_found("No connections"))),
+        None => return Ok(http::not_found("No connections").into_response()),
     };
 
     let target_country = req
@@ -838,9 +842,10 @@ where
     let (conn, node, conn_id) = match (found_conn, found_node, found_conn_id) {
         (Some(c), Some(n), Some(id)) => (c, n, id),
         _ => {
-            return Ok(Box::new(http::not_found(
+            return Ok(http::not_found(
                 "No suitable connection/node found",
-            )))
+            )
+            .into_response())
         }
     };
 
@@ -875,7 +880,7 @@ where
     let config_str = server_config_json.to_string();
     let config_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config_str);
 
-    Ok(Box::new(warp::reply::json(&GatewayConfigResponse {
+    Ok(warp::reply::json(&GatewayConfigResponse {
         config: config_b64,
         supported_protocols: vec!["vless".to_string(), "awg".to_string()],
         service_info: serde_json::json!({
@@ -888,5 +893,5 @@ where
             "user_country_code": req.user_country_code,
             "server_country_code": req.server_country_code
         }),
-    })))
+    }).into_response())
 }

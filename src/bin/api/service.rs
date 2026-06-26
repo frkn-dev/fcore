@@ -1,3 +1,5 @@
+use openssl::pkey::PKey;
+use openssl::pkey::Private;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -33,6 +35,7 @@ where
     pub settings: ServiceSettings,
     pub metrics: Arc<MetricStorage>,
     pub email_store: EmailStore,
+    pub agw_private_key: Option<Arc<PKey<Private>>>,
 }
 
 impl<N, C, S> Service<N, C, S>
@@ -60,12 +63,14 @@ where
         settings: ServiceSettings,
         metrics: Arc<MetricStorage>,
         email_store: EmailStore,
+        agw_private_key: Option<Arc<PKey<Private>>>,
     ) -> Self {
         Self {
             sync,
             settings,
             metrics,
             email_store,
+            agw_private_key,
         }
     }
 }

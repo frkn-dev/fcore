@@ -10,7 +10,8 @@ use fcore::{
 };
 
 use super::{
-    super::service::Service,
+    crypto::{self, AesContext},
+    super::{service::Service, sync::MemSync},
     filters::*,
     handlers::{
         admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*,
@@ -70,6 +71,8 @@ where
         }
 
         let cors = cors_builder.build();
+
+        let agw_key = self.agw_private_key.clone();
 
         tracing::debug!("Cors: {:?}", cors);
 
@@ -180,7 +183,28 @@ where
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
             .and(warp::header::optional::<String>("authorization"))
+            .and(with_metrics(self.metrics.clone()))
             .and_then(admin_api_nodes_handler);
+
+        let admin_api_subscriptions_route = warp::get()
+            .and(warp::path!("admin" / "api" / "subscriptions"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(admin_api_subscriptions_handler);
+
+        let admin_api_subscription_connections_route = warp::get()
+            .and(warp::path!("admin" / "api" / "subscriptions" / Uuid / "connections"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(admin_api_subscription_connections_handler);
 
         let admin_api_connections_route = warp::get()
             .and(warp::path!("admin" / "api" / "connections"))
@@ -194,6 +218,8 @@ where
         let admin_routes = admin_page_route
             .or(admin_api_state_route)
             .or(admin_api_nodes_route)
+            .or(admin_api_subscriptions_route)
+            .or(admin_api_subscription_connections_route)
             .or(admin_api_connections_route);
 
         let post_subscription_route = warp::post()
@@ -320,25 +346,49 @@ where
             .and(warp::path("v1"))
             .and(warp::path("services"))
             .and(warp::path::end())
-            .and(warp::body::json::<GatewayServicesRequest>())
+            .and(crypto::with_agw_decryption::<GatewayServicesRequest>(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
-            .and_then(gateway_services_handler);
+            .and_then(
+                |req: GatewayServicesRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>|
+                 async move {
+                    let response = gateway_services_handler(req, sync).await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
 
         let post_amnezia_account_route = warp::post()
             .and(warp::path("v1"))
             .and(warp::path("account_info"))
             .and(warp::path::end())
-            .and(warp::body::json::<GatewayAccountInfoRequest>())
+            .and(crypto::with_agw_decryption::<GatewayAccountInfoRequest>(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
-            .and_then(gateway_account_info_handler);
+            .and_then(
+                |req: GatewayAccountInfoRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>|
+                 async move {
+                    let response = gateway_account_info_handler(req, sync).await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
 
         let post_amnezia_config_route = warp::post()
             .and(warp::path("v1"))
             .and(warp::path("config"))
             .and(warp::path::end())
-            .and(warp::body::json::<GatewayConfigRequest>())
+            .and(crypto::with_agw_decryption::<GatewayConfigRequest>(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
-            .and_then(gateway_config_handler);
+            .and_then(
+                |req: GatewayConfigRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>|
+                 async move {
+                    let response = gateway_config_handler(req, sync).await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
 
         //Metrics
 

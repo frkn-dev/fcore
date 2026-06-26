@@ -14,6 +14,17 @@ pub struct ServiceSettings {
 
 impl Settings for ServiceSettings {
     fn validate(&self) -> Result<()> {
+        let key_path = self
+            .service
+            .agw_private_key_path
+            .as_ref()
+            .map(|p| p.trim())
+            .unwrap_or_default();
+        if key_path.is_empty() {
+            return Err(fcore::Error::Custom(
+                "service.agw_private_key_path is required".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -62,6 +73,8 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub admin_enabled: bool,
     pub admin_token: Option<String>,
+    #[serde(default)]
+    pub agw_private_key_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use warp::http::StatusCode;
 
 use fcore::{
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, Node, NodeStatus,
-    NodeStorageOperations, SubscriptionOperations,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricStorage, Node,
+    NodeStatus, NodeStorageOperations, SubscriptionOperations,
 };
 
 use crate::sync::MemSync;
@@ -42,6 +43,17 @@ pub struct AdminNodeList {
     pub nodes: Vec<AdminNode>,
 }
 
+#[derive(Serialize, Default)]
+pub struct NodeMetricsSnapshot {
+    pub memory_used_bytes: Option<u64>,
+    pub memory_total_bytes: Option<u64>,
+    pub memory_percent: Option<f64>,
+    pub cpu_percent: Option<f64>,
+    pub disk_usage_percent: Option<f64>,
+    pub network_rx_bps: Option<f64>,
+    pub network_tx_bps: Option<f64>,
+}
+
 #[derive(Serialize)]
 pub struct AdminNode {
     pub id: uuid::Uuid,
@@ -52,6 +64,7 @@ pub struct AdminNode {
     pub label: String,
     pub cluster: Option<String>,
     pub country: String,
+    pub metrics: NodeMetricsSnapshot,
 }
 
 impl From<&Node> for AdminNode {
@@ -61,10 +74,11 @@ impl From<&Node> for AdminNode {
             env: node.env.clone(),
             hostname: node.hostname.clone(),
             address: node.address.to_string(),
-            status: node.status.clone(),
+            status: node.status,
             label: node.label.clone(),
             cluster: node.cluster.clone(),
             country: node.country.clone(),
+            metrics: NodeMetricsSnapshot::default(),
         }
     }
 }
@@ -75,6 +89,27 @@ pub struct AdminConnectionList {
 }
 
 #[derive(Serialize)]
+pub struct AdminSubscriptionList {
+    pub subscriptions: Vec<AdminSubscription>,
+}
+
+#[derive(Serialize)]
+pub struct AdminSubscription {
+    pub id: uuid::Uuid,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub is_active: bool,
+    pub limit_bytes: Option<i64>,
+    pub connections_count: usize,
+    pub traffic: AdminSubscriptionTraffic,
+}
+
+#[derive(Serialize)]
+pub struct AdminSubscriptionTraffic {
+    pub uplink: u64,
+    pub downlink: u64,
+}
+
+#[derive(Serialize)]
 pub struct AdminConnection {
     pub id: uuid::Uuid,
     pub env: Env,
@@ -82,6 +117,8 @@ pub struct AdminConnection {
     pub proto: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub is_deleted: bool,
+    pub uplink: u64,
+    pub downlink: u64,
 }
 
 fn unauthorized() -> Box<dyn warp::Reply + Send> {
@@ -96,11 +133,11 @@ fn not_found() -> Box<dyn warp::Reply + Send> {
 }
 
 fn check_token(header: Option<String>, token: &str) -> bool {
-    header.map_or(false, |h| h == format!("Bearer {}", token))
+    header.is_some_and(|h| h == format!("Bearer {}", token))
 }
 
 fn check_query_token(query_token: Option<&str>, token: &str) -> bool {
-    query_token.map_or(false, |t| t == token)
+    query_token == Some(token)
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +258,7 @@ pub async fn admin_api_nodes_handler<N, C, S>(
     admin_enabled: bool,
     admin_token: String,
     auth_header: Option<String>,
+    metrics: Arc<MetricStorage>,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -242,11 +280,30 @@ where
     }
 
     let mem = memory.memory.read().await;
-    let nodes: Vec<AdminNode> = mem
-        .nodes
-        .iter_nodes()
-        .map(|(_id, node)| AdminNode::from(node))
-        .collect();
+    let mut nodes = Vec::new();
+
+    for (_id, node) in mem.nodes.iter_nodes() {
+        let mut admin_node = AdminNode::from(node);
+        let (mem_used, mem_total) = metrics.node_memory(&node.uuid);
+        let (net_rx, net_tx) = metrics.node_network_traffic(&node.uuid);
+
+        admin_node.metrics = NodeMetricsSnapshot {
+            memory_used_bytes: mem_used,
+            memory_total_bytes: mem_total,
+            memory_percent: match (mem_used, mem_total) {
+                (Some(used), Some(total)) if total > 0 => {
+                    Some(((used as f64 / total as f64) * 10000.0).round() / 100.0)
+                }
+                _ => None,
+            },
+            cpu_percent: metrics.node_cpu_avg(&node.uuid),
+            disk_usage_percent: metrics.node_disk_usage(&node.uuid, "root"),
+            network_rx_bps: net_rx,
+            network_tx_bps: net_tx,
+        };
+
+        nodes.push(admin_node);
+    }
 
     Ok(Box::new(warp::reply::json(&AdminNodeList { nodes })))
 }
@@ -287,10 +344,119 @@ where
             proto: conn.get_proto().proto().to_string(),
             expires_at: conn.get_expires_at(),
             is_deleted: conn.get_deleted(),
+            uplink: 0,
+            downlink: 0,
         })
         .collect();
 
     Ok(Box::new(warp::reply::json(&AdminConnectionList {
         connections,
+    })))
+}
+
+pub async fn admin_api_subscriptions_handler<N, C, S>(
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+    metrics: Arc<MetricStorage>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let mem = memory.memory.read().await;
+    let mut subscriptions = Vec::new();
+
+    for (id, sub) in mem.subscriptions.iter() {
+        let connections_count = mem
+            .connections
+            .iter()
+            .filter(|(_, conn)| conn.get_subscription_id() == Some(*id))
+            .count();
+        let (uplink, downlink) = metrics.get_subscription_total_traffic(id);
+
+        subscriptions.push(AdminSubscription {
+            id: *id,
+            expires_at: sub.expires_at(),
+            is_active: sub.is_active(),
+            limit_bytes: sub.limit_bytes(),
+            connections_count,
+            traffic: AdminSubscriptionTraffic { uplink, downlink },
+        });
+    }
+
+    Ok(Box::new(warp::reply::json(&AdminSubscriptionList {
+        subscriptions,
+    })))
+}
+
+pub async fn admin_api_subscription_connections_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+    metrics: Arc<MetricStorage>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let mem = memory.memory.read().await;
+    let connections: Vec<(uuid::Uuid, C)> = mem
+        .connections
+        .iter()
+        .filter(|(_, conn)| conn.get_subscription_id() == Some(subscription_id))
+        .map(|(id, conn)| (*id, conn.clone()))
+        .collect();
+
+    let mut list = Vec::new();
+    for (id, conn) in connections {
+        let (uplink, downlink) = metrics.get_connection_total_traffic(&id);
+        list.push(AdminConnection {
+            id,
+            env: conn.get_env(),
+            subscription_id: conn.get_subscription_id(),
+            proto: conn.get_proto().proto().to_string(),
+            expires_at: conn.get_expires_at(),
+            is_deleted: conn.get_deleted(),
+            uplink,
+            downlink,
+        });
+    }
+
+    Ok(Box::new(warp::reply::json(&AdminConnectionList {
+        connections: list,
     })))
 }

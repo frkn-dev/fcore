@@ -27,13 +27,20 @@
   th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
   th { background: #fafafa; font-weight: 600; }
   tr:hover { background: #f9f9f9; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover { background: #f0f4ff; }
   .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
   .online { background: #d1fae5; color: #065f46; }
   .offline { background: #fee2e2; color: #991b1b; }
   .deleted { background: #f3f4f6; color: #6b7280; }
   .active { background: #dbeafe; color: #1e40af; }
+  .inactive { background: #fef3c7; color: #92400e; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
   .error { color: #991b1b; }
+  .details { margin: 0.25rem 0 0.75rem; padding: 0.75rem; background: #f9fafb; border: 1px solid var(--border); border-radius: 6px; }
+  .details h4 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+  .small { font-size: 0.8rem; color: var(--muted); }
+  .nowrap { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -55,8 +62,8 @@
   </section>
 
   <section>
-    <h2>Connections</h2>
-    <div id="connections"></div>
+    <h2>Subscriptions</h2>
+    <div id="subscriptions"></div>
   </section>
 </main>
 
@@ -90,6 +97,35 @@
     el.className = isError ? 'error' : '';
   }
 
+  function formatBytes(b) {
+    if (b === 0 || b == null) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let n = Number(b);
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i++;
+    }
+    return n.toFixed(i === 0 ? 0 : 2) + ' ' + units[i];
+  }
+
+  function formatBits(bps) {
+    if (bps === 0 || bps == null) return '0 bps';
+    const units = ['bps', 'Kbps', 'Mbps', 'Gbps'];
+    let i = 0;
+    let n = Number(bps) * 8; // bytes/s -> bits/s
+    while (n >= 1000 && i < units.length - 1) {
+      n /= 1000;
+      i++;
+    }
+    return n.toFixed(i === 0 ? 0 : 2) + ' ' + units[i];
+  }
+
+  function formatPercent(p) {
+    if (p == null) return '-';
+    return p.toFixed(1) + '%';
+  }
+
   function renderState(s) {
     $('dashboard').innerHTML = `
       <div class="card"><h3>Nodes</h3><div class="value">${s.nodes.online}</div><div class="sub">online / ${s.nodes.total} total</div></div>
@@ -99,36 +135,92 @@
   }
 
   function renderNodes(data) {
-    const rows = data.nodes.map(n => `
+    const rows = data.nodes.map(n => {
+      const m = n.metrics || {};
+      const mem = (m.memory_used_bytes != null && m.memory_total_bytes != null)
+        ? `${formatBytes(m.memory_used_bytes)} / ${formatBytes(m.memory_total_bytes)} (${formatPercent(m.memory_percent)})`
+        : '-';
+      const traffic = (m.network_rx_bps != null || m.network_tx_bps != null)
+        ? `↓${formatBits(m.network_rx_bps || 0)} / ↑${formatBits(m.network_tx_bps || 0)}`
+        : '-';
+      return `
       <tr>
         <td class="mono">${n.id}</td>
         <td>${n.env}</td>
         <td>${n.hostname}</td>
         <td>${n.address}</td>
         <td><span class="badge ${n.status.toLowerCase()}">${n.status}</span></td>
+        <td class="nowrap">${m.cpu_percent != null ? m.cpu_percent.toFixed(1) + '%' : '-'}</td>
+        <td class="nowrap">${mem}</td>
+        <td class="nowrap">${formatPercent(m.disk_usage_percent)}</td>
+        <td class="nowrap">${traffic}</td>
         <td>${n.country}</td>
         <td>${n.cluster || '-'}</td>
-      </tr>
-    `).join('');
+      </tr>`;
+    }).join('');
     $('nodes').innerHTML = rows
-      ? `<table><tr><th>ID</th><th>Env</th><th>Hostname</th><th>Address</th><th>Status</th><th>Country</th><th>Cluster</th></tr>${rows}</table>`
+      ? `<table><tr><th>ID</th><th>Env</th><th>Hostname</th><th>Address</th><th>Status</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Traffic</th><th>Country</th><th>Cluster</th></tr>${rows}</table>`
       : '<p>No nodes</p>';
   }
 
-  function renderConnections(data) {
-    const rows = data.connections.map(c => `
+  function renderSubscriptions(data) {
+    if (!data.subscriptions || !data.subscriptions.length) {
+      $('subscriptions').innerHTML = '<p>No subscriptions</p>';
+      return;
+    }
+
+    const rows = data.subscriptions.map(s => `
+      <tr class="clickable" onclick="toggleSubscription('${s.id}')">
+        <td class="mono">${s.id}</td>
+        <td>${s.expires_at ? new Date(s.expires_at).toLocaleString() : '-'}</td>
+        <td><span class="badge ${s.is_active ? 'active' : 'inactive'}">${s.is_active ? 'active' : 'inactive'}</span></td>
+        <td class="nowrap">${s.limit_bytes != null ? formatBytes(s.limit_bytes) : '-'}</td>
+        <td>${s.connections_count}</td>
+        <td class="nowrap">↓${formatBytes(s.traffic.downlink)} / ↑${formatBytes(s.traffic.uplink)}</td>
+      </tr>
+      <tr>
+        <td colspan="6" id="sub-details-${s.id}" class="details" style="display:none">
+          <h4>Connections</h4>
+          <div id="sub-conns-${s.id}">Loading…</div>
+        </td>
+      </tr>
+    `).join('');
+
+    $('subscriptions').innerHTML = `<table><tr><th>ID</th><th>Expires</th><th>State</th><th>Limit</th><th>Connections</th><th>Traffic</th></tr>${rows}</table>`;
+  }
+
+  function renderConnectionRows(conns) {
+    if (!conns || !conns.length) return '<p class="small">No connections</p>';
+    const rows = conns.map(c => `
       <tr>
         <td class="mono">${c.id}</td>
         <td>${c.env}</td>
-        <td class="mono">${c.subscription_id || '-'}</td>
         <td>${c.proto}</td>
         <td>${c.expires_at ? new Date(c.expires_at).toLocaleString() : '-'}</td>
         <td><span class="badge ${c.is_deleted ? 'deleted' : 'active'}">${c.is_deleted ? 'deleted' : 'active'}</span></td>
+        <td class="nowrap">↓${formatBytes(c.downlink)} / ↑${formatBytes(c.uplink)}</td>
       </tr>
     `).join('');
-    $('connections').innerHTML = rows
-      ? `<table><tr><th>ID</th><th>Env</th><th>Subscription</th><th>Proto</th><th>Expires</th><th>State</th></tr>${rows}</table>`
-      : '<p>No connections</p>';
+    return `<table><tr><th>ID</th><th>Env</th><th>Proto</th><th>Expires</th><th>State</th><th>Traffic</th></tr>${rows}</table>`;
+  }
+
+  async function toggleSubscription(id) {
+    const details = $(`sub-details-${id}`);
+    const connsDiv = $(`sub-conns-${id}`);
+    if (details.style.display === 'none') {
+      details.style.display = 'table-cell';
+      if (connsDiv.dataset.loaded !== 'true') {
+        try {
+          const data = await api(`/admin/api/subscriptions/${id}/connections`);
+          connsDiv.innerHTML = renderConnectionRows(data.connections);
+          connsDiv.dataset.loaded = 'true';
+        } catch (e) {
+          connsDiv.innerHTML = '<p class="error">Failed to load connections</p>';
+        }
+      }
+    } else {
+      details.style.display = 'none';
+    }
   }
 
   async function loadAll() {
@@ -136,14 +228,14 @@
     localStorage.setItem('fc_admin_token', token);
     setStatus('loading...');
     try {
-      const [state, nodes, conns] = await Promise.all([
+      const [state, nodes, subscriptions] = await Promise.all([
         api('/admin/api/state'),
         api('/admin/api/nodes'),
-        api('/admin/api/connections')
+        api('/admin/api/subscriptions')
       ]);
       renderState(state);
       renderNodes(nodes);
-      renderConnections(conns);
+      renderSubscriptions(subscriptions);
       setStatus('ok — ' + new Date().toLocaleTimeString());
     } catch (e) {
       if (e.message !== 'unauthorized') setStatus('error: ' + e.message, true);
