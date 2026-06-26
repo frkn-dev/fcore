@@ -127,7 +127,12 @@ impl EmailStore {
             .build()
     }
 
-    pub async fn send_email_background(&self, to: String, sub_id: uuid::Uuid) {
+    pub async fn send_email_background(
+        &self,
+        to: String,
+        sub_id: uuid::Uuid,
+        lang: Option<String>,
+    ) {
         let mailer = self.mailer.clone();
         let web_host = self.smtp.company_website.clone();
         let from = self.smtp.from.clone();
@@ -135,14 +140,42 @@ impl EmailStore {
         let company_name = self.smtp.company_name.clone();
         let support = self.smtp.support.clone();
 
+        let is_en = lang.as_deref().map(|s| s.to_lowercase()).as_deref() == Some("en");
+
         tokio::spawn(async move {
+            let email_title = if is_en {
+                "Trial subscription created".to_string()
+            } else {
+                title
+            };
+            let subtitle = if is_en {
+                "Your trial subscription has been created"
+            } else {
+                "Твоя подписка для тест-драйва успешно создана"
+            };
+            let button_text = if is_en {
+                "Open subscription"
+            } else {
+                "Открыть подписку"
+            };
+            let fallback_text = if is_en {
+                "If the button doesn't work, copy the link:"
+            } else {
+                "Если кнопка не работает — скопируй ссылку:"
+            };
+            let support_label = if is_en {
+                "Support"
+            } else {
+                "Поддержка"
+            };
+
             let html_body = format!(
                 r#"
             <!DOCTYPE html>
             <html>
             <head>
               <meta charset="UTF-8">
-              <title>{title}</title>
+              <title>{email_title}</title>
             </head>
             <body style="margin:0;padding:0;background:#0b0d12;font-family:Arial,sans-serif;">
 
@@ -154,9 +187,9 @@ impl EmailStore {
 
                       <tr>
                         <td style="text-align:center;">
-                          <h1 style="margin:0;color:#5b7cfa;">{title}</h1>
+                          <h1 style="margin:0;color:#5b7cfa;">{email_title}</h1>
                           <p style="color:#9aa1b2;margin-top:8px;">
-                            Твоя подписка для тест-драйва успешно создана
+                            {subtitle}
                           </p>
                         </td>
                       </tr>
@@ -183,7 +216,7 @@ impl EmailStore {
                               border-radius:12px;
                               font-weight:bold;
                              ">
-                            Открыть подписку
+                            {button_text}
                           </a>
 
                         </td>
@@ -191,7 +224,7 @@ impl EmailStore {
 
                       <tr>
                         <td style="text-align:center;color:#9aa1b2;font-size:12px;padding-top:16px;">
-                          Если кнопка не работает — скопируй ссылку:<br>
+                          {fallback_text}<br>
                           <span style="color:#5b7cfa;">
                             {web_host}/subscription?id={sub_id}
                           </span>
@@ -200,7 +233,7 @@ impl EmailStore {
 
                       <tr>
                         <td style="text-align:center;padding-top:24px;font-size:11px;color:#6b7280;">
-                          {company_name} • <a href="{support}">Поддержка</a>
+                          {company_name} • <a href="{support}">{support_label}</a>
                         </td>
                       </tr>
 
@@ -215,15 +248,19 @@ impl EmailStore {
             "#,
                 web_host = web_host,
                 sub_id = sub_id,
-                title = title,
+                email_title = email_title,
+                subtitle = subtitle,
+                button_text = button_text,
+                fallback_text = fallback_text,
                 company_name = company_name,
                 support = support,
+                support_label = support_label,
             );
 
             let msg = match Message::builder()
                 .from(from.parse().unwrap())
                 .to(to.parse().unwrap())
-                .subject(title)
+                .subject(email_title)
                 .header(lettre::message::header::ContentType::TEXT_HTML)
                 .body(html_body)
             {

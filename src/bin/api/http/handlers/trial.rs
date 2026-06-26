@@ -224,7 +224,9 @@ where
 
     if let Some(email) = req.email {
         let _ = store.save_trial_hmac(&email, &sub.id, &now, &ref_by).await;
-        let _ = store.send_email_background(email, sub.id).await;
+        let _ = store
+            .send_email_background(email, sub.id, req.language)
+            .await;
     }
 
     Ok(http::success_response(

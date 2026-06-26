@@ -252,6 +252,8 @@ pub struct Trial {
     pub user: Option<String>,
     pub email: Option<String>,
     pub referred_by: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 impl Trial {

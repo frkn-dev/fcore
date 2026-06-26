@@ -19,6 +19,8 @@ pub struct GatewayServicesRequest {
     pub os_version: Option<String>,
     #[serde(rename = "app_language")]
     pub app_language: Option<String>,
+    #[serde(rename = "auth_data")]
+    pub auth_data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,7 +49,7 @@ pub struct GatewayService {
     pub subscription: GatewaySubscriptionMeta,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GatewayServiceInfo {
     pub name: String,
     pub price: String,
@@ -56,7 +58,7 @@ pub struct GatewayServiceInfo {
     pub region: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GatewayServiceDescription {
     pub description: String,
     #[serde(rename = "card_description")]
@@ -201,6 +203,40 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Возвращает список стран, для которых есть онлайн-ноды с заданным протоколом.
+fn available_countries_for_protocol<N>(nodes: &N, protocol: &str) -> Vec<GatewayCountry>
+where
+    N: NodeStorageOperations,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut countries = Vec::new();
+    for (_, node) in nodes.iter_nodes() {
+        if !node.inbounds.values().any(|i| proto_matches(i.tag, protocol)) {
+            continue;
+        }
+        let code = node.country.to_uppercase();
+        if seen.insert(code.clone()) {
+            countries.push(GatewayCountry {
+                country_code: code.clone(),
+                country_name: code,
+            });
+        }
+    }
+    if countries.is_empty() {
+        countries = vec![
+            GatewayCountry {
+                country_code: "NL".to_string(),
+                country_name: "Netherlands".to_string(),
+            },
+            GatewayCountry {
+                country_code: "DE".to_string(),
+                country_name: "Germany".to_string(),
+            },
+        ];
+    }
+    countries
 }
 
 /// Строит Amnezia server config для AWG.
@@ -539,7 +575,7 @@ fn build_vless_server_config(
 // ============================================================================
 
 pub async fn gateway_services_handler<N, C, S>(
-    _req: GatewayServicesRequest,
+    req: GatewayServicesRequest,
     memory: MemSync<N, C, S>,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
@@ -557,57 +593,57 @@ where
 {
     let mem = memory.memory.read().await;
 
-    // Собираем уникальные страны из реальных нод
-    let mut seen = std::collections::HashSet::new();
-    let mut available_countries = Vec::new();
-    for (_, node) in mem.nodes.iter_nodes() {
-        let code = node.country.to_uppercase();
-        if seen.insert(code.clone()) {
-            available_countries.push(GatewayCountry {
-                country_code: code.clone(),
-                country_name: code,
-            });
-        }
-    }
-    if available_countries.is_empty() {
-        available_countries = vec![
-            GatewayCountry {
-                country_code: "NL".to_string(),
-                country_name: "Netherlands".to_string(),
-            },
-            GatewayCountry {
-                country_code: "DE".to_string(),
-                country_name: "Germany".to_string(),
-            },
-        ];
-    }
+    // Если передан subscription_id, берём реальный end_date из подписки
+    let end_date = req
+        .auth_data
+        .as_ref()
+        .and_then(extract_subscription_id)
+        .and_then(|sub_id| mem.subscriptions.find_by_id(&sub_id))
+        .and_then(|sub| sub.expires_at().map(|d| d.to_rfc3339()));
 
-    let user_country_code = "RU".to_string();
+    let vless_countries = available_countries_for_protocol(&mem.nodes, "vless");
+    let awg_countries = available_countries_for_protocol(&mem.nodes, "awg");
 
-    let service = GatewayService {
-        service_type: "amnezia-free".to_string(),
-        service_protocol: "vless".to_string(),
-        service_info: GatewayServiceInfo {
-            name: "Free".to_string(),
-            price: "free".to_string(),
-            speed: "100".to_string(),
-            timelimit: "0".to_string(),
-            region: "World".to_string(),
-        },
-        service_description: GatewayServiceDescription {
-            description: "Free VPN by FRKN".to_string(),
-            card_description: "Free VPN with unlimited traffic".to_string(),
-            features: "No logs, unlimited traffic".to_string(),
-        },
-        available_countries,
-        store_endpoint: "https://frkn.org".to_string(),
-        is_available: true,
-        subscription: GatewaySubscriptionMeta { end_date: None },
+    let base_info = GatewayServiceInfo {
+        name: "Free".to_string(),
+        price: "free".to_string(),
+        speed: "100".to_string(),
+        timelimit: "0".to_string(),
+        region: "World".to_string(),
+    };
+    let base_description = GatewayServiceDescription {
+        description: "Privacy is our Religion".to_string(),
+        card_description: "Free VPN with unlimited traffic".to_string(),
+        features: "No logs, unlimited traffic".to_string(),
     };
 
+    let mut services = Vec::with_capacity(2);
+
+    services.push(GatewayService {
+        service_type: "amnezia-free".to_string(),
+        service_protocol: "vless".to_string(),
+        service_info: base_info.clone(),
+        service_description: base_description.clone(),
+        available_countries: vless_countries,
+        store_endpoint: "https://frkn.org".to_string(),
+        is_available: true,
+        subscription: GatewaySubscriptionMeta { end_date: end_date.clone() },
+    });
+
+    services.push(GatewayService {
+        service_type: "amnezia-free".to_string(),
+        service_protocol: "awg".to_string(),
+        service_info: base_info,
+        service_description: base_description,
+        available_countries: awg_countries,
+        store_endpoint: "https://frkn.org".to_string(),
+        is_available: true,
+        subscription: GatewaySubscriptionMeta { end_date },
+    });
+
     Ok(Box::new(warp::reply::json(&GatewayServicesResponse {
-        user_country_code,
-        services: vec![service],
+        user_country_code: "RU".to_string(),
+        services,
     })))
 }
 
