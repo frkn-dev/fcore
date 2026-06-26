@@ -65,9 +65,24 @@ pub fn decrypt_request(
     let aes_key = base64::engine::general_purpose::STANDARD
         .decode(aes_key_b64)
         .map_err(|e| AgwCryptoError(format!("aes_key base64 decode failed: {e}")))?;
+    if aes_key.len() != 32 {
+        return Err(AgwCryptoError(format!(
+            "aes_key must be 32 bytes, got {}",
+            aes_key.len()
+        )));
+    }
+
     let aes_iv = base64::engine::general_purpose::STANDARD
         .decode(aes_iv_b64)
         .map_err(|e| AgwCryptoError(format!("aes_iv base64 decode failed: {e}")))?;
+    // Клиент передаёт 32 байта IV, но AES-256-CBC использует только первые 16.
+    let aes_iv: Vec<u8> = aes_iv.into_iter().take(16).collect();
+    if aes_iv.len() != 16 {
+        return Err(AgwCryptoError(format!(
+            "aes_iv must be at least 16 bytes, got {}",
+            aes_iv.len()
+        )));
+    }
 
     let encrypted_api = base64::engine::general_purpose::STANDARD
         .decode(api_payload)
