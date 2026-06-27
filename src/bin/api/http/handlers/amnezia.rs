@@ -605,17 +605,30 @@ where
     let vless_countries = available_countries_for_protocol(&mem.nodes, "vless");
     let awg_countries = available_countries_for_protocol(&mem.nodes, "awg");
 
-    let base_info = GatewayServiceInfo {
-        name: "Free".to_string(),
+    let vless_info = GatewayServiceInfo {
+        name: "VLESS".to_string(),
         price: "free".to_string(),
         speed: "100".to_string(),
         timelimit: "0".to_string(),
         region: "World".to_string(),
     };
-    let base_description = GatewayServiceDescription {
+    let vless_description = GatewayServiceDescription {
         description: "Privacy is our Religion".to_string(),
-        card_description: "Free VPN with unlimited traffic".to_string(),
-        features: "No logs, unlimited traffic".to_string(),
+        card_description: "VLESS (Xray) — обход блокировок".to_string(),
+        features: "No logs, unlimited traffic, Xray VLESS protocol".to_string(),
+    };
+
+    let awg_info = GatewayServiceInfo {
+        name: "AmneziaWG".to_string(),
+        price: "free".to_string(),
+        speed: "100".to_string(),
+        timelimit: "0".to_string(),
+        region: "World".to_string(),
+    };
+    let awg_description = GatewayServiceDescription {
+        description: "Privacy is our Religion".to_string(),
+        card_description: "AmneziaWG — маскировка под WireGuard".to_string(),
+        features: "No logs, unlimited traffic, AmneziaWG protocol".to_string(),
     };
 
     let mut services = Vec::with_capacity(2);
@@ -623,8 +636,8 @@ where
     services.push(GatewayService {
         service_type: "amnezia-free".to_string(),
         service_protocol: "vless".to_string(),
-        service_info: base_info.clone(),
-        service_description: base_description.clone(),
+        service_info: vless_info,
+        service_description: vless_description,
         available_countries: vless_countries,
         store_endpoint: "https://frkn.org".to_string(),
         is_available: true,
@@ -634,8 +647,8 @@ where
     services.push(GatewayService {
         service_type: "amnezia-free".to_string(),
         service_protocol: "awg".to_string(),
-        service_info: base_info,
-        service_description: base_description,
+        service_info: awg_info,
+        service_description: awg_description,
         available_countries: awg_countries,
         store_endpoint: "https://frkn.org".to_string(),
         is_available: true,
