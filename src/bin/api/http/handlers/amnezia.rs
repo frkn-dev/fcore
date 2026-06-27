@@ -43,6 +43,8 @@ pub struct GatewayService {
     pub service_description: GatewayServiceDescription,
     #[serde(rename = "available_countries")]
     pub available_countries: Vec<GatewayCountry>,
+    #[serde(rename = "connections")]
+    pub connections: Vec<GatewayConnection>,
     #[serde(rename = "store_endpoint")]
     pub store_endpoint: String,
     #[serde(rename = "is_available")]
@@ -75,6 +77,18 @@ pub struct GatewayCountry {
     pub country_name: String,
     #[serde(rename = "connection_uuid")]
     pub connection_uuid: Option<uuid::Uuid>,
+    #[serde(rename = "connection_label")]
+    pub connection_label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GatewayConnection {
+    #[serde(rename = "connection_uuid")]
+    pub connection_uuid: uuid::Uuid,
+    #[serde(rename = "country_code")]
+    pub country_code: String,
+    #[serde(rename = "country_name")]
+    pub country_name: String,
     #[serde(rename = "connection_label")]
     pub connection_label: String,
 }
@@ -228,19 +242,18 @@ fn inbound_label(tag: Tag) -> &'static str {
     }
 }
 
-/// Возвращает список стран, для которых есть онлайн-ноды с заданным протоколом.
-/// Если переданы connections подписки, подставляет connection_uuid и connection_label для каждой страны.
-fn available_countries_for_protocol<N, C>(
+/// Возвращает список connection'ов для заданного протокола.
+/// Для каждой онлайн-ноды с нужным инбаундом ищет matching connection подписки.
+fn connections_for_protocol<N, C>(
     nodes: &N,
     protocol: &str,
     conns: Option<&[(uuid::Uuid, C)]>,
-) -> Vec<GatewayCountry>
+) -> Vec<GatewayConnection>
 where
     N: NodeStorageOperations,
     C: ConnectionApiOperations + ConnectionBaseOperations,
 {
-    let mut seen = std::collections::HashSet::new();
-    let mut countries = Vec::new();
+    let mut result = Vec::new();
     for (_, node) in nodes.iter_nodes() {
         if node.status != NodeStatus::Online {
             continue;
@@ -248,49 +261,65 @@ where
         if !node.inbounds.values().any(|i| proto_matches(i.tag, protocol)) {
             continue;
         }
-        let conn_match = conns.and_then(|cs| {
-            cs.iter()
-                .find(|(_, c)| {
-                    !c.get_deleted()
-                        && c.get_env() == node.env
-                        && proto_matches(c.get_proto().proto(), protocol)
-                })
-                .map(|(id, c)| (*id, c.get_proto().proto()))
-        });
-        let conn_uuid = conn_match.map(|(id, _)| id);
-        let inbound_tag = conn_match.map(|(_, tag)| tag);
-
         let code = node.country.to_uppercase();
-        let inbound_name = inbound_tag.map(inbound_label).unwrap_or(protocol);
-        let label = if node.label.is_empty() {
-            format!("{} · {}", code, inbound_name)
-        } else {
-            format!("{} · {}", node.label, inbound_name)
-        };
-        if seen.insert(code.clone()) {
-            countries.push(GatewayCountry {
-                country_code: code.clone(),
-                country_name: code,
-                connection_uuid: conn_uuid,
-                connection_label: label,
-            });
+        if let Some(cs) = conns {
+            for (conn_id, conn) in cs {
+                if conn.get_deleted() {
+                    continue;
+                }
+                if conn.get_env() != node.env {
+                    continue;
+                }
+                let tag = conn.get_proto().proto();
+                if !proto_matches(tag, protocol) {
+                    continue;
+                }
+                let label = if node.label.is_empty() {
+                    format!("{} · {}", code, inbound_label(tag))
+                } else {
+                    format!("{} · {}", node.label, inbound_label(tag))
+                };
+                result.push(GatewayConnection {
+                    connection_uuid: *conn_id,
+                    country_code: code.clone(),
+                    country_name: code.clone(),
+                    connection_label: label,
+                });
+            }
         }
     }
-    if countries.is_empty() {
-        countries = vec![
-            GatewayCountry {
+    if result.is_empty() {
+        result = vec![
+            GatewayConnection {
+                connection_uuid: uuid::Uuid::nil(),
                 country_code: "NL".to_string(),
                 country_name: "Netherlands".to_string(),
-                connection_uuid: None,
                 connection_label: format!("Netherlands · {}", inbound_label(Tag::VlessTcpReality)),
             },
-            GatewayCountry {
+            GatewayConnection {
+                connection_uuid: uuid::Uuid::nil(),
                 country_code: "DE".to_string(),
                 country_name: "Germany".to_string(),
-                connection_uuid: None,
                 connection_label: format!("Germany · {}", inbound_label(Tag::VlessTcpReality)),
             },
         ];
+    }
+    result
+}
+
+/// Возвращает уникальный список стран из connection'ов (для available_countries).
+fn available_countries_from_connections(conns: &[GatewayConnection]) -> Vec<GatewayCountry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut countries = Vec::new();
+    for conn in conns {
+        if seen.insert(conn.country_code.clone()) {
+            countries.push(GatewayCountry {
+                country_code: conn.country_code.clone(),
+                country_name: conn.country_name.clone(),
+                connection_uuid: Some(conn.connection_uuid),
+                connection_label: conn.connection_label.clone(),
+            });
+        }
     }
     countries
 }
@@ -657,8 +686,10 @@ where
     let conns = sub_id.and_then(|sub_id| mem.connections.get_by_subscription_id(&sub_id));
     let conns_slice = conns.as_deref();
 
-    let vless_countries = available_countries_for_protocol(&mem.nodes, "vless", conns_slice);
-    let awg_countries = available_countries_for_protocol(&mem.nodes, "awg", conns_slice);
+    let vless_connections = connections_for_protocol(&mem.nodes, "vless", conns_slice);
+    let awg_connections = connections_for_protocol(&mem.nodes, "awg", conns_slice);
+    let vless_countries = available_countries_from_connections(&vless_connections);
+    let awg_countries = available_countries_from_connections(&awg_connections);
 
     let vless_info = GatewayServiceInfo {
         name: "VLESS".to_string(),
@@ -694,6 +725,7 @@ where
         service_info: vless_info,
         service_description: vless_description,
         available_countries: vless_countries,
+        connections: vless_connections,
         store_endpoint: "https://frkn.org".to_string(),
         is_available: true,
         subscription: GatewaySubscriptionMeta { end_date: end_date.clone() },
@@ -705,6 +737,7 @@ where
         service_info: awg_info,
         service_description: awg_description,
         available_countries: awg_countries,
+        connections: awg_connections,
         store_endpoint: "https://frkn.org".to_string(),
         is_available: true,
         subscription: GatewaySubscriptionMeta { end_date },
