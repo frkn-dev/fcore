@@ -59,7 +59,11 @@ where
     async fn update_sub(&self, sub_id: &uuid::Uuid, sub_req: SubReq) -> SyncResult<Status>;
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
     async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
-    async fn apply_referral_bonuses(&self, b_sub_id: &uuid::Uuid) -> SyncResult<()>;
+    async fn apply_referral_bonuses(
+        &self,
+        b_sub_id: &uuid::Uuid,
+        paid_days: i64,
+    ) -> SyncResult<()>;
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
@@ -495,8 +499,6 @@ where
     async fn update_sub(&self, sub_id: &uuid::Uuid, req: SubReq) -> SyncResult<Status> {
         info!("Updating subscription: {}", sub_id);
 
-        let days_added = req.days.is_some();
-
         {
             let mut memory = self.memory.write().await;
 
@@ -545,8 +547,8 @@ where
             }
         }
 
-        if days_added {
-            self.apply_referral_bonuses(sub_id).await?;
+        if let Some(days) = req.days {
+            self.apply_referral_bonuses(sub_id, days).await?;
         }
 
         info!("Successfully updated subscription: {}", sub_id);
@@ -555,7 +557,7 @@ where
 
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {
         let status = self.add_days_inner(sub_id, days).await?;
-        self.apply_referral_bonuses(sub_id).await?;
+        self.apply_referral_bonuses(sub_id, days).await?;
         Ok(status)
     }
 
@@ -617,8 +619,20 @@ where
         }
     }
 
-    async fn apply_referral_bonuses(&self, b_sub_id: &uuid::Uuid) -> SyncResult<()> {
-        if self.bonus_days <= 0 {
+    async fn apply_referral_bonuses(
+        &self,
+        b_sub_id: &uuid::Uuid,
+        paid_days: i64,
+    ) -> SyncResult<()> {
+        let bonus_days = self
+            .referral_bonus_tiers
+            .iter()
+            .filter(|(threshold, _)| **threshold <= paid_days)
+            .max_by_key(|(threshold, _)| *threshold)
+            .map(|(_, bonus)| *bonus)
+            .unwrap_or(0);
+
+        if bonus_days <= 0 {
             return Ok(());
         }
 
@@ -647,14 +661,14 @@ where
         };
 
         if let Some(referrer_id) = referrer_id {
-            if let Err(e) = self.add_days_inner(&referrer_id, self.bonus_days).await {
+            if let Err(e) = self.add_days_inner(&referrer_id, bonus_days).await {
                 error!(
                     "Failed to add referral bonus days to referrer {}: {:?}",
                     referrer_id, e
                 );
                 return Err(e);
             }
-            if let Err(e) = self.add_days_inner(b_sub_id, self.bonus_days).await {
+            if let Err(e) = self.add_days_inner(b_sub_id, bonus_days).await {
                 error!(
                     "Failed to add referral bonus days to invited {}: {:?}",
                     b_sub_id, e
@@ -683,8 +697,8 @@ where
             }
 
             info!(
-                "Referral bonus awarded: referrer {} and invited {} got {} days",
-                referrer_id, b_sub_id, self.bonus_days
+                "Referral bonus awarded: referrer {} and invited {} got {} days (paid {} days)",
+                referrer_id, b_sub_id, bonus_days, paid_days
             );
         }
 

@@ -4,7 +4,11 @@ listen = "127.0.0.1"
 port = 3000
 token = "supetsecrettoken"
 key_sign_token = [69,106,53,108,101,105,57]
-bonus_days = 7
+[service.referral_bonus]
+"30" = 7
+"90" = 14
+"365" = 30
+
 trial_days = 1
 system_refer_codes = ["WEB", "TG", "MOBILE"]
 wireguard_network = "10.1.0.0/16"

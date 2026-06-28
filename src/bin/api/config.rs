@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use fcore::{Env, IpAddrMask, Result, Settings, Tag};
@@ -23,6 +24,11 @@ impl Settings for ServiceSettings {
         if key_path.is_empty() {
             return Err(fcore::Error::Custom(
                 "service.agw_private_key_path is required".to_string(),
+            ));
+        }
+        if self.service.referral_bonus.is_empty() {
+            return Err(fcore::Error::Custom(
+                "service.referral_bonus is required".to_string(),
             ));
         }
         Ok(())
@@ -52,7 +58,8 @@ pub struct ServiceConfig {
     pub port: u16,
     pub token: String,
     pub key_sign_token: Vec<u8>,
-    pub bonus_days: i64,
+    #[serde(default)]
+    pub referral_bonus: HashMap<String, i64>,
     pub system_refer_codes: Vec<String>,
     #[serde(default = "default_cors_origins")]
     pub cors_origins: Vec<String>,

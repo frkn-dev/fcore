@@ -60,7 +60,7 @@ where
             mem.clone(),
             db.clone(),
             publisher,
-            settings.service.bonus_days,
+            settings.service.referral_bonus.clone(),
             settings.service.system_refer_codes.clone(),
         );
         let metric_storage = match MetricStorage::load_snapshot(
