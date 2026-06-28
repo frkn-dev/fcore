@@ -158,6 +158,9 @@ ADD VALUE 'amnezia_wg';
 ALTER TYPE proto
 ADD VALUE 'vless_xhttp_cdn';
 
+ALTER TABLE subscriptions
+ADD COLUMN IF NOT EXISTS referral_bonus_awarded BOOLEAN NOT NULL DEFAULT false;
+
 -- Per-connection daily/monthly traffic.
 CREATE TABLE IF NOT EXISTS connection_traffic (
     connection_id UUID NOT NULL,

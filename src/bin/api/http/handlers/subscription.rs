@@ -166,7 +166,6 @@ async fn build_subscription_traffic(
 pub async fn post_subscription_handler<N, C, S>(
     req: SubReq,
     memory: MemSync<N, C, S>,
-    bonus: i64,
     system_refer_codes: Vec<String>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -183,42 +182,24 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
     let sub_id = uuid::Uuid::new_v4();
-    let mut bonus_days = 0;
 
     let ref_code = req
         .refer_code
         .unwrap_or_else(|| get_uuid_last_octet_simple(&sub_id));
 
-    let sub_id_to_update = if let Some(ref_by) = req.referred_by.clone() {
+    // Проверяем, что реферальный код существует (если указан и это не системный код).
+    if let Some(ref_by) = req.referred_by.clone() {
         let mem = memory.memory.read().await;
-
-        let is_system_code = system_refer_codes.iter().any(|c| c == &ref_by);
-        let is_user_referral = !is_system_code;
-
-        if let Some(sub) = mem.subscriptions.find_by_refer_code(&ref_by) {
-            if is_user_referral {
-                bonus_days = bonus;
-            }
-            Some(sub.id())
-        } else {
+        if !system_refer_codes.iter().any(|c| c == &ref_by)
+            && mem.subscriptions.find_by_refer_code(&ref_by).is_none()
+        {
             return Ok(http::bad_request("Refer code no found"));
-        }
-    } else {
-        None
-    };
-
-    if let Some(id) = sub_id_to_update {
-        if let Err(e) = SyncOp::add_days(&memory, &id, bonus).await {
-            return Ok(http::internal_error(&format!(
-                "Couldn't create subscription: {}",
-                e
-            )));
         }
     }
 
     let expires_at: Option<DateTime<Utc>> = req
         .days
-        .map(|days| Utc::now() + chrono::Duration::days(days + bonus_days));
+        .map(|days| Utc::now() + chrono::Duration::days(days));
 
     let sub = Subscription::new(
         sub_id,

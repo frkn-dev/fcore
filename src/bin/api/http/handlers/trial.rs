@@ -22,7 +22,6 @@ pub async fn post_trial_handler<N, C, S>(
     envs: Vec<Env>,
     protos: Vec<Tag>,
     trial_days: i64,
-    bonus: i64,
     limit_bytes: i64,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -52,34 +51,16 @@ where
         }
     }
 
-    let mut bonus_days = 0;
     let ref_by = req.referred_by.clone().unwrap_or_else(|| "WEB".to_string());
     let sub_id = uuid::Uuid::new_v4();
 
-    let sub_id_to_update = if let Some(ref_by_code) = req.referred_by.clone() {
+    // Проверяем, что реферальный код существует (если указан и это не системный код).
+    if let Some(ref_by_code) = req.referred_by.clone() {
         let mem = memory.memory.read().await;
-
-        let is_system_code = system_refer_codes.iter().any(|c| c == &ref_by_code);
-        let is_user_referral = !is_system_code;
-
-        if let Some(sub) = mem.subscriptions.find_by_refer_code(&ref_by_code) {
-            if is_user_referral {
-                bonus_days = bonus;
-            }
-            Some(sub.id())
-        } else {
+        if !system_refer_codes.iter().any(|c| c == &ref_by_code)
+            && mem.subscriptions.find_by_refer_code(&ref_by_code).is_none()
+        {
             return Ok(http::bad_request("Refer code not found"));
-        }
-    } else {
-        None
-    };
-
-    if let Some(id) = sub_id_to_update {
-        if let Err(e) = SyncOp::add_days(&memory, &id, bonus_days).await {
-            return Ok(http::internal_error(&format!(
-                "Couldn't add bonus days: {}",
-                e
-            )));
         }
     }
 

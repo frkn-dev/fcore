@@ -56,7 +56,13 @@ where
 
         let mem = Arc::new(RwLock::new(Cache::new()));
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;
-        let mem_sync = MemSync::new(mem.clone(), db.clone(), publisher);
+        let mem_sync = MemSync::new(
+            mem.clone(),
+            db.clone(),
+            publisher,
+            settings.service.bonus_days,
+            settings.service.system_refer_codes.clone(),
+        );
         let metric_storage = match MetricStorage::load_snapshot(
             &settings.metrics.snapshot_path,
             settings.metrics.max_points,

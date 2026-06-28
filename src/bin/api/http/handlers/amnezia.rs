@@ -258,20 +258,21 @@ where
         if node.status != NodeStatus::Online {
             continue;
         }
-        if !node.inbounds.values().any(|i| proto_matches(i.tag, protocol)) {
-            continue;
-        }
         let code = node.country.to_uppercase();
         if let Some(cs) = conns {
             for (conn_id, conn) in cs {
                 if conn.get_deleted() {
                     continue;
                 }
-                if conn.get_env() != node.env {
-                    continue;
-                }
                 let tag = conn.get_proto().proto();
                 if !proto_matches(tag, protocol) {
+                    continue;
+                }
+                // connection можно сопоставить только с нодой, у которой есть точно такой же inbound
+                if !node.inbounds.values().any(|i| i.tag == tag) {
+                    continue;
+                }
+                if conn.get_env() != node.env {
                     continue;
                 }
                 let label = if node.label.is_empty() {
@@ -908,7 +909,8 @@ where
         if conn.get_deleted() {
             continue;
         }
-        if !proto_matches(conn.get_proto().proto(), &req.service_protocol) {
+        let conn_tag = conn.get_proto().proto();
+        if !proto_matches(conn_tag, &req.service_protocol) {
             continue;
         }
         if let Some(requested_id) = req.connection_id {
@@ -923,10 +925,8 @@ where
                     continue;
                 }
 
-                let has_inbound = node
-                    .inbounds
-                    .values()
-                    .any(|i| proto_matches(i.tag, &req.service_protocol));
+                // Нода должна иметь точно такой же inbound, как у connection
+                let has_inbound = node.inbounds.values().any(|i| i.tag == conn_tag);
                 if !has_inbound {
                     continue;
                 }

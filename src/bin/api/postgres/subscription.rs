@@ -41,8 +41,8 @@ impl PgSubscription {
             .query_one(
                 r#"
             INSERT INTO subscriptions
-            (id, expires_at, referred_by, refer_code)
-            VALUES ($1, $2, $3, $4)
+            (id, expires_at, referred_by, refer_code, referral_bonus_awarded)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *
             "#,
                 &[
@@ -50,6 +50,7 @@ impl PgSubscription {
                     &new_sub.expires_at,
                     &new_sub.referred_by,
                     &ref_code,
+                    &new_sub.referral_bonus_awarded,
                 ],
             )
             .await?;
@@ -122,5 +123,30 @@ impl PgSubscription {
             .await?;
 
         Ok(Subscription::from(updated_row))
+    }
+
+    pub async fn set_referral_bonus_awarded(
+        &self,
+        sub_id: &uuid::Uuid,
+        awarded: bool,
+    ) -> Result<Subscription> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let now = chrono::Utc::now();
+
+        let row = client
+            .query_one(
+                r#"
+                UPDATE subscriptions
+                SET referral_bonus_awarded = $1,
+                    updated_at = $2
+                WHERE id = $3
+                RETURNING *
+                "#,
+                &[&awarded, &now, sub_id],
+            )
+            .await?;
+
+        Ok(Subscription::from(row))
     }
 }

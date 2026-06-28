@@ -58,6 +58,8 @@ where
     ) -> SyncResult<()>;
     async fn update_sub(&self, sub_id: &uuid::Uuid, sub_req: SubReq) -> SyncResult<Status>;
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
+    async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
+    async fn apply_referral_bonuses(&self, b_sub_id: &uuid::Uuid) -> SyncResult<()>;
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
@@ -493,50 +495,58 @@ where
     async fn update_sub(&self, sub_id: &uuid::Uuid, req: SubReq) -> SyncResult<Status> {
         info!("Updating subscription: {}", sub_id);
 
-        let mut memory = self.memory.write().await;
+        let days_added = req.days.is_some();
 
-        let sub = match memory.subscriptions.find_by_id_mut(sub_id) {
-            Some(s) => s,
-            None => {
-                warn!("Subscription {} not found for update", sub_id);
-                return Ok(Status::NotFound(*sub_id));
-            }
-        };
-
-        if let Some(days) = req.days {
-            sub.extend(days);
-        }
-
-        if let Some(ref_by) = req.referred_by.clone() {
-            sub.set_referred_by(ref_by);
-        }
-
-        if let Some(ref_code) = req.refer_code.clone() {
-            sub.set_refer_code(ref_code);
-        }
-
-        if let Some(limit_bytes) = req.limit_bytes {
-            sub.set_limit_bytes(limit_bytes);
-        }
-
-        let expires_at = sub
-            .expires_at()
-            .ok_or_else(|| SyncError::InconsistentState {
-                resource: "Subscription".to_string(),
-                id: *sub_id,
-            })?;
-
-        if let Err(e) = self
-            .db
-            .sub()
-            .update_subscription(*sub_id, expires_at, sub.referred_by(), &sub.refer_code())
-            .await
         {
-            error!(
-                "Failed to update subscription {} in database: {}",
-                sub_id, e
-            );
-            return Err(SyncError::Database(e));
+            let mut memory = self.memory.write().await;
+
+            let sub = match memory.subscriptions.find_by_id_mut(sub_id) {
+                Some(s) => s,
+                None => {
+                    warn!("Subscription {} not found for update", sub_id);
+                    return Ok(Status::NotFound(*sub_id));
+                }
+            };
+
+            if let Some(days) = req.days {
+                sub.extend(days);
+            }
+
+            if let Some(ref_by) = req.referred_by.clone() {
+                sub.set_referred_by(ref_by);
+            }
+
+            if let Some(ref_code) = req.refer_code.clone() {
+                sub.set_refer_code(ref_code);
+            }
+
+            if let Some(limit_bytes) = req.limit_bytes {
+                sub.set_limit_bytes(limit_bytes);
+            }
+
+            let expires_at = sub
+                .expires_at()
+                .ok_or_else(|| SyncError::InconsistentState {
+                    resource: "Subscription".to_string(),
+                    id: *sub_id,
+                })?;
+
+            if let Err(e) = self
+                .db
+                .sub()
+                .update_subscription(*sub_id, expires_at, sub.referred_by(), &sub.refer_code())
+                .await
+            {
+                error!(
+                    "Failed to update subscription {} in database: {}",
+                    sub_id, e
+                );
+                return Err(SyncError::Database(e));
+            }
+        }
+
+        if days_added {
+            self.apply_referral_bonuses(sub_id).await?;
         }
 
         info!("Successfully updated subscription: {}", sub_id);
@@ -544,6 +554,12 @@ where
     }
 
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {
+        let status = self.add_days_inner(sub_id, days).await?;
+        self.apply_referral_bonuses(sub_id).await?;
+        Ok(status)
+    }
+
+    async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {
         let sub_db = self.db.sub();
 
         let was_inactive = {
@@ -599,5 +615,79 @@ where
             }
             Err(e) => Err(SyncError::Database(e)),
         }
+    }
+
+    async fn apply_referral_bonuses(&self, b_sub_id: &uuid::Uuid) -> SyncResult<()> {
+        if self.bonus_days <= 0 {
+            return Ok(());
+        }
+
+        let referrer_id = {
+            let mem = self.memory.read().await;
+            let b = match mem.subscriptions.find_by_id(b_sub_id) {
+                Some(s) => s,
+                None => return Ok(()),
+            };
+            if b.referral_bonus_awarded() {
+                return Ok(());
+            }
+            let ref_by = match b.referred_by() {
+                Some(c) => c,
+                None => return Ok(()),
+            };
+            if self.system_refer_codes.iter().any(|c| c == ref_by) {
+                return Ok(());
+            }
+            if ref_by == b.refer_code() {
+                return Ok(());
+            }
+            mem.subscriptions
+                .find_by_refer_code(ref_by)
+                .map(|s| s.id())
+        };
+
+        if let Some(referrer_id) = referrer_id {
+            if let Err(e) = self.add_days_inner(&referrer_id, self.bonus_days).await {
+                error!(
+                    "Failed to add referral bonus days to referrer {}: {:?}",
+                    referrer_id, e
+                );
+                return Err(e);
+            }
+            if let Err(e) = self.add_days_inner(b_sub_id, self.bonus_days).await {
+                error!(
+                    "Failed to add referral bonus days to invited {}: {:?}",
+                    b_sub_id, e
+                );
+                return Err(e);
+            }
+
+            {
+                let mut mem = self.memory.write().await;
+                if let Some(sub) = mem.subscriptions.find_by_id_mut(b_sub_id) {
+                    sub.set_referral_bonus_awarded(true);
+                }
+            }
+
+            if let Err(e) = self
+                .db
+                .sub()
+                .set_referral_bonus_awarded(b_sub_id, true)
+                .await
+            {
+                error!(
+                    "Failed to mark referral bonus awarded for {}: {:?}",
+                    b_sub_id, e
+                );
+                return Err(SyncError::Database(e));
+            }
+
+            info!(
+                "Referral bonus awarded: referrer {} and invited {} got {} days",
+                referrer_id, b_sub_id, self.bonus_days
+            );
+        }
+
+        Ok(())
     }
 }

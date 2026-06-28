@@ -228,7 +228,6 @@ where
             .and(auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
-            .and(with_i64(params.bonus_days))
             .and(with_param_vec_string(params.system_refer_codes.clone()))
             .and_then(post_subscription_handler);
 
@@ -337,7 +336,6 @@ where
             .and(with_param_envs(params.enabled_envs.clone()))
             .and(with_param_tags(params.enabled_tags.clone()))
             .and(with_i64(params.trial_limit_days))
-            .and(with_i64(params.bonus_days))
             .and(with_i64(params.trial_limit_bytes))
             .and_then(post_trial_handler);
 

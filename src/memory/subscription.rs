@@ -18,6 +18,7 @@ pub struct Subscription {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub is_deleted: bool,
+    pub referral_bonus_awarded: bool,
 
     pub limit_bytes: Option<i64>,
 }
@@ -39,6 +40,7 @@ impl Subscription {
             created_at: now,
             updated_at: now,
             is_deleted: false,
+            referral_bonus_awarded: false,
 
             limit_bytes,
         }
@@ -60,6 +62,7 @@ impl Default for Subscription {
             created_at: now,
             updated_at: now,
             is_deleted: false,
+            referral_bonus_awarded: false,
             limit_bytes: None,
         }
     }
@@ -81,6 +84,9 @@ impl From<tokio_postgres::Row> for Subscription {
             created_at,
             updated_at,
             is_deleted: row.get::<_, bool>("is_deleted"),
+            referral_bonus_awarded: row
+                .try_get::<_, bool>("referral_bonus_awarded")
+                .unwrap_or(false),
             limit_bytes,
         }
     }
@@ -146,6 +152,9 @@ pub trait Operations {
 
     fn limit_bytes(&self) -> Option<i64>;
     fn set_limit_bytes(&mut self, bytes: i64);
+
+    fn referral_bonus_awarded(&self) -> bool;
+    fn set_referral_bonus_awarded(&mut self, awarded: bool);
 }
 
 impl Operations for Subscription {
@@ -229,5 +238,14 @@ impl Operations for Subscription {
 
     fn set_limit_bytes(&mut self, bytes: i64) {
         self.limit_bytes = Some(bytes)
+    }
+
+    fn referral_bonus_awarded(&self) -> bool {
+        self.referral_bonus_awarded
+    }
+
+    fn set_referral_bonus_awarded(&mut self, awarded: bool) {
+        self.referral_bonus_awarded = awarded;
+        self.updated_at = Utc::now();
     }
 }
