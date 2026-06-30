@@ -2,7 +2,7 @@ use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use fcore::{Result, Subscription};
+use fcore::{Env, Result, Subscription};
 
 use super::pg::PgClientManager;
 
@@ -37,12 +37,13 @@ impl PgSubscription {
 
         let ref_code = new_sub.refer_code.clone();
 
+        let scope_env: Option<String> = new_sub.scope_env.as_ref().map(|e| e.to_string());
         let row = client
             .query_one(
                 r#"
             INSERT INTO subscriptions
-            (id, expires_at, referred_by, refer_code, referral_bonus_awarded)
-            VALUES ($1, $2, $3, $4, $5)
+            (id, expires_at, referred_by, refer_code, referral_bonus_awarded, parent_id, scope_env, premium_token)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             "#,
                 &[
@@ -51,6 +52,9 @@ impl PgSubscription {
                     &new_sub.referred_by,
                     &ref_code,
                     &new_sub.referral_bonus_awarded,
+                    &new_sub.parent_id,
+                    &scope_env,
+                    &new_sub.premium_token,
                 ],
             )
             .await?;
@@ -64,10 +68,15 @@ impl PgSubscription {
         expires_at: chrono::DateTime<chrono::Utc>,
         referred_by: Option<&str>,
         ref_code: &String,
+        parent_id: Option<uuid::Uuid>,
+        scope_env: Option<&Env>,
+        premium_token: Option<&str>,
     ) -> Result<Subscription> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
         let now = chrono::Utc::now();
+
+        let scope_env_str: Option<String> = scope_env.map(|e| e.to_string());
 
         let row = client
             .query_one(
@@ -76,11 +85,23 @@ impl PgSubscription {
             SET expires_at  = $1,
                 referred_by = $2,
                 updated_at  = $3,
-                refer_code = $4
-            WHERE id = $5
+                refer_code = $4,
+                parent_id = $5,
+                scope_env = $6,
+                premium_token = $7
+            WHERE id = $8
             RETURNING *
             "#,
-                &[&expires_at, &referred_by, &now, &ref_code, &id],
+                &[
+                    &expires_at,
+                    &referred_by,
+                    &now,
+                    ref_code,
+                    &parent_id,
+                    &scope_env_str,
+                    &premium_token,
+                    &id,
+                ],
             )
             .await?;
 
@@ -144,6 +165,34 @@ impl PgSubscription {
                 RETURNING *
                 "#,
                 &[&awarded, &now, sub_id],
+            )
+            .await?;
+
+        Ok(Subscription::from(row))
+    }
+
+    pub async fn set_premium_fields(
+        &self,
+        sub_id: &uuid::Uuid,
+        scope_env: Option<&Env>,
+        premium_token: Option<&str>,
+    ) -> Result<Subscription> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let now = chrono::Utc::now();
+        let scope_env_str: Option<String> = scope_env.map(|e| e.to_string());
+
+        let row = client
+            .query_one(
+                r#"
+                UPDATE subscriptions
+                SET scope_env = $1,
+                    premium_token = $2,
+                    updated_at = $3
+                WHERE id = $4
+                RETURNING *
+                "#,
+                &[&scope_env_str, &premium_token, &now, sub_id],
             )
             .await?;
 

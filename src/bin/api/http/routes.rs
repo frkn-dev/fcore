@@ -4,7 +4,7 @@ use uuid::Uuid;
 use warp::Filter;
 
 use fcore::{
-    http::filters::{auth, with_i64, with_param_bool, with_param_string},
+    http::filters::{with_i64, with_param_bool, with_param_string},
     Connection, ConnectionApiOperations, ConnectionBaseOperations, NodeStorageOperations, Result,
     Subscription, SubscriptionOperations,
 };
@@ -15,7 +15,7 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*,
-        node::*, subscription::*, trial::*,
+        node::*, premium::*, subscription::*, trial::*,
     },
     param::*,
     rejection,
@@ -55,7 +55,11 @@ where
     Vec<(Uuid, fcore::Connection)>: FromIterator<(Uuid, C)>,
 {
     async fn run_http(&self) -> Result<()> {
-        let auth = auth(Arc::new(self.settings.service.token.clone()));
+        let admin_token = self.settings.service.admin_token.clone().unwrap_or_default();
+        let mgmt_auth = with_service_or_admin_auth(
+            Arc::new(self.settings.service.token.clone()),
+            admin_token,
+        );
 
         let params = &self.settings.service;
         let cors_origins = params.cors_origins.clone();
@@ -98,14 +102,14 @@ where
 
         let delete_node_route = warp::path!("node" / Uuid)
             .and(warp::delete())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(with_sync(self.sync.clone()))
             .and_then(delete_node_handler);
 
         let post_node_register_route = warp::post()
             .and(warp::path("node"))
             .and(warp::path::end())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::body::json::<NodeRequest>())
             .and(with_sync(self.sync.clone()))
             .and_then(post_node_handler);
@@ -211,21 +215,122 @@ where
             .and(warp::path::end())
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(admin_enabled))
-            .and(with_param_string(admin_token))
+            .and(with_param_string(admin_token.clone()))
             .and(warp::header::optional::<String>("authorization"))
             .and_then(admin_api_connections_handler);
+
+        let admin_api_assign_premium_route = warp::post()
+            .and(warp::path!("admin" / "api" / "subscriptions" / Uuid / "premium"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_assign_premium_handler);
 
         let admin_routes = admin_page_route
             .or(admin_api_state_route)
             .or(admin_api_nodes_route)
             .or(admin_api_subscriptions_route)
             .or(admin_api_subscription_connections_route)
-            .or(admin_api_connections_route);
+            .or(admin_api_connections_route)
+            .or(admin_api_assign_premium_route);
+
+        // Premium routes
+        let premium_state_route = warp::get()
+            .and(warp::path("premium"))
+            .and(warp::path("state"))
+            .and(warp::path::end())
+            .and(with_premium_auth(self.sync.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(premium_state_handler);
+
+        let premium_child_list_route = warp::get()
+            .and(warp::path("premium"))
+            .and(warp::path("child"))
+            .and(warp::path::end())
+            .and(with_premium_auth(self.sync.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and_then(premium_child_list_handler);
+
+        let premium_create_child_route = warp::post()
+            .and(warp::path("premium"))
+            .and(warp::path("child"))
+            .and(warp::path::end())
+            .and(with_premium_auth(self.sync.clone()))
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and_then(premium_create_child_handler);
+
+        let premium_update_child_route = warp::put()
+            .and(warp::path("premium"))
+            .and(warp::path("child"))
+            .and(with_premium_auth(self.sync.clone()))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and_then(premium_update_child_handler);
+
+        let premium_child_connections_route = warp::get()
+            .and(warp::path("premium"))
+            .and(warp::path("child"))
+            .and(with_premium_auth(self.sync.clone()))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path("connections"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(premium_child_connections_handler);
+
+        let premium_create_connection_route = warp::post()
+            .and(warp::path("premium"))
+            .and(warp::path("child"))
+            .and(with_premium_auth(self.sync.clone()))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path("connections"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(params.amnezia_wireguard_network.clone()))
+            .and_then(premium_create_connection_handler);
+
+        let premium_delete_connection_route = warp::delete()
+            .and(warp::path("premium"))
+            .and(warp::path("connections"))
+            .and(with_premium_auth(self.sync.clone()))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and_then(premium_delete_connection_handler);
+
+        let premium_child_traffic_route = warp::get()
+            .and(warp::path("premium"))
+            .and(warp::path("child"))
+            .and(with_premium_auth(self.sync.clone()))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path("traffic"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(premium_child_traffic_handler);
+
+        let premium_routes = premium_state_route
+            .or(premium_child_list_route)
+            .or(premium_create_child_route)
+            .or(premium_update_child_route)
+            .or(premium_child_connections_route)
+            .or(premium_create_connection_route)
+            .or(premium_delete_connection_route)
+            .or(premium_child_traffic_route);
 
         let post_subscription_route = warp::post()
             .and(warp::path("subscription"))
             .and(warp::path::end())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_param_vec_string(params.system_refer_codes.clone()))
@@ -234,7 +339,7 @@ where
         let put_subscription_route = warp::put()
             .and(warp::path("subscription"))
             .and(warp::path::end())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::query::<SubIdQueryParam>())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
@@ -243,7 +348,7 @@ where
         // Connections Routes
         let get_a_connection_route = warp::path!("connection")
             .and(warp::get())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::query::<ConnQueryParam>())
             .and(with_sync(self.sync.clone()))
             .and_then(get_connection_handler);
@@ -269,7 +374,7 @@ where
         let post_connections_sync_route = warp::path("connections")
             .and(warp::path("sync"))
             .and(warp::post())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and_then(get_connections_handler);
@@ -277,7 +382,7 @@ where
         let post_connection_route = warp::post()
             .and(warp::path("connection"))
             .and(warp::path::end())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
@@ -289,7 +394,7 @@ where
         let delete_connection_route = warp::delete()
             .and(warp::path("connection"))
             .and(warp::path::end())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::query::<ConnQueryParam>())
             .and(with_sync(self.sync.clone()))
             .and_then(delete_connection_handler);
@@ -307,7 +412,7 @@ where
         let post_key_route = warp::post()
             .and(warp::path("key"))
             .and(warp::path::end())
-            .and(auth.clone())
+            .and(mgmt_auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_param_vec(params.key_sign_token.clone()))
@@ -436,6 +541,8 @@ where
             .or(post_amnezia_config_route)
             // Admin
             .or(admin_routes)
+            // Premium
+            .or(premium_routes)
             // Metrics
             .or(ws_route)
             .recover(rejection)

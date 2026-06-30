@@ -22,7 +22,7 @@
   .card .value { font-size: 1.8rem; font-weight: 600; }
   .card .sub { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
   section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; overflow-x: auto; }
-  section h2 { margin: 0 0 1rem; font-size: 1.1rem; }
+  section h2 { margin: 0 0 1rem; font-size: 1.1rem; display: flex; align-items: center; gap: 0.75rem; }
   table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
   th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
   th { background: #fafafa; font-weight: 600; }
@@ -41,6 +41,17 @@
   .details h4 { margin: 0 0 0.5rem; font-size: 0.95rem; }
   .small { font-size: 0.8rem; color: var(--muted); }
   .nowrap { white-space: nowrap; }
+  .btn { padding: 0.35rem 0.75rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  .btn-primary { background: #1a1a2e; color: #fff; }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-danger { background: #991b1b; color: #fff; }
+  .btn-danger:hover { background: #7f1d1d; }
+  .btn-sm { padding: 0.2rem 0.5rem; font-size: 0.75rem; }
+  .form-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; align-items: end; }
+  .form-row input, .form-row select { padding: 0.4rem; border: 1px solid var(--border); border-radius: 4px; font-size: 0.85rem; }
+  .form-row label { display: flex; flex-direction: column; font-size: 0.8rem; color: var(--muted); gap: 0.15rem; }
+  .form-inline { background: #f9fafb; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; margin-top: 0.75rem; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
@@ -57,12 +68,43 @@
   <div class="grid" id="dashboard"></div>
 
   <section>
-    <h2>Nodes</h2>
+    <h2>Nodes
+      <button class="btn btn-primary" onclick="toggleNodeForm()">+ Add node</button>
+    </h2>
+    <div id="node-form" class="form-inline hidden">
+      <div class="form-row">
+        <label>Env <input id="node-env" placeholder="production"></label>
+        <label>Hostname <input id="node-hostname" placeholder="node1.example.com"></label>
+        <label>Address <input id="node-address" placeholder="10.0.0.1"></label>
+        <label>Label <input id="node-label" placeholder="FRA-01"></label>
+        <label>Country <input id="node-country" placeholder="DE"></label>
+        <label>Cluster <input id="node-cluster" placeholder="eu-west"></label>
+        <label>Cores <input id="node-cores" type="number" value="4"></label>
+        <label>Max bps <input id="node-bps" type="number" value="1000000000"></label>
+      </div>
+      <div class="form-row">
+        <label style="flex:1">Inbounds (JSON)
+          <input id="node-inbounds" style="width:100%; min-width:400px" placeholder='{ "VlessTcpReality": {} }'>
+        </label>
+        <button class="btn btn-primary" onclick="createNode()">Create</button>
+      </div>
+    </div>
     <div id="nodes"></div>
   </section>
 
   <section>
-    <h2>Subscriptions</h2>
+    <h2>Subscriptions
+      <button class="btn btn-primary" onclick="toggleSubForm()">+ Create subscription</button>
+    </h2>
+    <div id="sub-form" class="form-inline hidden">
+      <div class="form-row">
+        <label>Days <input id="sub-days" type="number" value="30"></label>
+        <label>Limit bytes <input id="sub-limit" type="number" placeholder="optional"></label>
+        <label>Refer code <input id="sub-refcode" placeholder="auto"></label>
+        <label>Referred by <input id="sub-referred" placeholder="optional"></label>
+        <button class="btn btn-primary" onclick="createSubscription()">Create</button>
+      </div>
+    </div>
     <div id="subscriptions"></div>
   </section>
 </main>
@@ -78,8 +120,14 @@
   }
   $('token').value = token;
 
-  async function api(path) {
-    const r = await fetch(path, { headers: { 'Authorization': 'Bearer ' + token } });
+  async function api(path, opts = {}) {
+    const r = await fetch(path, {
+      ...opts,
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        ...(opts.headers || {})
+      }
+    });
     if (r.status === 401) {
       setStatus('Unauthorized — check token', true);
       throw new Error('unauthorized');
@@ -88,7 +136,20 @@
       const text = await r.text();
       throw new Error(text || r.statusText);
     }
-    return r.json();
+    const ct = r.headers.get('content-type') || '';
+    return ct.includes('application/json') ? r.json() : r.text();
+  }
+
+  async function apiPost(path, body) {
+    return api(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  }
+
+  async function apiDelete(path) {
+    return api(path, { method: 'DELETE' });
   }
 
   function setStatus(msg, isError) {
@@ -113,7 +174,7 @@
     if (bps === 0 || bps == null) return '0 bps';
     const units = ['bps', 'Kbps', 'Mbps', 'Gbps'];
     let i = 0;
-    let n = Number(bps) * 8; // bytes/s -> bits/s
+    let n = Number(bps) * 8;
     while (n >= 1000 && i < units.length - 1) {
       n /= 1000;
       i++;
@@ -124,6 +185,106 @@
   function formatPercent(p) {
     if (p == null) return '-';
     return p.toFixed(1) + '%';
+  }
+
+  function toggleSubForm() {
+    $('sub-form').classList.toggle('hidden');
+  }
+
+  function toggleNodeForm() {
+    $('node-form').classList.toggle('hidden');
+  }
+
+  async function createSubscription() {
+    const days = parseInt($('sub-days').value, 10);
+    const limit = $('sub-limit').value.trim();
+    const referCode = $('sub-refcode').value.trim();
+    const referredBy = $('sub-referred').value.trim() || null;
+    const body = {
+      days: isNaN(days) ? null : days,
+      limit_bytes: limit ? parseInt(limit, 10) : null,
+      refer_code: referCode || null,
+      referred_by: referredBy
+    };
+    try {
+      await apiPost('/subscription', body);
+      setStatus('Subscription created');
+      toggleSubForm();
+      await loadSubscriptions();
+    } catch (e) {
+      setStatus('Create subscription failed: ' + e.message, true);
+    }
+  }
+
+  async function createConnection(subId) {
+    const env = $(`conn-env-${subId}`).value.trim();
+    const proto = $(`conn-proto-${subId}`).value;
+    const days = parseInt($(`conn-days-${subId}`).value, 10);
+    if (!env) { setStatus('Env is required', true); return; }
+    try {
+      await apiPost('/connection', {
+        env,
+        subscription_id: subId,
+        proto,
+        days: isNaN(days) ? null : days
+      });
+      setStatus('Connection created');
+      // refresh connections for this subscription
+      const connsDiv = $(`sub-conns-${subId}`);
+      connsDiv.dataset.loaded = 'false';
+      await toggleSubscription(subId);
+    } catch (e) {
+      setStatus('Create connection failed: ' + e.message, true);
+    }
+  }
+
+  async function createNode() {
+    const env = $('node-env').value.trim();
+    const hostname = $('node-hostname').value.trim();
+    const address = $('node-address').value.trim();
+    if (!env || !hostname || !address) {
+      setStatus('Env, hostname and address are required', true);
+      return;
+    }
+    let inbounds = {};
+    const rawInbounds = $('node-inbounds').value.trim();
+    if (rawInbounds) {
+      try { inbounds = JSON.parse(rawInbounds); }
+      catch (e) { setStatus('Invalid inbounds JSON', true); return; }
+    }
+    const body = {
+      env,
+      hostname,
+      address,
+      inbounds,
+      uuid: crypto.randomUUID(),
+      label: $('node-label').value.trim() || hostname,
+      interface: 'eth0',
+      cores: parseInt($('node-cores').value, 10) || 4,
+      max_bandwidth_bps: parseInt($('node-bps').value, 10) || 1000000000,
+      country: $('node-country').value.trim() || 'XX',
+      type: 'Node',
+      cluster: $('node-cluster').value.trim() || null
+    };
+    try {
+      await apiPost('/node', body);
+      setStatus('Node created');
+      toggleNodeForm();
+      await loadNodes();
+    } catch (e) {
+      setStatus('Create node failed: ' + e.message, true);
+    }
+  }
+
+  async function deleteNode(id) {
+    if (!confirm('Delete node ' + id + '?')) return;
+    try {
+      await apiDelete('/node/' + id);
+      setStatus('Node deleted');
+      await loadNodes();
+    } catch (e) {
+      setStatus('Delete node failed: ' + e.message, true);
+    }
   }
 
   function renderState(s) {
@@ -156,10 +317,11 @@
         <td class="nowrap">${traffic}</td>
         <td>${n.country}</td>
         <td>${n.cluster || '-'}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deleteNode('${n.id}')">Delete</button></td>
       </tr>`;
     }).join('');
     $('nodes').innerHTML = rows
-      ? `<table><tr><th>ID</th><th>Env</th><th>Hostname</th><th>Address</th><th>Status</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Traffic</th><th>Country</th><th>Cluster</th></tr>${rows}</table>`
+      ? `<table><tr><th>ID</th><th>Env</th><th>Hostname</th><th>Address</th><th>Status</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Traffic</th><th>Country</th><th>Cluster</th><th></th></tr>${rows}</table>`
       : '<p>No nodes</p>';
   }
 
@@ -182,6 +344,28 @@
         <td colspan="6" id="sub-details-${s.id}" class="details" style="display:none">
           <h4>Connections</h4>
           <div id="sub-conns-${s.id}">Loading…</div>
+          <div class="form-inline">
+            <h4>Create connection</h4>
+            <div class="form-row">
+              <label>Env <input id="conn-env-${s.id}" placeholder="production"></label>
+              <label>Proto
+                <select id="conn-proto-${s.id}">
+                  <option>Wireguard</option>
+                  <option>AmneziaWg</option>
+                  <option>VlessTcpReality</option>
+                  <option>VlessGrpcReality</option>
+                  <option>VlessXhttpReality</option>
+                  <option>VlessXhttpCdn</option>
+                  <option>Vmess</option>
+                  <option>Shadowsocks</option>
+                  <option>Hysteria2</option>
+                  <option>Mtproto</option>
+                </select>
+              </label>
+              <label>Days <input id="conn-days-${s.id}" type="number" value="30"></label>
+              <button class="btn btn-primary" onclick="event.stopPropagation(); createConnection('${s.id}')">Create</button>
+            </div>
+          </div>
         </td>
       </tr>
     `).join('');
@@ -223,6 +407,16 @@
     }
   }
 
+  async function loadNodes() {
+    const nodes = await api('/admin/api/nodes');
+    renderNodes(nodes);
+  }
+
+  async function loadSubscriptions() {
+    const subscriptions = await api('/admin/api/subscriptions');
+    renderSubscriptions(subscriptions);
+  }
+
   async function loadAll() {
     token = $('token').value.trim();
     localStorage.setItem('fc_admin_token', token);
@@ -230,12 +424,10 @@
     try {
       const [state, nodes, subscriptions] = await Promise.all([
         api('/admin/api/state'),
-        api('/admin/api/nodes'),
-        api('/admin/api/subscriptions')
+        loadNodes(),
+        loadSubscriptions()
       ]);
       renderState(state);
-      renderNodes(nodes);
-      renderSubscriptions(subscriptions);
       setStatus('ok — ' + new Date().toLocaleTimeString());
     } catch (e) {
       if (e.message !== 'unauthorized') setStatus('error: ' + e.message, true);

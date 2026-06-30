@@ -42,7 +42,7 @@ fn default_traffic_period() -> String {
 
 use crate::traffic::{self, SubscriptionTraffic, TrafficValue};
 
-async fn build_subscription_traffic(
+pub(crate) async fn build_subscription_traffic(
     db: &crate::postgres::pg::PgContext,
     metrics: &MetricStorage,
     sub_id: uuid::Uuid,

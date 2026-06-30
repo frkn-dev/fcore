@@ -1,5 +1,6 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use fcore::{Env, MetricStorage};
+use serde::Serialize;
 use std::collections::HashMap;
 
 /// Start of the UTC calendar day containing `t`.
@@ -64,7 +65,7 @@ pub fn prev_monthly_anchor(created_at: DateTime<Utc>, anchor: DateTime<Utc>) -> 
     build_anchor(prev_year, prev_month, day, time)
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Serialize)]
 pub struct TrafficValue {
     pub uplink: u64,
     pub downlink: u64,
@@ -77,14 +78,14 @@ impl std::ops::AddAssign<TrafficValue> for TrafficValue {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct EnvTraffic {
     pub total: TrafficValue,
     pub daily: TrafficValue,
     pub monthly: TrafficValue,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct SubscriptionTraffic {
     pub total: TrafficValue,
     pub daily: TrafficValue,

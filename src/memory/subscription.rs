@@ -3,6 +3,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use crate::memory::env::Env;
 use crate::utils::get_uuid_last_octet_simple;
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,9 @@ pub struct Subscription {
     pub updated_at: DateTime<Utc>,
     pub is_deleted: bool,
     pub referral_bonus_awarded: bool,
+    pub parent_id: Option<uuid::Uuid>,
+    pub scope_env: Option<Env>,
+    pub premium_token: Option<String>,
 
     pub limit_bytes: Option<i64>,
 }
@@ -41,6 +45,9 @@ impl Subscription {
             updated_at: now,
             is_deleted: false,
             referral_bonus_awarded: false,
+            parent_id: None,
+            scope_env: None,
+            premium_token: None,
 
             limit_bytes,
         }
@@ -63,6 +70,9 @@ impl Default for Subscription {
             updated_at: now,
             is_deleted: false,
             referral_bonus_awarded: false,
+            parent_id: None,
+            scope_env: None,
+            premium_token: None,
             limit_bytes: None,
         }
     }
@@ -87,6 +97,12 @@ impl From<tokio_postgres::Row> for Subscription {
             referral_bonus_awarded: row
                 .try_get::<_, bool>("referral_bonus_awarded")
                 .unwrap_or(false),
+            parent_id: row.get("parent_id"),
+            scope_env: row
+                .try_get::<_, String>("scope_env")
+                .ok()
+                .and_then(|s| if s.is_empty() { None } else { Some(Env::from(s.as_str())) }),
+            premium_token: row.get("premium_token"),
             limit_bytes,
         }
     }
@@ -155,6 +171,15 @@ pub trait Operations {
 
     fn referral_bonus_awarded(&self) -> bool;
     fn set_referral_bonus_awarded(&mut self, awarded: bool);
+
+    fn parent_id(&self) -> Option<uuid::Uuid>;
+    fn set_parent_id(&mut self, parent_id: uuid::Uuid);
+
+    fn scope_env(&self) -> Option<&Env>;
+    fn set_scope_env(&mut self, env: Env);
+
+    fn premium_token(&self) -> Option<&str>;
+    fn set_premium_token(&mut self, token: String);
 }
 
 impl Operations for Subscription {
@@ -246,6 +271,33 @@ impl Operations for Subscription {
 
     fn set_referral_bonus_awarded(&mut self, awarded: bool) {
         self.referral_bonus_awarded = awarded;
+        self.updated_at = Utc::now();
+    }
+
+    fn parent_id(&self) -> Option<uuid::Uuid> {
+        self.parent_id
+    }
+
+    fn set_parent_id(&mut self, parent_id: uuid::Uuid) {
+        self.parent_id = Some(parent_id);
+        self.updated_at = Utc::now();
+    }
+
+    fn scope_env(&self) -> Option<&Env> {
+        self.scope_env.as_ref()
+    }
+
+    fn set_scope_env(&mut self, env: Env) {
+        self.scope_env = Some(env);
+        self.updated_at = Utc::now();
+    }
+
+    fn premium_token(&self) -> Option<&str> {
+        self.premium_token.as_deref()
+    }
+
+    fn set_premium_token(&mut self, token: String) {
+        self.premium_token = Some(token);
         self.updated_at = Utc::now();
     }
 }

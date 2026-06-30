@@ -536,7 +536,15 @@ where
             if let Err(e) = self
                 .db
                 .sub()
-                .update_subscription(*sub_id, expires_at, sub.referred_by(), &sub.refer_code())
+                .update_subscription(
+                    *sub_id,
+                    expires_at,
+                    sub.referred_by(),
+                    &sub.refer_code(),
+                    sub.parent_id(),
+                    sub.scope_env(),
+                    sub.premium_token(),
+                )
                 .await
             {
                 error!(

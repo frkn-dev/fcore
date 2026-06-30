@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::error;
 use warp::http::StatusCode;
 
 use fcore::{
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricStorage, Node,
-    NodeStatus, NodeStorageOperations, SubscriptionOperations,
+    NodeStatus, NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use crate::sync::MemSync;
@@ -103,7 +104,7 @@ pub struct AdminSubscription {
     pub traffic: AdminSubscriptionTraffic,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct AdminSubscriptionTraffic {
     pub uplink: u64,
     pub downlink: u64,
@@ -459,4 +460,76 @@ where
     Ok(Box::new(warp::reply::json(&AdminConnectionList {
         connections: list,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminAssignPremiumRequest {
+    pub env: Env,
+}
+
+pub async fn admin_api_assign_premium_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    req: AdminAssignPremiumRequest,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+{
+    if !admin_enabled {
+        return Ok(Box::new(warp::reply::with_status(
+            "Admin disabled",
+            StatusCode::FORBIDDEN,
+        )));
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(Box::new(warp::reply::with_status(
+            "Unauthorized",
+            StatusCode::UNAUTHORIZED,
+        )));
+    }
+
+    let premium_token = format!("prem_{}", uuid::Uuid::new_v4().simple());
+
+    let env = req.env.clone();
+    {
+        let mut mem = memory.memory.write().await;
+        let sub = match mem.subscriptions.find_by_id_mut(&subscription_id) {
+            Some(s) => s,
+            None => return Ok(Box::new(warp::reply::with_status(
+                "Subscription not found",
+                StatusCode::NOT_FOUND,
+            ))),
+        };
+        sub.set_scope_env(env.clone());
+        sub.set_premium_token(premium_token.clone());
+    }
+
+    if let Err(e) = memory
+        .db
+        .sub()
+        .set_premium_fields(&subscription_id, Some(&env), Some(&premium_token))
+        .await
+    {
+        error!("Failed to set premium fields: {}", e);
+        return Ok(Box::new(warp::reply::with_status(
+            "Database error",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )));
+    }
+
+    Ok(Box::new(warp::reply::json(&serde_json::json!({
+        "premium_token": premium_token
+    }))))
 }

@@ -9,6 +9,8 @@ where
     fn find_by_id(&self, id: &uuid::Uuid) -> Option<&S>;
     fn find_by_id_mut(&mut self, id: &uuid::Uuid) -> Option<&mut S>;
     fn find_by_refer_code(&self, code: &str) -> Option<&S>;
+    fn find_by_premium_token(&self, token: &str) -> Option<&S>;
+    fn find_by_parent_id(&self, parent_id: &uuid::Uuid) -> Vec<S>;
     fn all(&self) -> Vec<S>;
     fn add(&mut self, new_subscription: S) -> OperationStatus;
     fn delete(&mut self, id: &uuid::Uuid);
@@ -36,6 +38,18 @@ where
 
     fn find_by_refer_code(&self, code: &str) -> Option<&S> {
         self.values().find(|s| s.refer_code() == code)
+    }
+
+    fn find_by_premium_token(&self, token: &str) -> Option<&S> {
+        self.values()
+            .find(|s| s.premium_token().map(|t| t == token).unwrap_or(false))
+    }
+
+    fn find_by_parent_id(&self, parent_id: &uuid::Uuid) -> Vec<S> {
+        self.values()
+            .filter(|s| s.parent_id() == Some(*parent_id))
+            .cloned()
+            .collect()
     }
 
     fn exist_refer_code(&self, code: &str) -> bool {

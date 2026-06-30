@@ -5,6 +5,7 @@ pub mod connection;
 pub mod key;
 pub mod metrics;
 pub mod node;
+pub mod premium;
 pub mod subscription;
 pub mod trial;
 

@@ -2,158 +2,361 @@
 
 ## Overview
 
-The application communicates via ZeroMQ Pub/Sub pattern, exchanging binary messages serialized with rkyv on specific topics. Components subscribe to topics to receive messages about users and connections, and publish messages to control state changes.
+Components communicate via **ZeroMQ Pub/Sub**, exchanging binary messages serialized with **rkyv** on specific topics. Subscribers filter by topic and deserialize binary payloads to `Vec<Message>`.
 
-This approach replaces plain JSON messaging with efficient zero-copy serialization, reducing message size and CPU overhead.
-Supported Actions & Message Structures
+This replaces plain JSON messaging with efficient zero-copy serialization, reducing message size and CPU overhead on the wire.
 
-Check src/bin/utils.rs for debugging binary message sending
+> **Note:** The actual wire format is rkyv binary, not JSON. JSON examples below are illustrative only.
 
-Messages are sent as binary blobs representing the following Rust struct:
+## Transport
 
-    #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
-    pub struct Message {
-        pub conn_id: UuidWrapper,
-        pub action: Action,
-        pub tag: ProtoTag,
-        pub wg: Option<Param>,
-        pub password: Option<String>,
-    }
+Each ZMQ message is a multipart message:
 
-        #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-    pub enum Action {
-        Create,
-        Update,
-        Delete,
-        ResetStat,
-    }
+```
+[topic][rkyv_bytes]
+```
 
-    #[derive(
-         Archive,
-         Clone,
-         Debug,
-         RkyvDeserialize,
-         RkyvSerialize,
-         Deserialize,
-         Serialize,
-         PartialEq,
-         Eq,
-         Hash,
-         Copy,
-         ToSql,
-         FromSql,
-     )]
-     #[archive_attr(derive(Clone, Debug))]
-     #[archive(check_bytes)]
-     #[postgres(name = "proto", rename_all = "snake_case")]
-     pub enum ProtoTag {
-         #[serde(rename = "VlessXtls")]
-         VlessXtls,
-         #[serde(rename = "VlessGrpc")]
-         VlessGrpc,
-         #[serde(rename = "Vmess")]
-         Vmess,
-         #[serde(rename = "Shadowsocks")]
-         Shadowsocks,
-         #[serde(rename = "Wireguard")]
-         Wireguard,
-     }
+- `topic` — UTF-8 string, see [Topics](#topics).
+- `rkyv_bytes` — serialized `Vec<Message>`.
 
-    #[derive(
-        Archive, Clone, Debug, Serialize, Deserialize, RkyvDeserialize, RkyvSerialize, PartialEq,
-    )]
-    pub struct Param {
-        pub keys: Keys,
-        pub address: IpAddrMaskSerializable,
-    }
+## Topics
 
+`src/zmq/topic.rs`
 
+| Variant | String | Usage |
+|---|---|---|
+| `Auth` | `auth` | Hysteria2 token distribution and deletes. Consumed by the `auth` binary. |
+| `Metrics` | `metrics` | `MetricEnvelope` batches from nodes/auth to the API. |
+| `Updates(Env)` | `updates-<env>` | Protocol state changes targeted at nodes in a specific environment (`production`, `experimental`, `dev`, `ru`, `wl`, `custom…`). |
+| `Init(uuid)` | `init-<uuid>` | Per-node initial sync requested by `POST /connections/sync`. |
 
-    Note: password field only for Shadowsocks
-    wg fileds only for wireguard
+A node subscribes to `updates-<node_env>` and `init-<node_uuid>`. The `auth` service subscribes to `auth` and `init-<auth_uuid>`.
 
-## CREATE/UPDATE/DELETE/ResetStat Connection
+## Message struct
 
-Connections represent individual tunnels (WireGuard, Shadowsocks, VLESS, etc.) and are managed similarly.
+`src/zmq/message.rs`
 
-Binary message includes:
+```rust
+pub struct Message {
+    pub conn_id: uuid::Uuid,
+    pub action: Action,
+    pub tag: ProtoTag,
+    pub wg: Option<WgParam>,
+    pub password: Option<String>,
+    pub token: Option<uuid::Uuid>,
+    pub expires_at: Option<RkyvDateTime>,
+    pub subscription_id: Option<uuid::Uuid>,
+}
+```
 
-    conn_id: Connection UUID
+- `conn_id` — connection UUID, primary key.
+- `action` — `Create`, `Update`, `Delete`, `ResetStat`.
+- `tag` — protocol type (`ProtoTag`).
+- `wg` — WireGuard/AmneziaWG parameters (`keys` + `address`). Populated only for `Wireguard`/`AmneziaWg`.
+- `password` — Shadowsocks password.
+- `token` — Hysteria2 token (UUID).
+- `expires_at` — wrapped as `RkyvDateTime` for rkyv compatibility.
+- `subscription_id` — optional owning subscription UUID.
 
-    action: Create/Update/Delete/ResetStat
+## Action enum
 
-    tag: Protocol type string ("Wireguard", "Shadowsocks", "VlessXtls", etc.)
+```rust
+pub enum Action {
+    Create,
+    Update,
+    Delete,
+    ResetStat,
+}
+```
 
-    wg: WireGuard parameters (keys, allowed IPs), if applicable
+## ProtoTag / Tag enum
 
-    password: Shadowsocks password, if applicable
+`src/memory/tag.rs`
 
-Messaging Details
+```rust
+pub enum ProtoTag {
+    VlessTcpReality,
+    VlessGrpcReality,
+    VlessXhttpReality,
+    VlessXhttpCdn,
+    Vmess,
+    Shadowsocks,
+    Wireguard,
+    AmneziaWg,
+    Hysteria2,
+    Mtproto,
+}
+```
 
-    Messages are serialized using rkyv for zero-copy performance.
+String form on the wire matches the variant name exactly (`"Wireguard"`, `"VlessTcpReality"`, etc.).
 
-    Each message is published on a ZeroMQ topic: usually the node ID, environment, or "all".
+## Payload mapping
 
-    Subscribers filter by topic and deserialize binary payloads to Message structs.
+| Protocol | `tag` | Payload field | Notes |
+|---|---|---|---|
+| WireGuard | `Wireguard` | `wg` | `keys.privkey` + `address`. Pubkey is derived from the private key. |
+| AmneziaWG | `AmneziaWg` | `wg` | Same shape as WireGuard; applied via netlink. |
+| Shadowsocks | `Shadowsocks` | `password` | Handled by the Xray handler. |
+| Hysteria2 | `Hysteria2` | `token` | External auth provider validates this token. Messages use the `auth` topic. |
+| MTProto | `Mtproto` | `secret` | Stored in the connection; no per-message ZMQ payload is currently sent. |
+| VLESS/Vmess (Xray) | `VlessTcpReality`, `VlessGrpcReality`, `VlessXhttpReality`, `VlessXhttpCdn`, `Vmess` | `tag` only | The Xray inbound tag selects the handler. No per-connection keys. |
 
-    The protocol supports efficient updates and state syncing between components.
+## JSON examples (illustrative)
 
-### Examples in JSON
+These are the logical contents of the rkyv structs.
 
-Create
+### WireGuard
 
-    {
-      "action": "create",
-      "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
-      "tag": "Wireguard",
-      "wg": {
-        "keys": {
-          "privkey": "LY8D/CyB/JT1uiFhK1yVKxBB3VMZeA0DzOAJEvgQw50=",
-          "pubkey": "a4uH3iSdV6Ifc7thKL8IHTM8PkL/yPBUztN9xuoA2Do="
-        },
-        "address": {
-          "ip": "10.10.0.24",
-          "cidr": 32
-        }
-      },
-      "password": null
-    }
+```json
+// Create
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Create",
+  "tag": "Wireguard",
+  "wg": {
+    "keys": { "privkey": "LY8D/CyB/JT1uiFhK1yVKxBB3VMZeA0DzOAJEvgQw50=" },
+    "address": { "address": "10.10.0.24", "cidr": 32 }
+  },
+  "password": null,
+  "token": null,
+  "expires_at": "2026-07-29T18:21:42Z",
+  "subscription_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
 
-    Display output — binary message printed
-    17865be5-e18b-40d6-b5af-e1c4d51ff50a | Create | Wireguard | privkey: LY8D/CyB/JT1uiFhK1yVKxBB3VMZeA0DzOAJEvgQw50= pubkey: a4uH3iSdV6Ifc7thKL8IHTM8PkL/yPBUztN9xuoA2Do= address: 10.10.0.24/32 | -
+// Update
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Update",
+  "tag": "Wireguard",
+  "wg": {
+    "keys": { "privkey": "NEW_PRIVATE_KEY_BASE64" },
+    "address": { "address": "10.10.0.25", "cidr": 32 }
+  }
+}
 
-Update
+// Delete
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Delete",
+  "tag": "Wireguard"
+}
 
-    {
-      "action": "update",
-      "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
-      "tag": "Wireguard",
-      "wg": {
-        "keys": {
-          "privkey": "NEW_PRIVATE_KEY_BASE64",
-          "pubkey": "NEW_PUBLIC_KEY_BASE64"
-        },
-        "address": {
-          "ip": "10.10.0.25",
-          "cidr": 32
-        }
-      },
-      "password": null
-    }
+// ResetStat
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "ResetStat",
+  "tag": "Wireguard"
+}
+```
 
-     Display output — binary message printed
-    17865be5-e18b-40d6-b5af-e1c4d51ff50a | Update | Wireguard | privkey: NEW_PRIVATE_KEY_BASE64 pubkey: NEW_PUBLIC_KEY_BASE64 address: 10.10.0.25/32 | -
+Expected display output for a Create:
 
-Delete
+```text
+17865be5-e18b-40d6-b5af-e1c4d51ff50a | Create | Wireguard | 10.10.0.24/32 | LY8D/CyB/JT1uiFhK1yVKxBB3VMZeA0DzOAJEvgQw50= | - | - | -
+```
 
-    {
-      "action": "delete",
-      "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
-      "tag": "Wireguard",
-      "wg": null,
-      "password": null
-    }
+### AmneziaWG
 
+```json
+// Create
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Create",
+  "tag": "AmneziaWg",
+  "wg": {
+    "keys": { "privkey": "LY8D/CyB/JT1uiFhK1yVKxBB3VMZeA0DzOAJEvgQw50=" },
+    "address": { "address": "10.20.0.24", "cidr": 32 }
+  }
+}
 
-    Display output — binary message printed
-    17865be5-e18b-40d6-b5af-e1c4d51ff50a | Delete | Wireguard | - | -
+// Update
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Update",
+  "tag": "AmneziaWg",
+  "wg": {
+    "keys": { "privkey": "NEW_PRIVATE_KEY_BASE64" },
+    "address": { "address": "10.20.0.25", "cidr": 32 }
+  }
+}
+
+// Delete
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Delete",
+  "tag": "AmneziaWg"
+}
+
+// ResetStat
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "ResetStat",
+  "tag": "AmneziaWg"
+}
+```
+
+### Shadowsocks
+
+```json
+// Create
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Create",
+  "tag": "Shadowsocks",
+  "password": "random-password-15"
+}
+
+// Update
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Update",
+  "tag": "Shadowsocks",
+  "password": "new-password"
+}
+
+// Delete
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Delete",
+  "tag": "Shadowsocks"
+}
+
+// ResetStat
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "ResetStat",
+  "tag": "Shadowsocks"
+}
+```
+
+### Hysteria2
+
+```json
+// Create
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Create",
+  "tag": "Hysteria2",
+  "token": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+}
+
+// Update
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Update",
+  "tag": "Hysteria2",
+  "token": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+}
+
+// Delete
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Delete",
+  "tag": "Hysteria2"
+}
+
+// ResetStat
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "ResetStat",
+  "tag": "Hysteria2"
+}
+```
+
+### MTProto
+
+```json
+// Create
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Create",
+  "tag": "Mtproto",
+  "secret": "random-secret-15"
+}
+
+// Update
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Update",
+  "tag": "Mtproto",
+  "secret": "new-secret"
+}
+
+// Delete
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Delete",
+  "tag": "Mtproto"
+}
+
+// ResetStat
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "ResetStat",
+  "tag": "Mtproto"
+}
+```
+
+### Xray protocols (VLESS / Vmess)
+
+```json
+// Create
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Create",
+  "tag": "VlessTcpReality"
+}
+
+// Update
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Update",
+  "tag": "VlessTcpReality"
+}
+
+// Delete
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "Delete",
+  "tag": "VlessTcpReality"
+}
+
+// ResetStat
+{
+  "conn_id": "17865be5-e18b-40d6-b5af-e1c4d51ff50a",
+  "action": "ResetStat",
+  "tag": "VlessTcpReality"
+}
+```
+
+## Wire serialization
+
+Do **not** send plain JSON to the ZeroMQ socket. Use rkyv to serialize `Vec<Message>`:
+
+```rust
+use rkyv::to_bytes;
+
+let messages: Vec<Message> = vec![msg];
+let bytes = to_bytes::<_, 1024>(&messages)?;
+publisher.send_binary(&topic, bytes.as_ref()).await?;
+```
+
+Subscribers deserialize with:
+
+```rust
+use rkyv::{check_archived_root, Archive, Deserialize, Infallible};
+
+let aligned = rkyv::AlignedVec::from(&bytes);
+let archived = check_archived_root::<Vec<Message>>(&aligned)?;
+let messages: Vec<Message> = archived.deserialize(&mut Infallible)?;
+```
+
+## Debugging binary messages
+
+For debugging, the `Message` type implements `Display`. Example output:
+
+```text
+17865be5-e18b-40d6-b5af-e1c4d51ff50a | Create | Wireguard | 10.10.0.24/32 | LY8D... | - | - | -
+```
+
+Fields in display order: `conn_id | action | tag | address | privkey | password | token | expires_at`.

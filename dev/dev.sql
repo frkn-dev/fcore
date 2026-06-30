@@ -161,6 +161,11 @@ ADD VALUE 'vless_xhttp_cdn';
 ALTER TABLE subscriptions
 ADD COLUMN IF NOT EXISTS referral_bonus_awarded BOOLEAN NOT NULL DEFAULT false;
 
+ALTER TABLE subscriptions
+ADD COLUMN IF NOT EXISTS parent_id UUID REFERENCES subscriptions(id),
+ADD COLUMN IF NOT EXISTS scope_env TEXT,
+ADD COLUMN IF NOT EXISTS premium_token TEXT UNIQUE;
+
 -- Per-connection daily/monthly traffic.
 CREATE TABLE IF NOT EXISTS connection_traffic (
     connection_id UUID NOT NULL,
