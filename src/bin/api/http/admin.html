@@ -96,6 +96,29 @@
     <h2>Subscriptions
       <button class="btn btn-primary" onclick="toggleSubForm()">+ Create subscription</button>
     </h2>
+    <div class="form-inline">
+      <div class="form-row">
+        <label>State
+          <select id="sub-filter-state" onchange="applySubscriptionFilters()">
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </label>
+        <label>Sort by
+          <select id="sub-sort" onchange="applySubscriptionFilters()">
+            <option value="traffic">Traffic total</option>
+            <option value="uplink">Uplink</option>
+            <option value="downlink">Downlink</option>
+            <option value="expires_asc">Expires soonest</option>
+            <option value="expires_desc">Expires latest</option>
+          </select>
+        </label>
+        <label>Search
+          <input id="sub-search" type="text" placeholder="uuid or ref code" oninput="applySubscriptionFilters()">
+        </label>
+      </div>
+    </div>
     <div id="sub-form" class="form-inline hidden">
       <div class="form-row">
         <label>Days <input id="sub-days" type="number" value="30"></label>
@@ -112,6 +135,7 @@
 <script>
   const $ = id => document.getElementById(id);
   let token = localStorage.getItem('fc_admin_token') || '';
+  let allSubscriptions = [];
   const urlParams = new URLSearchParams(window.location.search);
   const tokenFromUrl = urlParams.get('token');
   if (tokenFromUrl) {
@@ -325,13 +349,55 @@
       : '<p>No nodes</p>';
   }
 
-  function renderSubscriptions(data) {
-    if (!data.subscriptions || !data.subscriptions.length) {
+  function applySubscriptionFilters() {
+    const state = $('sub-filter-state').value;
+    const sort = $('sub-sort').value;
+    const search = $('sub-search').value.trim().toLowerCase();
+
+    let list = allSubscriptions.slice();
+
+    if (state === 'active') list = list.filter(s => s.is_active);
+    if (state === 'inactive') list = list.filter(s => !s.is_active);
+    if (search) {
+      list = list.filter(s =>
+        s.id.toLowerCase().includes(search) ||
+        (s.refer_code && s.refer_code.toLowerCase().includes(search))
+      );
+    }
+
+    list.sort((a, b) => {
+      switch (sort) {
+        case 'uplink': return (b.traffic?.uplink || 0) - (a.traffic?.uplink || 0);
+        case 'downlink': return (b.traffic?.downlink || 0) - (a.traffic?.downlink || 0);
+        case 'traffic':
+        default: {
+          const ta = (a.traffic?.uplink || 0) + (a.traffic?.downlink || 0);
+          const tb = (b.traffic?.uplink || 0) + (b.traffic?.downlink || 0);
+          return tb - ta;
+        }
+        case 'expires_asc':
+          if (!a.expires_at && !b.expires_at) return 0;
+          if (!a.expires_at) return 1;
+          if (!b.expires_at) return -1;
+          return new Date(a.expires_at) - new Date(b.expires_at);
+        case 'expires_desc':
+          if (!a.expires_at && !b.expires_at) return 0;
+          if (!a.expires_at) return 1;
+          if (!b.expires_at) return -1;
+          return new Date(b.expires_at) - new Date(a.expires_at);
+      }
+    });
+
+    renderSubscriptions(list);
+  }
+
+  function renderSubscriptions(subscriptions) {
+    if (!subscriptions || !subscriptions.length) {
       $('subscriptions').innerHTML = '<p>No subscriptions</p>';
       return;
     }
 
-    const rows = data.subscriptions.map(s => `
+    const rows = subscriptions.map(s => `
       <tr class="clickable" onclick="toggleSubscription('${s.id}')">
         <td class="mono">${s.id}</td>
         <td>${s.expires_at ? new Date(s.expires_at).toLocaleString() : '-'}</td>
@@ -413,8 +479,9 @@
   }
 
   async function loadSubscriptions() {
-    const subscriptions = await api('/admin/api/subscriptions');
-    renderSubscriptions(subscriptions);
+    const data = await api('/admin/api/subscriptions');
+    allSubscriptions = data.subscriptions || [];
+    applySubscriptionFilters();
   }
 
   async function loadAll() {

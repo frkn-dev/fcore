@@ -97,6 +97,7 @@ pub struct AdminSubscriptionList {
 #[derive(Serialize)]
 pub struct AdminSubscription {
     pub id: uuid::Uuid,
+    pub refer_code: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
     pub limit_bytes: Option<i64>,
@@ -394,6 +395,7 @@ where
 
         subscriptions.push(AdminSubscription {
             id: *id,
+            refer_code: sub.refer_code(),
             expires_at: sub.expires_at(),
             is_active: sub.is_active(),
             limit_bytes: sub.limit_bytes(),

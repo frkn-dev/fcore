@@ -6,11 +6,11 @@
 
 ## Binaries
 
-| Binary | Path | Responsibility |
-|---|---|---|
-| `api` | `src/bin/api/` | Central control plane. HTTP API (Warp), PostgreSQL persistence, in-memory state cache, ZeroMQ publisher, metrics aggregation, admin/premium panels. |
+| Binary | Path            | Responsibility                                                                                                                                                                                       |
+| ------ | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api`  | `src/bin/api/`  | Central control plane. HTTP API (Warp), PostgreSQL persistence, in-memory state cache, ZeroMQ publisher, metrics aggregation, admin/premium panels.                                                  |
 | `node` | `src/bin/node/` | Per-environment proxy node. Subscribes to ZMQ, applies connection changes to local backends (Xray, WireGuard, AmneziaWG, Hysteria2, MTProto), collects and publishes metrics, snapshots local state. |
-| `auth` | `src/bin/auth/` | External authentication provider for Hysteria2. Subscribes to the `auth` topic, keeps a local cache of Hysteria2 tokens, exposes `/auth` HTTP endpoint for Hysteria2 auth requests. |
+| `auth` | `src/bin/auth/` | External authentication provider for Hysteria2. Subscribes to the `auth` topic, keeps a local cache of Hysteria2 tokens, exposes `/auth` HTTP endpoint for Hysteria2 auth requests.                  |
 
 Feature flags gate protocol support at compile time:
 
@@ -56,18 +56,18 @@ Typical write path:
 
 ## Key modules
 
-| Module | Role |
-|---|---|
-| `src/bin/api/http` | Warp routes, filters, request/response handlers, admin/premium panels. |
-| `src/bin/api/postgres` | `PgContext` + repositories for nodes, connections, subscriptions, traffic, keys. |
-| `src/bin/api/sync` | `MemSync` wrapper and `SyncOp` trait — the single path for DB→memory→ZMQ consistency. |
-| `src/bin/api/tasks` | Background jobs: DB sync, expiry cleanup, node heartbeat monitor, traffic persistence. |
-| `src/memory` | Core domain types: `Connection`, `Subscription`, `Node`, `Env`, `ProtoTag`, `Connections`, `Subscriptions`, storage traits. |
-| `src/memory/connection` | Connection structs (`Conn`, `Base`), protocol enum (`Proto`), WireGuard params, operations. |
-| `src/metrics` | `MetricEnvelope`, `MetricStorage`, `MetricBuffer`, Prometheus helpers. |
-| `src/zmq` | `Publisher`, `Subscriber`, `Topic`, `Message`, `Action`. |
-| `src/proto` | Optional backends: `xray`, `wireguard`, `amnezia_wg`. |
-| `src/http` | Shared HTTP helpers and the service-token auth filter. |
+| Module                  | Role                                                                                                                        |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `src/bin/api/http`      | Warp routes, filters, request/response handlers, admin/premium panels.                                                      |
+| `src/bin/api/postgres`  | `PgContext` + repositories for nodes, connections, subscriptions, traffic, keys.                                            |
+| `src/bin/api/sync`      | `MemSync` wrapper and `SyncOp` trait — the single path for DB→memory→ZMQ consistency.                                       |
+| `src/bin/api/tasks`     | Background jobs: DB sync, expiry cleanup, node heartbeat monitor, traffic persistence.                                      |
+| `src/memory`            | Core domain types: `Connection`, `Subscription`, `Node`, `Env`, `ProtoTag`, `Connections`, `Subscriptions`, storage traits. |
+| `src/memory/connection` | Connection structs (`Conn`, `Base`), protocol enum (`Proto`), WireGuard params, operations.                                 |
+| `src/metrics`           | `MetricEnvelope`, `MetricStorage`, `MetricBuffer`, Prometheus helpers.                                                      |
+| `src/zmq`               | `Publisher`, `Subscriber`, `Topic`, `Message`, `Action`.                                                                    |
+| `src/proto`             | Optional backends: `xray`, `wireguard`, `amnezia_wg`.                                                                       |
+| `src/http`              | Shared HTTP helpers and the service-token auth filter.                                                                      |
 
 ## State synchronization
 
@@ -81,6 +81,7 @@ Typical write path:
 ## Snapshots
 
 1. **Connection snapshots** (`src/memory/snapshot.rs`, used by `node` and `auth`)
+
    - `SnapshotManager` serializes `Connections<C>` to a file with rkyv.
    - On startup the node loads the snapshot and re-creates peers in WG/AWG/Xray.
    - A background task writes a new snapshot every `service.snapshot_interval` seconds.
@@ -102,11 +103,11 @@ A subscription can be turned into a **premium parent** by an admin:
 
 ## Authentication layers
 
-| Layer | Mechanism | Used by |
-|---|---|---|
-| **Service token** | `Authorization: Bearer <settings.service.token>` | Subscription, connection, node, key management endpoints. Implemented in `src/http/filters.rs`. |
-| **Admin token** | `Authorization: Bearer <settings.service.admin_token>` (API) or `?token=<admin_token>` (HTML page) | `/admin/api/*` and `/admin`. Configured by `admin_enabled` + `admin_token`. |
-| **Premium token** | `Authorization: Bearer <subscription.premium_token>` | `/premium/*` endpoints. Filter in `src/bin/api/http/filters.rs`. |
+| Layer             | Mechanism                                                                                          | Used by                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| **Service token** | `Authorization: Bearer <settings.service.token>`                                                   | Subscription, connection, node, key management endpoints. Implemented in `src/http/filters.rs`. |
+| **Admin token**   | `Authorization: Bearer <settings.service.admin_token>` (API) or `?token=<admin_token>` (HTML page) | `/admin/api/*` and `/admin`. Configured by `admin_enabled` + `admin_token`.                     |
+| **Premium token** | `Authorization: Bearer <subscription.premium_token>`                                               | `/premium/*` endpoints. Filter in `src/bin/api/http/filters.rs`.                                |
 
 Public endpoints (no auth): health check, subscription links/info/traffic, node lists, cluster lists, trial, key validation/activation, Amnezia gateway.
 
