@@ -889,6 +889,7 @@ dependencies = [
  "dashmap",
  "data-encoding",
  "defguard_wireguard_rs",
+ "flate2",
  "futures",
  "hex",
  "hmac",

@@ -1,5 +1,7 @@
 use crate::sync::MemSync;
 use base64::Engine;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
     ConnectionStorageApiOperations, InboundConnLink, NodeStatus, NodeStorageOperations,
@@ -7,6 +9,7 @@ use fcore::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use warp::Reply;
 
 // ============================================================================
@@ -328,6 +331,7 @@ fn available_countries_from_connections(conns: &[GatewayConnection]) -> Vec<Gate
 /// Строит Amnezia server config для AWG.
 fn build_awg_server_config(
     ini_config: &str,
+    client_priv_key: &str,
     client_pub_key: &str,
     hostname: &str,
     port: u16,
@@ -335,7 +339,7 @@ fn build_awg_server_config(
     let mut ini = HashMap::new();
     for line in ini_config.lines() {
         let line = line.trim();
-        if line.starts_with('[') || line.is_empty() {
+        if line.starts_with('[') || line.is_empty() || line.starts_with('#') {
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
@@ -343,66 +347,67 @@ fn build_awg_server_config(
         }
     }
 
+    let client_ip = ini.get("Address").unwrap_or(&"10.8.1.2/32");
+    let mtu = ini.get("MTU").unwrap_or(&"1420");
+    let server_pub_key = ini.get("PublicKey").unwrap_or(&"");
+    let psk_key = ini.get("PresharedKey").unwrap_or(&"");
+    let persistent_keepalive = "25";
+
+    let jc = ini.get("Jc").unwrap_or(&"4");
+    let jmin = ini.get("Jmin").unwrap_or(&"40");
+    let jmax = ini.get("Jmax").unwrap_or(&"70");
+    let s1 = ini.get("S1").unwrap_or(&"0");
+    let s2 = ini.get("S2").unwrap_or(&"0");
+    let s3 = ini.get("S3").unwrap_or(&"0");
+    let s4 = ini.get("S4").unwrap_or(&"0");
+    let h1 = ini.get("H1").unwrap_or(&"1");
+    let h2 = ini.get("H2").unwrap_or(&"2");
+    let h3 = ini.get("H3").unwrap_or(&"3");
+    let h4 = ini.get("H4").unwrap_or(&"4");
+    let i1 = ini.get("I1").unwrap_or(&"0");
+
     let last_config = serde_json::json!({
-        "client_ip": ini.get("Address").unwrap_or(&"10.8.1.2/32"),
-        "client_private_key": "$WIREGUARD_CLIENT_PRIVATE_KEY",
+        "client_priv_key": client_priv_key,
         "client_pub_key": client_pub_key,
-        "hostName": hostname,
+        "client_ip": client_ip,
+        "mtu": mtu,
+        "server_pub_key": server_pub_key,
+        "psk_key": psk_key,
         "port": port,
-        "server_pub_key": ini.get("PublicKey").unwrap_or(&""),
-        "psk_key": ini.get("PresharedKey").unwrap_or(&""),
-        "mtu": ini.get("MTU").unwrap_or(&"1420"),
-        "Jc": ini.get("Jc").unwrap_or(&"4"),
-        "Jmin": ini.get("Jmin").unwrap_or(&"40"),
-        "Jmax": ini.get("Jmax").unwrap_or(&"70"),
-        "S1": ini.get("S1").unwrap_or(&"0"),
-        "S2": ini.get("S2").unwrap_or(&"0"),
-        "S3": ini.get("S3").unwrap_or(&"0"),
-        "S4": ini.get("S4").unwrap_or(&"0"),
-        "H1": ini.get("H1").unwrap_or(&"1"),
-        "H2": ini.get("H2").unwrap_or(&"2"),
-        "H3": ini.get("H3").unwrap_or(&"3"),
-        "H4": ini.get("H4").unwrap_or(&"4"),
-        "I1": ini.get("I1").unwrap_or(&"0"),
-        "I2": ini.get("I2").unwrap_or(&"0"),
-        "I3": ini.get("I3").unwrap_or(&"0"),
-        "I4": ini.get("I4").unwrap_or(&"0"),
-        "I5": ini.get("I5").unwrap_or(&"0"),
+        "hostName": hostname,
+        "persistent_keepalive": persistent_keepalive,
+        "junkPacketCount": jc,
+        "junkPacketMinSize": jmin,
+        "junkPacketMaxSize": jmax,
+        "initPacketJunkSize": s1,
+        "responsePacketJunkSize": s2,
+        "cookieReplyPacketJunkSize": s3,
+        "transportPacketJunkSize": s4,
+        "initPacketMagicHeader": h1,
+        "responsePacketMagicHeader": h2,
+        "underloadPacketMagicHeader": h3,
+        "transportPacketMagicHeader": h4,
+        "specialJunk1": i1,
     });
 
     serde_json::json!({
-        "containers": [
-            {
-                "container": "amnezia-awg",
-                "awg": {
-                    "last_config": last_config.to_string(),
-                    "port": port,
-                    "Jc": ini.get("Jc").unwrap_or(&"4"),
-                    "Jmin": ini.get("Jmin").unwrap_or(&"40"),
-                    "Jmax": ini.get("Jmax").unwrap_or(&"70"),
-                    "S1": ini.get("S1").unwrap_or(&"0"),
-                    "S2": ini.get("S2").unwrap_or(&"0"),
-                    "S3": ini.get("S3").unwrap_or(&"0"),
-                    "S4": ini.get("S4").unwrap_or(&"0"),
-                    "H1": ini.get("H1").unwrap_or(&"1"),
-                    "H2": ini.get("H2").unwrap_or(&"2"),
-                    "H3": ini.get("H3").unwrap_or(&"3"),
-                    "H4": ini.get("H4").unwrap_or(&"4"),
-                    "I1": ini.get("I1").unwrap_or(&"0"),
-                    "I2": ini.get("I2").unwrap_or(&"0"),
-                    "I3": ini.get("I3").unwrap_or(&"0"),
-                    "I4": ini.get("I4").unwrap_or(&"0"),
-                    "I5": ini.get("I5").unwrap_or(&"0"),
-                }
-            }
-        ],
+        "config_version": 2,
         "defaultContainer": "amnezia-awg",
+        "description": "FRKN AWG",
         "dns1": "1.1.1.1",
         "dns2": "1.0.0.1",
         "hostName": hostname,
-        "description": "FRKN AWG",
         "name": "FRKN",
-        "config_version": 2
+        "containers": [
+            {
+                "container": "amnezia-awg",
+                "amnezia-awg": {
+                    "config": ini_config,
+                    "isThirdPartyConfig": true,
+                    "last_config": last_config.to_string()
+                }
+            }
+        ]
     })
 }
 
@@ -852,6 +857,16 @@ where
     }).into_response())
 }
 
+fn gzip_json(value: &serde_json::Value) -> Result<Vec<u8>, fcore::Error> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(value.to_string().as_bytes())
+        .map_err(|e| fcore::Error::Custom(format!("gzip encode failed: {}", e)))?;
+    encoder
+        .finish()
+        .map_err(|e| fcore::Error::Custom(format!("gzip finish failed: {}", e)))
+}
+
 pub async fn gateway_config_handler<N, C, S>(
     req: GatewayConfigRequest,
     memory: MemSync<N, C, S>,
@@ -967,9 +982,13 @@ where
                 .create_link(&conn_id, &conn, &node.hostname, &host, &node.label)
                 .map_err(|_| warp::reject::not_found())?;
 
+            let awg_param = conn.get_amneziawg().ok_or_else(|| warp::reject::not_found())?;
+            let client_priv_key = awg_param.keys.privkey.clone();
+            let client_pub_key = awg_param.keys.pubkey().map_err(|_| warp::reject::not_found())?;
+
             let port = inbound.port;
 
-            build_awg_server_config(&link, req.public_key.as_deref().unwrap_or(""), &host, port)
+            build_awg_server_config(&link, &client_priv_key, &client_pub_key, &host, port)
         }
         "vless" => {
             let inbound = node
@@ -987,8 +1006,17 @@ where
         _ => unreachable!(),
     };
 
-    let config_str = server_config_json.to_string();
-    let config_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config_str);
+    let is_awg = req.service_protocol == "awg";
+    let config_bytes = if is_awg {
+        gzip_json(&server_config_json).map_err(|_| warp::reject::not_found())?
+    } else {
+        server_config_json.to_string().into_bytes()
+    };
+    let config_b64 = if is_awg {
+        base64::engine::general_purpose::STANDARD.encode(&config_bytes)
+    } else {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&config_bytes)
+    };
 
     Ok(warp::reply::json(&GatewayConfigResponse {
         config: config_b64,

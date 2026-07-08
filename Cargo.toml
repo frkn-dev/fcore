@@ -22,6 +22,7 @@ chrono = { version = "0.4", features = ["serde", "rkyv"] }
 console-subscriber = {version = "0.4", optional = true}
 dashmap = "6.1.0"
 defguard_wireguard_rs = { version = "0.9.7", optional = true}
+flate2 = "1"
 futures = "0.3"
 hex = { version = "0.4"}
 hmac = "0.12"
