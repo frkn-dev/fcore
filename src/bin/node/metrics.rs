@@ -115,8 +115,12 @@ where
                         stats.uplink as f64,
                         metric_tags.clone(),
                     );
-                    self.metrics
-                        .push(node_uuid, "user.online", stats.online as f64, metric_tags);
+                    self.metrics.push(
+                        node_uuid,
+                        "user.traffic.online",
+                        stats.online as f64,
+                        metric_tags,
+                    );
                 }
                 Err(e) => {
                     tracing::error!("Failed to get stats for user {}: {:?}", conn_id, e);

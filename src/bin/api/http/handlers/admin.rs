@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::error;
 use warp::http::StatusCode;
@@ -102,6 +103,7 @@ pub struct AdminSubscription {
     pub is_active: bool,
     pub limit_bytes: Option<i64>,
     pub connections_count: usize,
+    pub online: u64,
     pub traffic: AdminSubscriptionTraffic,
 }
 
@@ -121,6 +123,7 @@ pub struct AdminConnection {
     pub is_deleted: bool,
     pub uplink: u64,
     pub downlink: u64,
+    pub online: u64,
 }
 
 fn unauthorized() -> Box<dyn warp::Reply + Send> {
@@ -315,6 +318,7 @@ pub async fn admin_api_connections_handler<N, C, S>(
     admin_enabled: bool,
     admin_token: String,
     auth_header: Option<String>,
+    metrics: Arc<MetricStorage>,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -336,20 +340,30 @@ where
     }
 
     let mem = memory.memory.read().await;
-    let connections: Vec<AdminConnection> = mem
+    let mut connections: Vec<AdminConnection> = mem
         .connections
         .iter()
-        .map(|(id, conn)| AdminConnection {
-            id: *id,
-            env: conn.get_env(),
-            subscription_id: conn.get_subscription_id(),
-            proto: conn.get_proto().proto().to_string(),
-            expires_at: conn.get_expires_at(),
-            is_deleted: conn.get_deleted(),
-            uplink: 0,
-            downlink: 0,
+        .map(|(id, conn)| {
+            let online = metrics.get_connection_online_count(id);
+            AdminConnection {
+                id: *id,
+                env: conn.get_env(),
+                subscription_id: conn.get_subscription_id(),
+                proto: conn.get_proto().proto().to_string(),
+                expires_at: conn.get_expires_at(),
+                is_deleted: conn.get_deleted(),
+                uplink: 0,
+                downlink: 0,
+                online,
+            }
         })
         .collect();
+
+    for conn in &mut connections {
+        let (uplink, downlink) = metrics.get_connection_total_traffic(&conn.id);
+        conn.uplink = uplink;
+        conn.downlink = downlink;
+    }
 
     Ok(Box::new(warp::reply::json(&AdminConnectionList {
         connections,
@@ -392,6 +406,7 @@ where
             .filter(|(_, conn)| conn.get_subscription_id() == Some(*id))
             .count();
         let (uplink, downlink) = metrics.get_subscription_total_traffic(id);
+        let online = metrics.get_subscription_online_count(id);
 
         subscriptions.push(AdminSubscription {
             id: *id,
@@ -400,6 +415,7 @@ where
             is_active: sub.is_active(),
             limit_bytes: sub.limit_bytes(),
             connections_count,
+            online,
             traffic: AdminSubscriptionTraffic { uplink, downlink },
         });
     }
@@ -447,6 +463,7 @@ where
     let mut list = Vec::new();
     for (id, conn) in connections {
         let (uplink, downlink) = metrics.get_connection_total_traffic(&id);
+        let online = metrics.get_connection_online_count(&id);
         list.push(AdminConnection {
             id,
             env: conn.get_env(),
@@ -456,6 +473,7 @@ where
             is_deleted: conn.get_deleted(),
             uplink,
             downlink,
+            online,
         });
     }
 
@@ -467,6 +485,93 @@ where
 #[derive(Debug, Deserialize)]
 pub struct AdminAssignPremiumRequest {
     pub env: Env,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminNodeMetricsQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    pub metric: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AdminNodeMetricsResponse {
+    pub metrics: Vec<AdminNodeMetricSeries>,
+}
+
+#[derive(Serialize)]
+pub struct AdminNodeMetricSeries {
+    pub name: String,
+    pub tags: BTreeMap<String, String>,
+    pub points: Vec<fcore::MetricPoint>,
+}
+
+pub async fn admin_api_node_metrics_handler(
+    node_id: uuid::Uuid,
+    query: AdminNodeMetricsQuery,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+    metrics: Arc<MetricStorage>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection> {
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let from = query.from.unwrap_or(now - 600_000);
+    let to = query.to.unwrap_or(now);
+
+    let Some(node_map) = metrics.inner.get(&node_id) else {
+        return Ok(Box::new(warp::reply::json(&AdminNodeMetricsResponse { metrics: vec![] },
+        )));
+    };
+
+    let mut result = Vec::new();
+
+    for entry in node_map.iter() {
+        let hash = *entry.key();
+        let Some(meta) = metrics.metadata.get(&hash) else {
+            continue;
+        };
+        let (name, tags) = meta.value().clone();
+
+        if matches!(
+            name.as_str(),
+            "user.traffic.downlink" | "user.traffic.uplink" | "user.traffic.online"
+        ) {
+            continue;
+        }
+
+        if let Some(ref filter) = query.metric {
+            if !name.starts_with(filter) {
+                continue;
+            }
+        }
+
+        let points: Vec<fcore::MetricPoint> = entry
+            .value()
+            .iter()
+            .filter(|p| p.timestamp >= from && p.timestamp <= to)
+            .cloned()
+            .collect();
+
+        if points.is_empty() {
+            continue;
+        }
+
+        result.push(AdminNodeMetricSeries {
+            name,
+            tags,
+            points,
+        });
+    }
+
+    Ok(Box::new(warp::reply::json(&AdminNodeMetricsResponse { metrics: result },
+    )))
 }
 
 pub async fn admin_api_assign_premium_handler<N, C, S>(

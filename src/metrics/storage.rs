@@ -532,6 +532,22 @@ impl MetricStorage {
         )
     }
 
+    fn latest_value_sum(&self, metric: &str, tags: &BTreeMap<String, String>) -> u64 {
+        self.latest_sum(Some(metric), tags).max(0.0) as u64
+    }
+
+    pub fn get_connection_online_count(&self, conn_id: &uuid::Uuid) -> u64 {
+        let mut tags = BTreeMap::new();
+        tags.insert("conn_id".to_string(), conn_id.to_string());
+        self.latest_value_sum("user.traffic.online", &tags)
+    }
+
+    pub fn get_subscription_online_count(&self, subscription_id: &uuid::Uuid) -> u64 {
+        let mut tags = BTreeMap::new();
+        tags.insert("subscription_id".to_string(), subscription_id.to_string());
+        self.latest_value_sum("user.traffic.online", &tags)
+    }
+
     pub fn get_connection_delta_traffic(
         &self,
         conn_id: &uuid::Uuid,

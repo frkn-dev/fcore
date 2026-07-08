@@ -217,7 +217,18 @@ where
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
             .and(warp::header::optional::<String>("authorization"))
+            .and(with_metrics(self.metrics.clone()))
             .and_then(admin_api_connections_handler);
+
+        let admin_api_node_metrics_route = warp::get()
+            .and(warp::path!("admin" / "api" / "nodes" / Uuid / "metrics"))
+            .and(warp::path::end())
+            .and(warp::query::<crate::http::handlers::admin::AdminNodeMetricsQuery>())
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(admin_api_node_metrics_handler);
 
         let admin_api_assign_premium_route = warp::post()
             .and(warp::path!("admin" / "api" / "subscriptions" / Uuid / "premium"))
@@ -232,6 +243,7 @@ where
         let admin_routes = admin_page_route
             .or(admin_api_state_route)
             .or(admin_api_nodes_route)
+            .or(admin_api_node_metrics_route)
             .or(admin_api_subscriptions_route)
             .or(admin_api_subscription_connections_route)
             .or(admin_api_connections_route)

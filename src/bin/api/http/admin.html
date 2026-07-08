@@ -320,33 +320,37 @@
   }
 
   function renderNodes(data) {
+    const expanded = new Set();
+    document.querySelectorAll('[id^="node-details-"]').forEach(el => {
+      if (el.style.display !== 'none') {
+        const id = el.id.replace('node-details-', '');
+        expanded.add(id);
+      }
+    });
+
     const rows = data.nodes.map(n => {
       const m = n.metrics || {};
-      const mem = (m.memory_used_bytes != null && m.memory_total_bytes != null)
-        ? `${formatBytes(m.memory_used_bytes)} / ${formatBytes(m.memory_total_bytes)} (${formatPercent(m.memory_percent)})`
-        : '-';
-      const traffic = (m.network_rx_bps != null || m.network_tx_bps != null)
-        ? `↓${formatBits(m.network_rx_bps || 0)} / ↑${formatBits(m.network_tx_bps || 0)}`
-        : '-';
+      const load = m.cpu_percent != null ? m.cpu_percent : null;
       return `
-      <tr>
+      <tr class="clickable" onclick="toggleNode('${n.id}')">
         <td class="mono">${n.id}</td>
-        <td>${n.env}</td>
-        <td>${n.hostname}</td>
-        <td>${n.address}</td>
+        <td><strong>${n.label}</strong></td>
+        <td class="mono">${n.address}</td>
         <td><span class="badge ${n.status.toLowerCase()}">${n.status}</span></td>
-        <td class="nowrap">${m.cpu_percent != null ? m.cpu_percent.toFixed(1) + '%' : '-'}</td>
-        <td class="nowrap">${mem}</td>
-        <td class="nowrap">${formatPercent(m.disk_usage_percent)}</td>
-        <td class="nowrap">${traffic}</td>
-        <td>${n.country}</td>
-        <td>${n.cluster || '-'}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="deleteNode('${n.id}')">Delete</button></td>
+        <td class="nowrap">${load != null ? load.toFixed(1) + '%' : '-'}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteNode('${n.id}')">Delete</button></td>
+      </tr>
+      <tr>
+        <td colspan="6" id="node-details-${n.id}" class="details" style="display:none">
+          <div id="node-metrics-${n.id}">Loading…</div>
+        </td>
       </tr>`;
     }).join('');
     $('nodes').innerHTML = rows
-      ? `<table><tr><th>ID</th><th>Env</th><th>Hostname</th><th>Address</th><th>Status</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Traffic</th><th>Country</th><th>Cluster</th><th></th></tr>${rows}</table>`
+      ? `<table><tr><th>ID</th><th>Label</th><th>Address</th><th>Status</th><th>Load</th><th></th></tr>${rows}</table>`
       : '<p>No nodes</p>';
+
+    expanded.forEach(id => toggleNode(id));
   }
 
   function applySubscriptionFilters() {
@@ -404,10 +408,11 @@
         <td><span class="badge ${s.is_active ? 'active' : 'inactive'}">${s.is_active ? 'active' : 'inactive'}</span></td>
         <td class="nowrap">${s.limit_bytes != null ? formatBytes(s.limit_bytes) : '-'}</td>
         <td>${s.connections_count}</td>
+        <td>${s.online || 0}</td>
         <td class="nowrap">↓${formatBytes(s.traffic.downlink)} / ↑${formatBytes(s.traffic.uplink)}</td>
       </tr>
       <tr>
-        <td colspan="6" id="sub-details-${s.id}" class="details" style="display:none">
+        <td colspan="7" id="sub-details-${s.id}" class="details" style="display:none">
           <h4>Connections</h4>
           <div id="sub-conns-${s.id}">Loading…</div>
           <div class="form-inline">
@@ -436,7 +441,7 @@
       </tr>
     `).join('');
 
-    $('subscriptions').innerHTML = `<table><tr><th>ID</th><th>Expires</th><th>State</th><th>Limit</th><th>Connections</th><th>Traffic</th></tr>${rows}</table>`;
+    $('subscriptions').innerHTML = `<table><tr><th>ID</th><th>Expires</th><th>State</th><th>Limit</th><th>Connections</th><th>Online</th><th>Traffic</th></tr>${rows}</table>`;
   }
 
   function renderConnectionRows(conns) {
@@ -446,12 +451,13 @@
         <td class="mono">${c.id}</td>
         <td>${c.env}</td>
         <td>${c.proto}</td>
+        <td>${c.online || 0}</td>
         <td>${c.expires_at ? new Date(c.expires_at).toLocaleString() : '-'}</td>
         <td><span class="badge ${c.is_deleted ? 'deleted' : 'active'}">${c.is_deleted ? 'deleted' : 'active'}</span></td>
         <td class="nowrap">↓${formatBytes(c.downlink)} / ↑${formatBytes(c.uplink)}</td>
       </tr>
     `).join('');
-    return `<table><tr><th>ID</th><th>Env</th><th>Proto</th><th>Expires</th><th>State</th><th>Traffic</th></tr>${rows}</table>`;
+    return `<table><tr><th>ID</th><th>Env</th><th>Proto</th><th>Online</th><th>Expires</th><th>State</th><th>Traffic</th></tr>${rows}</table>`;
   }
 
   async function toggleSubscription(id) {
@@ -471,6 +477,148 @@
     } else {
       details.style.display = 'none';
     }
+  }
+
+  async function toggleNode(id) {
+    const details = $(`node-details-${id}`);
+    const metricsDiv = $(`node-metrics-${id}`);
+    if (details.style.display === 'none') {
+      details.style.display = 'table-cell';
+      if (metricsDiv.dataset.loaded !== 'true') {
+        try {
+          const from = Date.now() - 10 * 60 * 1000;
+          const data = await api(`/admin/api/nodes/${id}/metrics?from=${from}`);
+          metricsDiv.innerHTML = renderNodeMetrics(id, data);
+          metricsDiv.dataset.loaded = 'true';
+          drawAllNodeCharts(id, data);
+        } catch (e) {
+          metricsDiv.innerHTML = '<p class="error">Failed to load metrics: ' + e.message + '</p>';
+        }
+      }
+    } else {
+      details.style.display = 'none';
+    }
+  }
+
+  function renderNodeMetrics(nodeId, data) {
+    if (!data.metrics || !data.metrics.length) {
+      return '<p class="small">No metrics available</p>';
+    }
+
+    const latest = {};
+    data.metrics.forEach(m => {
+      const last = m.points[m.points.length - 1];
+      latest[m.name] = last ? last.y : null;
+    });
+
+    const cpu = latest['sys.cpu.avg'] != null ? latest['sys.cpu.avg'] : (Object.keys(latest).filter(k => k.startsWith('sys.cpu.')).reduce((a, k) => a + (latest[k] || 0), 0) / Object.keys(latest).filter(k => k.startsWith('sys.cpu.')).length || 0);
+    const memUsed = latest['sys.mem_used'];
+    const memTotal = latest['sys.mem_total'];
+    const memPct = memUsed != null && memTotal != null ? (memUsed / memTotal * 100) : null;
+    const load1 = latest['sys.loadavg_1'];
+    const diskRoot = latest['sys.disk.root.usage_percent'];
+
+    const info = [];
+    if (cpu != null) info.push(`CPU: ${cpu.toFixed(1)}%`);
+    if (memUsed != null) info.push(`Memory: ${formatBytes(memUsed)} / ${formatBytes(memTotal || 0)} (${memPct != null ? memPct.toFixed(1) : '-'}%)`);
+    if (load1 != null) info.push(`Load 1m: ${load1.toFixed(2)}`);
+    if (diskRoot != null) info.push(`Disk root: ${diskRoot.toFixed(1)}%`);
+
+    return `
+      <h4>Overview</h4>
+      <p class="small">${info.join(' · ') || 'No recent system metrics'}</p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;margin-top:0.75rem">
+        <div class="card"><h5>CPU %</h5><canvas id="chart-${nodeId}-cpu" height="120"></canvas></div>
+        <div class="card"><h5>Memory used</h5><canvas id="chart-${nodeId}-mem" height="120"></canvas></div>
+        <div class="card"><h5>Network bps</h5><canvas id="chart-${nodeId}-net" height="120"></canvas></div>
+        <div class="card"><h5>Load average</h5><canvas id="chart-${nodeId}-load" height="120"></canvas></div>
+      </div>
+      <h4 style="margin-top:1rem">All series</h4>
+      <table class="small">
+        <tr><th>Metric</th><th>Latest</th><th>Points</th></tr>
+        ${data.metrics.map(m => {
+          const last = m.points[m.points.length - 1];
+          return `<tr><td>${m.name}</td><td>${last ? last.y.toFixed(2) : '-'}</td><td>${m.points.length}</td></tr>`;
+        }).join('')}
+      </table>
+    `;
+  }
+
+  function drawAllNodeCharts(nodeId, data) {
+    const cpuSeries = data.metrics.filter(m => m.name.startsWith('sys.cpu.'));
+    const memSeries = data.metrics.filter(m => m.name === 'sys.mem_used');
+    const netRx = data.metrics.filter(m => m.name.match(/^net\..+\.rx_bps$/));
+    const netTx = data.metrics.filter(m => m.name.match(/^net\..+\.tx_bps$/));
+    const loadSeries = data.metrics.filter(m => m.name.startsWith('sys.loadavg_'));
+
+    const merge = (series) => {
+      const map = new Map();
+      series.forEach(s => {
+        s.points.forEach(p => {
+          const v = map.get(p.x) || 0;
+          map.set(p.x, v + p.y);
+        });
+      });
+      return Array.from(map.entries()).sort((a, b) => a[0] - b[0]).map(([x, y]) => ({ x, y }));
+    };
+
+    drawChart(`chart-${nodeId}-cpu`, merge(cpuSeries), 'CPU %', '#1a1a2e');
+    drawChart(`chart-${nodeId}-mem`, merge(memSeries), 'Memory used', '#2563eb');
+    drawChart(`chart-${nodeId}-net`, merge([...netRx, ...netTx]), 'bps ×8', '#16a34a');
+    drawChart(`chart-${nodeId}-load`, merge(loadSeries), 'Load', '#d97706');
+  }
+
+  function drawChart(canvasId, points, label, color) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !points.length) {
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#999';
+        ctx.fillText('No data', 10, 60);
+      }
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(300, Math.floor(rect.width)) || 300;
+    canvas.height = 120;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    const pad = 20;
+
+    const minX = points[0].x;
+    const maxX = points[points.length - 1].x;
+    const values = points.map(p => p.y);
+    let minY = Math.min(...values);
+    let maxY = Math.max(...values);
+    if (minY === maxY) { minY = 0; maxY = maxY || 1; }
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad, pad);
+    ctx.lineTo(pad, h - pad);
+    ctx.lineTo(w - pad, h - pad);
+    ctx.stroke();
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const x = pad + (maxX === minX ? 0 : (p.x - minX) / (maxX - minX)) * (w - 2 * pad);
+      const y = h - pad - (maxY === minY ? 0 : (p.y - minY) / (maxY - minY)) * (h - 2 * pad);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    ctx.fillStyle = '#666';
+    ctx.font = '10px sans-serif';
+    ctx.fillText(label, pad + 4, pad - 4);
+    ctx.fillText(maxY.toFixed(1), 2, pad + 8);
+    ctx.fillText(minY.toFixed(1), 2, h - pad - 4);
   }
 
   async function loadNodes() {
