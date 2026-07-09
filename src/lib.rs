@@ -28,7 +28,7 @@ pub const BANNER: &str = r#"
 //                            |_|                |___/
 "#;
 
-pub const VERSION: &str = "0.5.13-dev";
+pub const VERSION: &str = "0.5.14-dev";
 
 pub use config::{
     amnezia_wg::{
