@@ -68,6 +68,14 @@ where
                     .connections
                     .iter()
                     .filter_map(|(id, conn)| {
+                        // Connections that belong to a subscription are managed by
+                        // cleanup_expired_subscriptions / restore_subscriptions via the
+                        // sync bus. Only standalone connections with their own expires_at
+                        // should be cleaned up here.
+                        if conn.get_subscription_id().is_some() {
+                            return None;
+                        }
+
                         if let Some(expires_at) = conn.get_expires_at() {
                             if expires_at <= now && !conn.get_deleted() {
                                 Some((*id, conn.clone()))

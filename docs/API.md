@@ -449,20 +449,71 @@ Endpoint'ы `/v1/*` используют шифрование RSA+AES, когд�
 - **Body:** `GatewayConfigRequest`
   ```json
   {
-    "os_version": "...",
+    "os_version": "ios",
     "app_version": "...",
-    "app_language": "en",
+    "app_language": "ru",
     "installation_uuid": "uuid",
     "user_country_code": "RU",
-    "server_country_code": "DE",
+    "server_country_code": "SWE",
     "service_type": "amnezia-free",
     "service_protocol": "awg",
-    "auth_data": { "id": "uuid" },
-    "public_key": "...",
-    "connection_id": "uuid"
+    "auth_data": {
+      "id": "subscription-uuid"
+    },
+    "publicKey": "TTUZIyQdgxf9Yx4MiwzX6oICsh6ajjgxlWC8sVBMC8I=",
+    "connection_id": "connection-uuid"
   }
   ```
-- **Response:** `200 OK` → `GatewayConfigResponse` с base64-конфигом Amnezia (зашифрован)
+  - `publicKey` для `awg` можно не передавать / игнорировать: сервер сам берёт ключи из структуры connection.
+  - `connection_id` опционален. Если передан — выбирается именно этот connection, иначе первый подходящий по стране и протоколу.
+
+- **Response:** `200 OK` → `GatewayConfigResponse` (зашифрованный envelope)
+  ```json
+  {
+    "config": "<base64(gzip(inner_json))>",
+    "config_version": 2,
+    "supported_protocols": ["vless", "awg"],
+    "api_config": {
+      "server_country_code": "SWE",
+      "service_protocol": "awg",
+      "service_type": "amnezia-free",
+      "user_country_code": "RU"
+    },
+    "service_info": {
+      "name": "SWE",
+      "type": "amnezia-free"
+    }
+  }
+  ```
+
+  Для `awg` поле `config` — это **gzip-сжатый** JSON, закодированный в base64 (стандартный алфавит с паддингом). После декодирования получается:
+
+  ```json
+  {
+    "config_version": 2,
+    "defaultContainer": "amnezia-awg",
+    "description": "FRKN AWG",
+    "dns1": "1.1.1.1",
+    "dns2": "1.0.0.1",
+    "hostName": "91.186.218.62",
+    "name": "FRKN",
+    "containers": [
+      {
+        "container": "amnezia-awg",
+        "amnezia-awg": {
+          "config": "[Interface]\nPrivateKey = Axhy7oMt1BfsuXw9qD3Nbkx5pVD/Yu/RPGzwqsjMlaY=\nAddress = 100.64.0.4/32\nMTU = 1280\nDNS = 1.1.1.1\nJc = 4\nJmin = 56\nJmax = 134\nS1 = 70\nS2 = 55\nH1 = 100000-200000\nH2 = 300000-400000\nH3 = 500000-600000\nH4 = 700000-800000\nS3 = 11\nS4 = 12\nI1 = <r 128>\n[Peer]\nPublicKey = hf0ZY6WULIRaBbeVtR8ox3y7LLEqocPB2DaSif2PTw0=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 91.186.218.62:51820\nPersistentKeepalive = 25",
+          "isThirdPartyConfig": true,
+          "last_config": "{\"client_priv_key\":\"Axhy7oMt1BfsuXw9qD3Nbkx5pVD/Yu/RPGzwqsjMlaY=\",\"client_pub_key\":\"B6m2PYhhec2Pe+I50I63pdFB/bR6Psd77MhpWj4TlQE=\",\"client_ip\":\"100.64.0.4/32\",\"mtu\":\"1280\",\"server_pub_key\":\"hf0ZY6WULIRaBbeVtR8ox3y7LLEqocPB2DaSif2PTw0=\",\"psk_key\":\"\",\"port\":51820,\"hostName\":\"91.186.218.62\",\"persistent_keepalive\":\"25\",\"junkPacketCount\":\"4\",\"junkPacketMinSize\":\"56\",\"junkPacketMaxSize\":\"134\",\"initPacketJunkSize\":\"70\",\"responsePacketJunkSize\":\"55\",\"cookieReplyPacketJunkSize\":\"11\",\"transportPacketJunkSize\":\"12\",\"initPacketMagicHeader\":\"100000-200000\",\"responsePacketMagicHeader\":\"300000-400000\",\"underloadPacketMagicHeader\":\"500000-600000\",\"transportPacketMagicHeader\":\"700000-800000\",\"specialJunk1\":\"<r 128>\"}"
+        }
+      }
+    ]
+  }
+  ```
+
+  Важные моменты для AWG:
+  - `config` содержит готовую INI-строку WireGuard/AmneziaWG с **реальным** клиентским приватным ключом.
+  - `last_config` — JSON-строка с теми же ключами и параметрами обфускации.
+  - `client_priv_key` и `client_pub_key` — это ключи из connection, сгенерированные сервером. Публичный ключ пира на сервере создаётся именно для этой пары.
 
 ---
 

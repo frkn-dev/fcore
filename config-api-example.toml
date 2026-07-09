@@ -45,6 +45,7 @@ db_sync_interval_sec = 1000
 subscription_restore_interval = 600
 subscription_expire_interval = 600
 traffic_persist_interval_sec = 3600
+connection_expire_interval = 600
 
 [pg]
 host = "localhost"

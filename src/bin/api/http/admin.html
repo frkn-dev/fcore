@@ -500,6 +500,24 @@
     }
   }
 
+  function formatMetricValue(name, value) {
+    if (value == null) return '-';
+    if (name.startsWith('sys.cpu.')) return value.toFixed(1) + '%';
+    if (name.startsWith('sys.loadavg_')) return value.toFixed(2);
+    if (name.startsWith('sys.mem_') || name.match(/^sys\.disk\.[^.]+\.(used|total)_bytes$/)) {
+      return formatBytes(value);
+    }
+    if (name.startsWith('sys.disk.') && name.endsWith('.usage_percent')) return value.toFixed(1) + '%';
+    if (name.match(/^net\.[^.]+\.(rx|tx|total_rx|total_tx)_bps$/)) return formatBits(value);
+    if (name.startsWith('user.traffic.')) {
+      if (name.endsWith('.online')) return Math.round(value).toString();
+      return formatBytes(value);
+    }
+    if (name.match(/^net\.inbound\.[^.]+\.(uplink|downlink)$/)) return formatBytes(value);
+    if (name.match(/^net\.inbound\.[^.]+\.connections$/)) return Math.round(value).toString();
+    return value.toFixed(2);
+  }
+
   function renderNodeMetrics(nodeId, data) {
     if (!data.metrics || !data.metrics.length) {
       return '<p class="small">No metrics available</p>';
@@ -536,10 +554,12 @@
       <h4 style="margin-top:1rem">All series</h4>
       <table class="small">
         <tr><th>Metric</th><th>Latest</th><th>Points</th></tr>
-        ${data.metrics.map(m => {
-          const last = m.points[m.points.length - 1];
-          return `<tr><td>${m.name}</td><td>${last ? last.y.toFixed(2) : '-'}</td><td>${m.points.length}</td></tr>`;
-        }).join('')}
+        ${data.metrics
+          .filter(m => !m.name.startsWith('user.traffic.'))
+          .map(m => {
+            const last = m.points[m.points.length - 1];
+            return `<tr><td>${m.name}</td><td>${last ? formatMetricValue(m.name, last.y) : '-'}</td><td>${m.points.length}</td></tr>`;
+          }).join('')}
       </table>
     `;
   }
@@ -551,12 +571,12 @@
     const netTx = data.metrics.filter(m => m.name.match(/^net\..+\.tx_bps$/));
     const loadSeries = data.metrics.filter(m => m.name.startsWith('sys.loadavg_'));
 
-    const merge = (series) => {
+    const merge = (series, multiplier = 1) => {
       const map = new Map();
       series.forEach(s => {
         s.points.forEach(p => {
           const v = map.get(p.x) || 0;
-          map.set(p.x, v + p.y);
+          map.set(p.x, v + p.y * multiplier);
         });
       });
       return Array.from(map.entries()).sort((a, b) => a[0] - b[0]).map(([x, y]) => ({ x, y }));
@@ -564,7 +584,7 @@
 
     drawChart(`chart-${nodeId}-cpu`, merge(cpuSeries), 'CPU %', '#1a1a2e');
     drawChart(`chart-${nodeId}-mem`, merge(memSeries), 'Memory used', '#2563eb');
-    drawChart(`chart-${nodeId}-net`, merge([...netRx, ...netTx]), 'bps ×8', '#16a34a');
+    drawChart(`chart-${nodeId}-net`, merge([...netRx, ...netTx], 8), 'Network bps', '#16a34a');
     drawChart(`chart-${nodeId}-load`, merge(loadSeries), 'Load', '#d97706');
   }
 

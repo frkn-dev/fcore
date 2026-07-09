@@ -5,20 +5,20 @@ use openssl::symm::{decrypt as aes_decrypt, encrypt as aes_encrypt, Cipher};
 use std::sync::Arc;
 use warp::{Filter, Rejection};
 
-/// AES-контекст, полученный при расшифровке запроса. Используется для шифрования ответа.
+/// AES context obtained while decrypting the request. Used to encrypt the response.
 #[derive(Debug, Clone)]
 pub struct AesContext {
     pub key: Vec<u8>,
     pub iv: Vec<u8>,
 }
 
-/// Ошибка шифрования/расшифровки AGW.
+/// AGW encryption/decryption error.
 #[derive(Debug)]
 pub struct AgwCryptoError(pub String);
 impl warp::reject::Reject for AgwCryptoError {}
 
-/// Расшифровывает зашифрованный запрос. Если тело plain JSON, возвращает его как есть
-/// с пустым AES-контекстом.
+/// Decrypts an encrypted request. If the body is plain JSON, returns it as-is
+/// with an empty AES context.
 pub fn decrypt_request(
     private_key: &PKey<Private>,
     body: serde_json::Value,
@@ -60,7 +60,7 @@ pub fn decrypt_request(
         .get("aes_iv")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AgwCryptoError("aes_iv missing".to_string()))?;
-    // aes_salt передаётся клиентом, но не используется для вывода ключа.
+    // aes_salt is sent by the client but is not used for key derivation.
 
     let aes_key = base64::engine::general_purpose::STANDARD
         .decode(aes_key_b64)
@@ -75,7 +75,7 @@ pub fn decrypt_request(
     let aes_iv = base64::engine::general_purpose::STANDARD
         .decode(aes_iv_b64)
         .map_err(|e| AgwCryptoError(format!("aes_iv base64 decode failed: {e}")))?;
-    // Клиент передаёт 32 байта IV, но AES-256-CBC использует только первые 16.
+    // The client sends 32 bytes of IV, but AES-256-CBC only uses the first 16.
     let aes_iv: Vec<u8> = aes_iv.into_iter().take(16).collect();
     if aes_iv.len() != 16 {
         return Err(AgwCryptoError(format!(
@@ -103,14 +103,14 @@ pub fn decrypt_request(
     ))
 }
 
-/// Шифрует ответ тем же AES-256-CBC с PKCS#7 padding.
+/// Encrypts the response with the same AES-256-CBC using PKCS#7 padding.
 pub fn encrypt_response(ctx: &AesContext, plaintext: &[u8]) -> Result<Vec<u8>, AgwCryptoError> {
     aes_encrypt(Cipher::aes_256_cbc(), &ctx.key, Some(&ctx.iv), plaintext)
         .map_err(|e| AgwCryptoError(format!("AES encryption failed: {e}")))
 }
 
-/// Warp-фильтр: автоматически определяет зашифрованное тело и расшифровывает его.
-/// Если приватный ключ не настроен, а тело зашифровано — возвращает ошибку.
+/// Warp filter: automatically detects an encrypted body and decrypts it.
+/// Returns an error if the body is encrypted but no private key is configured.
 pub fn with_agw_decryption<T>(
     private_key: Option<Arc<PKey<Private>>>,
 ) -> impl Filter<Extract = (T, Option<AesContext>), Error = Rejection> + Clone
@@ -138,7 +138,7 @@ where
         .untuple_one()
 }
 
-/// Шифрует исходящий ответ, если был AES-контекст. Иначе возвращает ответ как есть.
+/// Encrypts the outgoing response if an AES context exists. Otherwise returns the response as-is.
 pub async fn encrypt_gateway_reply(
     response: warp::reply::Response,
     aes_ctx: Option<AesContext>,

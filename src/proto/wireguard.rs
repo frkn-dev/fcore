@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::peer::Peer;
@@ -150,14 +151,21 @@ impl WgApi {
         Err(Error::Custom("No available IPs in the subnet".into()))
     }
 
-    pub fn peer_stats(&self, pubkey: &str) -> Result<(i64, i64)> {
+    pub fn peer_stats(&self, pubkey: &str) -> Result<(i64, i64, Option<u64>)> {
         let data = self.client.read_interface_data()?;
         let key = Self::decode_pubkey(pubkey)?;
         let peer = data
             .peers
             .get(&key)
             .ok_or_else(|| Error::Custom(format!("Peer with pubkey {} not found", pubkey)))?;
-        Ok((peer.rx_bytes as i64, peer.tx_bytes as i64))
+
+        let last_handshake_ms = peer.last_handshake.and_then(|t| {
+            t.duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_millis() as u64)
+        });
+
+        Ok((peer.rx_bytes as i64, peer.tx_bytes as i64, last_handshake_ms))
     }
 
     pub fn is_exist(&self, pubkey: String) -> bool {

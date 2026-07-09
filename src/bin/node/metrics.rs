@@ -31,6 +31,20 @@ pub trait BusinessMetrics {
     async fn collect_awg_metrics(&self);
 }
 
+#[cfg(any(feature = "wireguard", feature = "amnezia-wg"))]
+/// Considers a peer online if the last handshake was no more than 3 minutes ago.
+fn peer_online_by_handshake(last_handshake_ms: Option<u64>) -> f64 {
+    const ONLINE_TIMEOUT_MS: i64 = 3 * 60 * 1000;
+    let Some(hs_ms) = last_handshake_ms else { return 0.0 };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let hs_ms = hs_ms as i64;
+    if now_ms >= hs_ms && (now_ms - hs_ms) <= ONLINE_TIMEOUT_MS {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 #[async_trait::async_trait]
 impl<C> BusinessMetrics for Node<C>
@@ -151,7 +165,7 @@ where
 
         for (conn_id, subscription_id, pubkey) in wg_conns {
             if let Ok(pubkey) = pubkey {
-                if let Ok((uplink, downlink)) = wg_client.peer_stats(&pubkey) {
+                if let Ok((uplink, downlink, last_handshake_ms)) = wg_client.peer_stats(&pubkey) {
                     let mut metric_tags = base_tags.clone();
                     metric_tags.insert("conn_id".to_string(), conn_id.to_string());
                     metric_tags.insert("proto".to_string(), "wireguard".to_string());
@@ -165,8 +179,18 @@ where
                         downlink as f64,
                         metric_tags.clone(),
                     );
-                    self.metrics
-                        .push(node_uuid, "user.traffic.uplink", uplink as f64, metric_tags);
+                    self.metrics.push(
+                        node_uuid,
+                        "user.traffic.uplink",
+                        uplink as f64,
+                        metric_tags.clone(),
+                    );
+                    self.metrics.push(
+                        node_uuid,
+                        "user.traffic.online",
+                        peer_online_by_handshake(last_handshake_ms),
+                        metric_tags,
+                    );
                 }
             }
         }
@@ -228,6 +252,12 @@ where
                 node_uuid,
                 "user.traffic.uplink",
                 stats.rx_bytes as f64,
+                metric_tags.clone(),
+            );
+            self.metrics.push(
+                node_uuid,
+                "user.traffic.online",
+                peer_online_by_handshake(stats.last_handshake.map(|ns| ns / 1_000_000)),
                 metric_tags,
             );
         }

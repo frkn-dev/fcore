@@ -54,7 +54,7 @@ where
     let ref_by = req.referred_by.clone().unwrap_or_else(|| "WEB".to_string());
     let sub_id = uuid::Uuid::new_v4();
 
-    // Проверяем, что реферальный код существует (если указан и это не системный код).
+    // Verify that the referral code exists (if provided and it is not a system code).
     if let Some(ref_by_code) = req.referred_by.clone() {
         let mem = memory.memory.read().await;
         if !system_refer_codes.iter().any(|c| c == &ref_by_code)

@@ -203,10 +203,10 @@ pub struct GatewayConfigResponse {
 }
 
 // ============================================================================
-// Хелперы
+// Helpers
 // ============================================================================
 
-/// Извлекает subscription_id из auth_data.
+/// Extracts subscription_id from auth_data.
 fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> {
     auth_data
         .get("id")
@@ -214,7 +214,7 @@ fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> 
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
-/// Проверяет, соответствует ли тег протоколу из запроса клиента.
+/// Checks whether the tag matches the protocol from the client request.
 fn proto_matches(tag: Tag, protocol: &str) -> bool {
     match protocol {
         "awg" => tag == Tag::AmneziaWg,
@@ -229,7 +229,7 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
     }
 }
 
-/// Возвращает человекочитаемое название инбаунда по тегу.
+/// Returns a human-readable inbound name for the given tag.
 fn inbound_label(tag: Tag) -> &'static str {
     match tag {
         Tag::VlessTcpReality => "VLESS TCP Reality",
@@ -245,8 +245,8 @@ fn inbound_label(tag: Tag) -> &'static str {
     }
 }
 
-/// Возвращает список connection'ов для заданного протокола.
-/// Для каждой онлайн-ноды с нужным инбаундом ищет matching connection подписки.
+/// Returns the list of connections for the given protocol.
+/// For each online node with the required inbound, finds a matching connection of the subscription.
 fn connections_for_protocol<N, C>(
     nodes: &N,
     protocol: &str,
@@ -271,7 +271,7 @@ where
                 if !proto_matches(tag, protocol) {
                     continue;
                 }
-                // connection можно сопоставить только с нодой, у которой есть точно такой же inbound
+                // A connection can only be matched with a node that has exactly the same inbound.
                 if !node.inbounds.values().any(|i| i.tag == tag) {
                     continue;
                 }
@@ -311,7 +311,7 @@ where
     result
 }
 
-/// Возвращает уникальный список стран из connection'ов (для available_countries).
+/// Returns a unique list of countries from the connections (for available_countries).
 fn available_countries_from_connections(conns: &[GatewayConnection]) -> Vec<GatewayCountry> {
     let mut seen = std::collections::HashSet::new();
     let mut countries = Vec::new();
@@ -328,7 +328,7 @@ fn available_countries_from_connections(conns: &[GatewayConnection]) -> Vec<Gate
     countries
 }
 
-/// Строит Amnezia server config для AWG.
+/// Builds the Amnezia server config for AWG.
 fn build_awg_server_config(
     ini_config: &str,
     client_priv_key: &str,
@@ -411,7 +411,7 @@ fn build_awg_server_config(
     })
 }
 
-/// Строит Amnezia server config для VLESS/XRay из реального inbound.
+/// Builds the Amnezia server config for VLESS/XRay from the real inbound.
 fn build_vless_server_config(
     inbound: &fcore::Inbound,
     conn_id: &uuid::Uuid,
@@ -662,7 +662,7 @@ fn build_vless_server_config(
 }
 
 // ============================================================================
-// Обработчики
+// Handlers
 // ============================================================================
 
 pub async fn gateway_services_handler<N, C, S>(
@@ -684,7 +684,7 @@ where
 {
     let mem = memory.memory.read().await;
 
-    // Если передан subscription_id, берём реальный end_date из подписки и её connections
+    // If subscription_id is provided, use the real subscription end_date and its connections.
     let sub_id = req.auth_data.as_ref().and_then(extract_subscription_id);
     let end_date = sub_id
         .and_then(|sub_id| mem.subscriptions.find_by_id(&sub_id))
@@ -798,7 +798,7 @@ where
     let conns = mem.connections.get_by_subscription_id(&sub_id);
     let active_devices = conns.as_ref().map(|c| c.len() as i64).unwrap_or(0);
 
-    // Собираем issued_configs из реальных connections
+    // Build issued_configs from real connections.
     let issued_configs: Vec<GatewayIssuedConfig> = conns
         .unwrap_or_default()
         .into_iter()
@@ -940,7 +940,7 @@ where
                     continue;
                 }
 
-                // Нода должна иметь точно такой же inbound, как у connection
+                // The node must have exactly the same inbound as the connection.
                 let has_inbound = node.inbounds.values().any(|i| i.tag == conn_tag);
                 if !has_inbound {
                     continue;

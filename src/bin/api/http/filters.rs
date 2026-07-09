@@ -70,8 +70,8 @@ pub fn with_email_store(
     warp::any().map(move || email_store.clone())
 }
 
-/// Аутентификация либо service token, либо admin token.
-/// Используется для management endpoint'ов, которые админка использует с admin token.
+/// Authentication using either a service token or an admin token.
+/// Used for management endpoints that the admin panel calls with an admin token.
 pub fn with_service_or_admin_auth(
     service_token: Arc<String>,
     admin_token: String,
@@ -94,7 +94,7 @@ pub fn with_service_or_admin_auth(
         .untuple_one()
 }
 
-/// Аутентификация премиум-пользователя по Bearer-токену (premium_token).
+/// Premium user authentication via Bearer token (premium_token).
 pub fn with_premium_auth<T, C, S>(
     mem_sync: MemSync<T, C, S>,
 ) -> impl Filter<Extract = (S,), Error = warp::Rejection> + Clone

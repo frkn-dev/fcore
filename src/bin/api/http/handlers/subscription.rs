@@ -187,7 +187,7 @@ where
         .refer_code
         .unwrap_or_else(|| get_uuid_last_octet_simple(&sub_id));
 
-    // Проверяем, что реферальный код существует (если указан и это не системный код).
+    // Verify that the referral code exists (if provided and it is not a system code).
     if let Some(ref_by) = req.referred_by.clone() {
         let mem = memory.memory.read().await;
         if !system_refer_codes.iter().any(|c| c == &ref_by)
