@@ -1,4 +1,4 @@
-use tracing::error;
+use tracing::{error, Instrument};
 
 use fcore::{
     http::{helpers as http, response::Instance},
@@ -7,6 +7,7 @@ use fcore::{
 };
 
 use super::super::{
+    super::subscription_audit,
     super::sync::{tasks::SyncOp, MemSync},
     param::KeyQueryParams,
     request::{ActivateKeyReq, KeyReq},
@@ -105,6 +106,7 @@ where
 /// Post activate key
 pub async fn post_activate_key_handler<N, C, S>(
     req: ActivateKeyReq,
+    trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -120,6 +122,7 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + From<Subscription> + PartialEq,
     Connection: From<C>,
 {
+    let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     let key_db = memory.db.key();
 
     let mut key = match key_db.get(&req.code).await {
@@ -131,7 +134,20 @@ where
         return Ok(http::bad_request("Key already activated"));
     }
 
-    match SyncOp::add_days(&memory, &req.subscription_id, key.days as i64).await {
+    subscription_audit::log_transaction_start(req.subscription_id, Some(key.days as i64));
+
+    match SyncOp::add_days(
+        &memory,
+        &req.subscription_id,
+        key.days as i64,
+    )
+    .instrument(subscription_audit::transaction_span(
+        "key_activate_handler",
+        req.subscription_id,
+        Some(trace_id),
+    ))
+    .await
+    {
         Ok(Status::Updated(_)) => {
             key.activate(&req.subscription_id);
             if let Err(err) = key_db.activate(&key).await {

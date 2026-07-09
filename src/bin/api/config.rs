@@ -11,6 +11,7 @@ pub struct ServiceSettings {
     pub metrics: MetricsRxConfig,
     pub tasks: TasksConfig,
     pub smtp: SmtpConfig,
+    pub subscription_audit: SubscriptionAuditConfig,
 }
 
 impl Settings for ServiceSettings {
@@ -123,6 +124,28 @@ impl Default for MetricsLogConfig {
             file: "metrics.log".to_string(),
             rotation: "daily".to_string(),
             level: "debug".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct SubscriptionAuditConfig {
+    pub enabled: bool,
+    pub directory: String,
+    pub file: String,
+    pub rotation: String,
+    pub level: String,
+}
+
+impl Default for SubscriptionAuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            directory: "logs".to_string(),
+            file: "subscription_audit.log".to_string(),
+            rotation: "daily".to_string(),
+            level: "info".to_string(),
         }
     }
 }

@@ -1,9 +1,16 @@
 listen: :443
 
+# Option 1: automatic certificates via ACME
 acme:
     domains:
         - api.example.org
     email: admin@example.com
+
+# Option 2: provide your own certificate
+# tls:
+#     cert: /path/to/cert.pem
+#     key: /path/to/key.pem
+# host: api.example.org   # required when ACME is not used
 
 auth:
     type: http

@@ -14,6 +14,7 @@ use fcore::{
 use super::{
     postgres::{connection::ConnWatermark, pg::Tasks as MemoryCacheTasks},
     service::{Cache, Service},
+    subscription_audit,
     sync::tasks::SyncOp,
     traffic,
 };
@@ -90,9 +91,20 @@ where
             };
 
             for (conn_id, conn) in expired_conns {
-                match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into()).await {
+                let expires_at = conn.get_expires_at();
+                let subscription_id = conn.get_subscription_id();
+
+                match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into(),
+                )
+                .await
+                {
                     Ok(Status::Ok(_)) => {
                         info!("Expired connection {} deleted", conn_id);
+                        subscription_audit::log_connection_expired(
+                            conn_id,
+                            expires_at,
+                            subscription_id,
+                        );
                     }
                     Ok(status) => {
                         warn!("Connection {} could not be deleted: {:?}", conn_id, status);
@@ -121,9 +133,17 @@ where
             };
 
             for sub_id in expired_subs {
-                let conns_to_delete: Vec<(uuid::Uuid, Connection)> = {
+                let (expires_at, conns_to_delete): (
+                    Option<chrono::DateTime<Utc>>,
+                    Vec<(uuid::Uuid, Connection)>,
+                ) = {
                     let mem = self.sync.memory.read().await;
-                    mem.connections
+                    let expires_at = mem
+                        .subscriptions
+                        .find_by_id(&sub_id)
+                        .and_then(|s| s.expires_at());
+                    let conns = mem
+                        .connections
                         .get_by_subscription_id(&sub_id)
                         .map(|conns| {
                             conns
@@ -132,11 +152,17 @@ where
                                 .map(|(id, c)| (*id, c.clone()))
                                 .collect()
                         })
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    (expires_at, conns)
                 };
 
+                let connections_count = conns_to_delete.len();
+
                 for (conn_id, conn) in conns_to_delete {
-                    match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into()).await {
+                    match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into(),
+                    )
+                    .await
+                    {
                         Ok(Status::Ok(_)) => {
                             info!("Expired connection {} deleted", conn_id);
                         }
@@ -151,6 +177,12 @@ where
                         }
                     }
                 }
+
+                subscription_audit::log_subscription_expired(
+                    sub_id,
+                    expires_at,
+                    connections_count,
+                );
             }
         }
     }

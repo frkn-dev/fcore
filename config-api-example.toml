@@ -47,6 +47,13 @@ subscription_expire_interval = 600
 traffic_persist_interval_sec = 3600
 connection_expire_interval = 600
 
+[subscription_audit]
+enabled = true
+directory = "logs/"
+file = "subscription_audit.log"
+rotation = "daily"
+level = "info"
+
 [pg]
 host = "localhost"
 port = 5432

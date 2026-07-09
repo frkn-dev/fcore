@@ -66,7 +66,12 @@ where
 
         let mut cors_builder = warp::cors()
             .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-            .allow_headers(vec!["Content-Type", "Authorization", "X-Requested-With"])
+            .allow_headers(vec![
+                "Content-Type",
+                "Authorization",
+                "X-Requested-With",
+                "X-Trace-Id",
+            ])
             .allow_credentials(true)
             .max_age(86400);
 
@@ -273,6 +278,7 @@ where
             .and(warp::path::end())
             .and(with_premium_auth(self.sync.clone()))
             .and(warp::body::json())
+            .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
             .and_then(premium_create_child_handler);
 
@@ -283,6 +289,7 @@ where
             .and(warp::path::param::<Uuid>())
             .and(warp::path::end())
             .and(warp::body::json())
+            .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
             .and_then(premium_update_child_handler);
 
@@ -344,6 +351,7 @@ where
             .and(warp::path::end())
             .and(mgmt_auth.clone())
             .and(warp::body::json())
+            .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
             .and(with_param_vec_string(params.system_refer_codes.clone()))
             .and_then(post_subscription_handler);
@@ -354,6 +362,7 @@ where
             .and(mgmt_auth.clone())
             .and(warp::query::<SubIdQueryParam>())
             .and(warp::body::json())
+            .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
             .and_then(put_subscription_handler);
 
@@ -435,6 +444,7 @@ where
             .and(warp::path("activate"))
             .and(warp::path::end())
             .and(warp::body::json())
+            .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
             .and_then(post_activate_key_handler);
 
@@ -443,6 +453,7 @@ where
             .and(warp::path("trial"))
             .and(warp::path::end())
             .and(warp::body::json())
+            .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
             .and(with_email_store(self.email_store.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))

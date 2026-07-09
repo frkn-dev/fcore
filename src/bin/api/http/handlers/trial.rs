@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use tracing::Instrument;
 use std::net::{IpAddr, Ipv4Addr};
 
 use fcore::{
@@ -8,12 +9,16 @@ use fcore::{
     SubscriptionStorageOperations, Tag, Topic, WgKeys, WgParam,
 };
 
-use super::super::super::email::EmailStore;
-use super::super::super::sync::{tasks::SyncOp, MemSync};
+use super::super::super::{
+    email::EmailStore,
+    subscription_audit,
+    sync::{tasks::SyncOp, MemSync},
+};
 use super::super::request;
 
 pub async fn post_trial_handler<N, C, S>(
     req: request::Trial,
+    trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
     store: EmailStore,
     wireguard_network: IpAddrMask,
@@ -37,6 +42,7 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     req.validate()?;
 
     if let Some(ref user) = req.user {
@@ -77,7 +83,16 @@ where
         Some(limit_bytes),
     );
 
-    let new_sub_id = match SyncOp::add_sub(&memory, sub.clone()).await {
+    subscription_audit::log_transaction_start(sub_id, Some(trial_days));
+
+    let new_sub_id = match SyncOp::add_sub(&memory, sub.clone())
+        .instrument(subscription_audit::transaction_span(
+            "post_trial_handler",
+            sub_id,
+            Some(trace_id),
+        ))
+        .await
+    {
         Ok(Status::Ok(id)) => id,
         _ => return Ok(http::internal_error("Failed to add sub")),
     };

@@ -4,7 +4,10 @@ use tokio::sync::Mutex;
 
 use fcore::{Env, Result, Subscription};
 
-use super::pg::PgClientManager;
+use super::{
+    super::subscription_audit,
+    pg::PgClientManager,
+};
 
 pub struct PgSubscription {
     pub manager: Arc<Mutex<PgClientManager>>,
@@ -59,6 +62,15 @@ impl PgSubscription {
             )
             .await?;
 
+        subscription_audit::log_days_change(
+            "db_created",
+            new_sub.id,
+            None,
+            new_sub.expires_at,
+            None,
+            "PgSubscription::create",
+        );
+
         Ok(Subscription::from(row))
     }
 
@@ -105,6 +117,15 @@ impl PgSubscription {
             )
             .await?;
 
+        subscription_audit::log_days_change(
+            "db_updated",
+            id,
+            None,
+            Some(expires_at),
+            None,
+            "PgSubscription::update_subscription",
+        );
+
         Ok(Subscription::from(row))
     }
 
@@ -142,6 +163,15 @@ impl PgSubscription {
                 &[&new_expires_at, &now, sub_id],
             )
             .await?;
+
+        subscription_audit::log_days_change(
+            "db_days_added",
+            *sub_id,
+            current_expires_at,
+            Some(new_expires_at),
+            Some(days),
+            "PgSubscription::add_days",
+        );
 
         Ok(Subscription::from(updated_row))
     }

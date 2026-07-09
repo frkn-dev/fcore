@@ -1,11 +1,15 @@
 use chrono::{DateTime, Utc};
+use tracing::Instrument;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use uuid::Uuid;
 use warp::{http::StatusCode, Rejection, Reply};
 
-use super::super::super::sync::{tasks::SyncOp, MemSync};
+use super::super::super::{
+    subscription_audit,
+    sync::{tasks::SyncOp, MemSync},
+};
 use super::admin::AdminSubscriptionTraffic;
 use super::subscription::build_subscription_traffic;
 
@@ -169,6 +173,7 @@ where
 pub async fn premium_create_child_handler<N, C, S>(
     parent: S,
     req: PremiumChildCreateRequest,
+    trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
 ) -> Result<impl Reply, Rejection>
 where
@@ -184,6 +189,7 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     let sub_id = Uuid::new_v4();
     let ref_code = fcore::utils::get_uuid_last_octet_simple(&sub_id);
     let expires_at = req.days.map(|d| Utc::now() + chrono::Duration::days(d));
@@ -191,7 +197,16 @@ where
     let mut sub = Subscription::new(sub_id, None, ref_code, expires_at, req.limit_bytes);
     sub.set_parent_id(parent.id());
 
-    match SyncOp::add_sub(&memory, sub).await {
+    subscription_audit::log_transaction_start(sub_id, req.days);
+
+    match SyncOp::add_sub(&memory, sub)
+        .instrument(subscription_audit::transaction_span(
+            "premium_create_child_handler",
+            sub_id,
+            Some(trace_id),
+        ))
+        .await
+    {
         Ok(_) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({ "id": sub_id })),
             StatusCode::CREATED,
@@ -207,6 +222,7 @@ pub async fn premium_update_child_handler<N, C, S>(
     parent: S,
     child_id: Uuid,
     req: PremiumChildUpdateRequest,
+    trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
 ) -> Result<impl Reply, Rejection>
 where
@@ -222,6 +238,7 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     {
         let mem = memory.memory.read().await;
         let child = mem.subscriptions.find_by_id(&child_id).ok_or_else(|| {
@@ -237,7 +254,20 @@ where
         limit_bytes: req.limit_bytes,
     };
 
-    match SyncOp::update_sub(&memory, &child_id, update_req).await {
+    subscription_audit::log_transaction_start(child_id, req.days);
+
+    match SyncOp::update_sub(
+        &memory,
+        &child_id,
+        update_req,
+    )
+    .instrument(subscription_audit::transaction_span(
+        "premium_update_child_handler",
+        child_id,
+        Some(trace_id),
+    ))
+    .await
+    {
         Ok(_) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({ "id": child_id })),
             StatusCode::OK,

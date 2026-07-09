@@ -8,9 +8,19 @@ use std::io::Read;
 pub struct Hysteria2Settings {
     pub listen: Option<String>,
     pub acme: Option<AcmeConfig>,
+    pub tls: Option<TlsConfig>,
     pub auth: Option<AuthConfig>,
     pub obfs: Option<HysteriaObfs>,
     pub masquerade: Option<Masquerade>,
+    /// Explicit hostname used for client URLs when ACME is not configured.
+    /// If ACME is present the first domain from acme.domains takes precedence.
+    pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    pub cert: String,
+    pub key: String,
 }
 
 impl Hysteria2Settings {
@@ -88,6 +98,25 @@ impl Hysteria2Settings {
             .as_ref()
             .ok_or_else(|| Error::Custom("Hysteria2: auth section is required".into()))?;
 
+        let has_acme = self
+            .acme
+            .as_ref()
+            .map(|a| a.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false))
+            .unwrap_or(false);
+        let has_tls = self.tls.is_some();
+
+        if !has_acme && !has_tls {
+            return Err(Error::Custom(
+                "Hysteria2: either acme.domains or tls section is required".into(),
+            ));
+        }
+
+        if !has_acme && self.host.is_none() {
+            return Err(Error::Custom(
+                "Hysteria2: host is required when acme is not used".into(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -113,7 +142,8 @@ impl TryFrom<Hysteria2Settings> for H2Settings {
             .and_then(|a| a.domains.as_ref())
             .and_then(|d| d.first())
             .cloned()
-            .ok_or_else(|| Error::Custom("Hysteria2: acme.domains missing".into()))?;
+            .or(server.host)
+            .ok_or_else(|| Error::Custom("Hysteria2: acme.domains or host is required".into()))?;
 
         let auth_info = server.auth.map(|a| H2AuthInfo {
             auth_type: a.r#type.unwrap_or_else(|| "unknown".into()),

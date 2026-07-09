@@ -8,7 +8,11 @@ use fcore::{
     SubscriptionStorageOperations, SyncError, Topic,
 };
 
-use super::super::{http::request::Subscription as SubReq, postgres::connection::ConnRow};
+use super::super::{
+    http::request::Subscription as SubReq,
+    postgres::connection::ConnRow,
+    subscription_audit,
+};
 use super::MemSync;
 
 type SyncResult<T> = std::result::Result<T, SyncError>;
@@ -170,6 +174,15 @@ where
 
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status> {
         info!("Adding subscription: {}", sub.id);
+
+        subscription_audit::log_days_change(
+            "created",
+            sub.id,
+            None,
+            sub.expires_at(),
+            None,
+            "SyncOp::add_sub",
+        );
 
         // Insert into database
         if let Err(e) = self.db.sub().create(&sub).await {
@@ -499,6 +512,11 @@ where
     async fn update_sub(&self, sub_id: &uuid::Uuid, req: SubReq) -> SyncResult<Status> {
         info!("Updating subscription: {}", sub_id);
 
+        let old_expires_at = {
+            let mem = self.memory.read().await;
+            mem.subscriptions.get(sub_id).and_then(|s| s.expires_at())
+        };
+
         {
             let mut memory = self.memory.write().await;
 
@@ -532,6 +550,15 @@ where
                     resource: "Subscription".to_string(),
                     id: *sub_id,
                 })?;
+
+            subscription_audit::log_days_change(
+                "updated",
+                *sub_id,
+                old_expires_at,
+                Some(expires_at),
+                req.days,
+                "SyncOp::update_sub",
+            );
 
             if let Err(e) = self
                 .db
@@ -572,15 +599,16 @@ where
     async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {
         let sub_db = self.db.sub();
 
-        let was_inactive = {
+        let (was_inactive, old_expires_at) = {
             let mem = self.memory.read().await;
-            mem.subscriptions
-                .get(sub_id)
-                .map(|s| !s.is_active())
-                .unwrap_or(false)
+            let sub = mem.subscriptions.get(sub_id);
+            (
+                sub.map(|s| !s.is_active()).unwrap_or(false),
+                sub.and_then(|s| s.expires_at()),
+            )
         };
 
-        {
+        let new_expires_at = {
             let mut mem = self.memory.write().await;
 
             let sub = match mem.subscriptions.find_by_id_mut(sub_id) {
@@ -598,7 +626,17 @@ where
                 _ => now + Duration::days(days),
             };
             let _ = sub.set_expires_at(new_expires);
-        }
+            Some(new_expires)
+        };
+
+        subscription_audit::log_days_change(
+            "days_added",
+            *sub_id,
+            old_expires_at,
+            new_expires_at,
+            Some(days),
+            "SyncOp::add_days_inner",
+        );
 
         match sub_db.add_days(sub_id, days).await {
             Ok(sub) => {
@@ -669,6 +707,16 @@ where
         };
 
         if let Some(referrer_id) = referrer_id {
+            let (old_referrer_expires, old_invited_expires) = {
+                let mem = self.memory.read().await;
+                (
+                    mem.subscriptions
+                        .find_by_id(&referrer_id)
+                        .and_then(|s| s.expires_at()),
+                    mem.subscriptions.find_by_id(b_sub_id).and_then(|s| s.expires_at()),
+                )
+            };
+
             if let Err(e) = self.add_days_inner(&referrer_id, bonus_days).await {
                 error!(
                     "Failed to add referral bonus days to referrer {}: {:?}",
@@ -683,6 +731,16 @@ where
                 );
                 return Err(e);
             }
+
+            let (new_referrer_expires, new_invited_expires) = {
+                let mem = self.memory.read().await;
+                (
+                    mem.subscriptions
+                        .find_by_id(&referrer_id)
+                        .and_then(|s| s.expires_at()),
+                    mem.subscriptions.find_by_id(b_sub_id).and_then(|s| s.expires_at()),
+                )
+            };
 
             {
                 let mut mem = self.memory.write().await;
@@ -703,6 +761,17 @@ where
                 );
                 return Err(SyncError::Database(e));
             }
+
+            subscription_audit::log_referral_bonus(
+                *b_sub_id,
+                referrer_id,
+                paid_days,
+                bonus_days,
+                old_invited_expires,
+                new_invited_expires,
+                old_referrer_expires,
+                new_referrer_expires,
+            );
 
             info!(
                 "Referral bonus awarded: referrer {} and invited {} got {} days (paid {} days)",

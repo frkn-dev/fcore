@@ -1,7 +1,6 @@
 use openssl::pkey::PKey;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing_subscriber::Layer;
 
 use fcore::{
     utils::level_from_settings, utils::measure_time, Connection, ConnectionApiOperations,
@@ -137,16 +136,23 @@ fn parse_level(level: &str) -> Option<tracing::Level> {
 }
 
 pub fn init_tracing(settings: ServiceSettings) {
+    use tracing_subscriber::Layer;
+
     let level = level_from_settings(&settings.service.log_level);
 
-    let stdout_layer = fmt::layer()
-        .with_target(true)
-        .with_filter(level)
-        .with_filter(filter_fn(|metadata| {
-            !metadata.target().starts_with("metrics") && !metadata.target().starts_with("sqlx")
-        }));
+    let stdout_layer: Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync> = Box::new(
+        fmt::layer()
+            .with_target(true)
+            .with_filter(level)
+            .with_filter(filter_fn(|metadata| {
+                !metadata.target().starts_with("metrics")
+                    && !metadata.target().starts_with("subscription.audit")
+                    && !metadata.target().starts_with("sqlx")
+            })),
+    );
 
-    let registry = tracing_subscriber::registry().with(stdout_layer);
+    let mut layers: Vec<Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync>> =
+        vec![stdout_layer];
 
     if settings.metrics.log.enabled {
         let log_directory = settings.metrics.log.directory;
@@ -157,20 +163,42 @@ pub fn init_tracing(settings: ServiceSettings) {
 
         let metrics_file = RollingFileAppender::new(rotation, log_directory, log_file);
 
-        let metrics_layer = fmt::layer()
-            .with_ansi(false)
-            .with_target(true)
-            .with_writer(metrics_file)
-            .with_filter(
-                Targets::new()
-                    .with_target("metrics", metrics_level)
-                    .with_target("metrics.ingest", metrics_level)
-                    .with_target("metrics.gc", metrics_level)
-                    .with_target("metrics.heartbeat", metrics_level),
-            );
+        let metrics_layer: Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync> = Box::new(
+            fmt::layer()
+                .with_ansi(false)
+                .with_target(true)
+                .with_writer(metrics_file)
+                .with_filter(
+                    Targets::new()
+                        .with_target("metrics", metrics_level)
+                        .with_target("metrics.ingest", metrics_level)
+                        .with_target("metrics.gc", metrics_level)
+                        .with_target("metrics.heartbeat", metrics_level),
+                ),
+        );
 
-        registry.with(metrics_layer).init();
-    } else {
-        registry.init();
+        layers.push(metrics_layer);
     }
+
+    if settings.subscription_audit.enabled {
+        let log_directory = settings.subscription_audit.directory;
+        let log_file = settings.subscription_audit.file;
+        let rotation = parse_rotation(&settings.subscription_audit.rotation);
+        let audit_level = parse_level(&settings.subscription_audit.level)
+            .unwrap_or(tracing::Level::INFO);
+
+        let audit_file = RollingFileAppender::new(rotation, log_directory, log_file);
+
+        let audit_layer: Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync> = Box::new(
+            fmt::layer()
+                .with_ansi(false)
+                .with_target(true)
+                .with_writer(audit_file)
+                .with_filter(Targets::new().with_target("subscription.audit", audit_level)),
+        );
+
+        layers.push(audit_layer);
+    }
+
+    tracing_subscriber::registry().with(layers).init();
 }

@@ -1,5 +1,6 @@
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use tracing::Instrument;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,7 +22,10 @@ use fcore::{
     SubscriptionOperations, SubscriptionStorageOperations, Tag,
 };
 
-use super::super::super::sync::{tasks::SyncOp, MemSync};
+use super::super::super::{
+    subscription_audit,
+    sync::{tasks::SyncOp, MemSync},
+};
 use super::super::{
     param::SubIdQueryParam,
     request::EnvFilter,
@@ -165,6 +169,7 @@ pub(crate) async fn build_subscription_traffic(
 // POST /subscription
 pub async fn post_subscription_handler<N, C, S>(
     req: SubReq,
+    trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
     system_refer_codes: Vec<String>,
 ) -> Result<impl warp::Reply, warp::Rejection>
@@ -181,6 +186,7 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     let sub_id = uuid::Uuid::new_v4();
 
     let ref_code = req
@@ -209,7 +215,16 @@ where
         req.limit_bytes,
     );
 
-    match SyncOp::add_sub(&memory, sub.clone()).await {
+    subscription_audit::log_transaction_start(sub_id, req.days);
+
+    match SyncOp::add_sub(&memory, sub.clone())
+        .instrument(subscription_audit::transaction_span(
+            "create_subscription_handler",
+            sub_id,
+            Some(trace_id),
+        ))
+        .await
+    {
         Ok(Status::Ok(id)) => Ok(http::success_response(
             format!("Subscription {} has been created", id),
             Some(sub_id),
@@ -236,6 +251,7 @@ where
 pub async fn put_subscription_handler<N, C, S>(
     sub_param: SubIdQueryParam,
     req: SubReq,
+    trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -251,9 +267,23 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     let sub_id = sub_param.id;
 
-    match SyncOp::update_sub(&memory, &sub_id, req).await {
+    subscription_audit::log_transaction_start(sub_id, req.days);
+
+    match SyncOp::update_sub(
+        &memory,
+        &sub_id,
+        req,
+    )
+    .instrument(subscription_audit::transaction_span(
+        "put_subscription_handler",
+        sub_id,
+        Some(trace_id),
+    ))
+    .await
+    {
         Ok(Status::Updated(id)) => Ok(http::success_response(
             format!("Subscription {} has been updated", id),
             Some(sub_id),

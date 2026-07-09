@@ -17,6 +17,7 @@ mod metrics;
 mod postgres;
 mod runtime;
 mod service;
+mod subscription_audit;
 mod sync;
 mod tasks;
 mod traffic;
