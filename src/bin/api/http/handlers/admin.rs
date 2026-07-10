@@ -126,18 +126,18 @@ pub struct AdminConnection {
     pub online: u64,
 }
 
-fn unauthorized() -> Box<dyn warp::Reply + Send> {
+pub fn unauthorized() -> Box<dyn warp::Reply + Send> {
     Box::new(warp::reply::with_status(
         "Unauthorized",
         StatusCode::UNAUTHORIZED,
     ))
 }
 
-fn not_found() -> Box<dyn warp::Reply + Send> {
+pub fn not_found() -> Box<dyn warp::Reply + Send> {
     Box::new(warp::reply::with_status("Not found", StatusCode::NOT_FOUND))
 }
 
-fn check_token(header: Option<String>, token: &str) -> bool {
+pub fn check_token(header: Option<String>, token: &str) -> bool {
     header.is_some_and(|h| h == format!("Bearer {}", token))
 }
 

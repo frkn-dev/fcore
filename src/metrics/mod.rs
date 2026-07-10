@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 pub(crate) mod impls;
 pub(crate) mod snapshot;
 pub(crate) mod storage;
+pub(crate) mod web_storage;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Clone, Debug)]
 pub struct MetricPoint {

@@ -130,6 +130,31 @@
     </div>
     <div id="subscriptions"></div>
   </section>
+  <section>
+    <h2>Web Analytics</h2>
+    <div class="form-inline">
+      <div class="form-row">
+        <label>Range
+          <select id="web-range" onchange="loadWebMetrics()">
+            <option value="3600000">Last hour</option>
+            <option value="86400000" selected>Last 24h</option>
+            <option value="604800000">Last 7 days</option>
+            <option value="2592000000">Last 30 days</option>
+          </select>
+        </label>
+        <button class="btn btn-primary" onclick="loadWebMetrics()">Refresh</button>
+      </div>
+    </div>
+    <div class="grid" id="web-summary"></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;margin-bottom:1.5rem">
+      <div class="card"><h5>Visits timeline</h5><canvas id="chart-web-timeline" height="120"></canvas></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem">
+      <div class="card"><h5>Top pages</h5><table class="small" id="web-top-pages"></table></div>
+      <div class="card"><h5>Countries</h5><table class="small" id="web-top-countries"></table></div>
+      <div class="card"><h5>Referrers</h5><table class="small" id="web-top-referers"></table></div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -657,16 +682,53 @@
     localStorage.setItem('fc_admin_token', token);
     setStatus('loading...');
     try {
-      const [state, nodes, subscriptions] = await Promise.all([
+      const [state, nodes, subscriptions, web] = await Promise.all([
         api('/admin/api/state'),
         loadNodes(),
-        loadSubscriptions()
+        loadSubscriptions(),
+        loadWebMetrics()
       ]);
       renderState(state);
       setStatus('ok — ' + new Date().toLocaleTimeString());
     } catch (e) {
       if (e.message !== 'unauthorized') setStatus('error: ' + e.message, true);
     }
+  }
+
+  async function loadWebMetrics() {
+    const range = parseInt($('web-range').value, 10);
+    const to = Date.now();
+    const from = to - range;
+    try {
+      const data = await api(`/admin/api/web/metrics?from=${from}&to=${to}`);
+      renderWebMetrics(data);
+      drawChart('chart-web-timeline', data.timeline, 'Visits', '#1a1a2e');
+      return data;
+    } catch (e) {
+      setStatus('Web metrics failed: ' + e.message, true);
+    }
+  }
+
+  function renderWebMetrics(data) {
+    $('web-summary').innerHTML = `
+      <div class="card"><h3>Total visits</h3><div class="value">${Math.round(data.total_visits || 0).toLocaleString()}</div></div>
+    `;
+
+    $('web-top-pages').innerHTML = renderTopTable(data.visits_by_page);
+    $('web-top-countries').innerHTML = renderTopTable(data.visits_by_country);
+    $('web-top-referers').innerHTML = renderTopTable(data.visits_by_referer);
+  }
+
+  function renderTopTable(items) {
+    if (!items || !items.length) return '<tr><td>No data</td></tr>';
+    return '<tr><th>Label</th><th>Visits</th></tr>' +
+      items.map(i => `<tr><td>${escapeHtml(i.label)}</td><td>${Math.round(i.value).toLocaleString()}</td></tr>`).join('');
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   loadAll();

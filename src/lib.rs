@@ -74,6 +74,7 @@ pub use memory::{
 
 pub use metrics::{
     storage::{HasMetrics, MetricBuffer, MetricStorage},
+    web_storage::{WebMetricSample, WebMetricStorage},
     MetricEnvelope, MetricPoint, Metrics,
 };
 #[cfg(feature = "amnezia-wg")]

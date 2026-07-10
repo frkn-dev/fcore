@@ -15,7 +15,7 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*,
-        node::*, premium::*, subscription::*, trial::*,
+        node::*, premium::*, subscription::*, trial::*, web_metrics::*,
     },
     param::*,
     rejection,
@@ -245,6 +245,36 @@ where
             .and(warp::header::optional::<String>("authorization"))
             .and_then(admin_api_assign_premium_handler);
 
+        let web_metrics_ingest_route = warp::post()
+            .and(warp::path("metrics"))
+            .and(warp::path("web"))
+            .and(warp::path("ingest"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<WebMetricsIngestRequest>())
+            .and(with_web_metrics(self.web_metrics.clone()))
+            .and_then(ingest_web_metrics);
+
+        let admin_api_web_metrics_route = warp::get()
+            .and(warp::path!("admin" / "api" / "web" / "metrics"))
+            .and(warp::path::end())
+            .and(warp::query::<WebMetricsQuery>())
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_web_metrics(self.web_metrics.clone()))
+            .and_then(admin_api_web_metrics_handler);
+
+        let admin_api_web_metrics_timeline_route = warp::get()
+            .and(warp::path!("admin" / "api" / "web" / "metrics" / "timeline"))
+            .and(warp::path::end())
+            .and(warp::query::<WebMetricsTimelineQuery>())
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_web_metrics(self.web_metrics.clone()))
+            .and_then(admin_api_web_metrics_timeline_handler);
+
         let admin_routes = admin_page_route
             .or(admin_api_state_route)
             .or(admin_api_nodes_route)
@@ -252,7 +282,9 @@ where
             .or(admin_api_subscriptions_route)
             .or(admin_api_subscription_connections_route)
             .or(admin_api_connections_route)
-            .or(admin_api_assign_premium_route);
+            .or(admin_api_assign_premium_route)
+            .or(admin_api_web_metrics_route)
+            .or(admin_api_web_metrics_timeline_route);
 
         // Premium routes
         let premium_state_route = warp::get()
@@ -568,6 +600,7 @@ where
             .or(premium_routes)
             // Metrics
             .or(ws_route)
+            .or(web_metrics_ingest_route)
             .recover(rejection)
             .with(cors);
 

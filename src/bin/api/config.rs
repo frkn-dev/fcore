@@ -158,6 +158,25 @@ pub struct MetricsRxConfig {
     #[serde(default)]
     pub log: MetricsLogConfig,
     pub snapshot_path: String,
+    #[serde(default)]
+    pub web: WebMetricsConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct WebMetricsConfig {
+    pub max_points: usize,
+    pub retention_seconds: i64,
+    pub snapshot_path: String,
+}
+
+impl Default for WebMetricsConfig {
+    fn default() -> Self {
+        Self {
+            max_points: 10000,
+            retention_seconds: 604800,
+            snapshot_path: "snapshots/web_metrics.bin".to_string(),
+        }
+    }
 }
 
 fn default_traffic_persist_interval_sec() -> u64 {

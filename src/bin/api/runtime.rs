@@ -91,6 +91,46 @@ where
             }
         });
 
+        spawn_task("web_metric_storage_gc", {
+            let web_metrics_storage = Arc::clone(&self.web_metrics);
+
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+
+                loop {
+                    interval.tick().await;
+
+                    let storage = Arc::clone(&web_metrics_storage);
+                    tokio::task::spawn_blocking(move || {
+                        debug!("Starting WebMetricStorage GC...");
+                        storage.perform_gc();
+                        debug!("WebMetricStorage GC finished.");
+                    });
+                }
+            }
+        });
+
+        spawn_task("web_metric_storage_snapshot", {
+            let web_metrics_storage = Arc::clone(&self.web_metrics);
+            let snapshot_path = self.settings.metrics.web.snapshot_path.clone();
+
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+
+                loop {
+                    interval.tick().await;
+
+                    debug!("Starting WebMetricStorage Snapshot");
+
+                    if let Err(err) = web_metrics_storage.save_snapshot(&snapshot_path).await {
+                        error!("Web metrics snapshot save failed: {}", err);
+                    }
+
+                    debug!("WebMetricStorage Snapshot finished");
+                }
+            }
+        });
+
         spawn_task("monitor_node_heartbeats", {
             let service = Arc::clone(&self);
 
@@ -176,7 +216,7 @@ where
                         Ok(())
                     }
                     _ = tokio::signal::ctrl_c() => {
-            info!("Saving metrics snapshot...");
+            info!("Saving metrics snapshots...");
 
             if let Err(err) =
                 self.metrics
@@ -184,6 +224,14 @@ where
                     .await
             {
                 error!("Failed to save snapshot: {}", err);
+            }
+
+            if let Err(err) =
+                self.web_metrics
+                    .save_snapshot(&self.settings.metrics.web.snapshot_path)
+                    .await
+            {
+                error!("Failed to save web metrics snapshot: {}", err);
             }
 
             Ok(())

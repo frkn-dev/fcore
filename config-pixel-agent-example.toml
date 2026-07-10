@@ -1,0 +1,12 @@
+log_level = "info"
+log_path = "/var/log/nginx/pixel.log"
+offset_path = "/var/lib/pixel-agent/offset.dat"
+geoip_db = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
+api_endpoint = "http://127.0.0.1:3000/metrics/web/ingest"
+api_token = "service-token-from-config"
+poll_interval_sec = 30
+flush_interval_sec = 300
+prometheus_listen = "0.0.0.0"
+prometheus_port = 9102
+bucket_minutes = 5
+retention_hours = 168
