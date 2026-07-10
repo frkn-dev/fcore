@@ -53,8 +53,13 @@
   </section>
 
   <section>
-    <h2>Top hosts</h2>
-    <div id="top-hosts"><p class="small">Loading…</p></div>
+    <h2>Top sources</h2>
+    <div id="top-sources"><p class="small">Loading…</p></div>
+  </section>
+
+  <section>
+    <h2>Top referers</h2>
+    <div id="top-referers"><p class="small">Loading…</p></div>
   </section>
 </main>
 
@@ -119,6 +124,7 @@
     renderTable($('top-pages'), topByTag(data, 'web.visits.page', 'page', 20));
     renderTable($('top-hosts'), topByTag(data, 'web.visits.host', 'host', 20));
     renderTable($('top-countries'), topByTag(data, 'web.visits.country', 'country', 20));
+    renderTable($('top-sources'), topByTag(data, 'web.visits.utm_source', 'utm_source', 20));
     renderTable($('top-referers'), topByTag(data, 'web.visits.referer_domain', 'referer_domain', 20));
   }
 
