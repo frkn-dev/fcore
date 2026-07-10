@@ -3,6 +3,7 @@
   var params = [];
 
   params.push('page=' + encodeURIComponent(location.pathname + location.search));
+  params.push('host=' + encodeURIComponent(location.host));
 
   if (document.referrer) {
     params.push('ref=' + encodeURIComponent(document.referrer));

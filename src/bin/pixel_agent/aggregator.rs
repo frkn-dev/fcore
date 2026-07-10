@@ -44,6 +44,10 @@ impl Aggregator {
         page_tags.insert("page".to_string(), normalize_page(&event.page));
         bucket.increment("web.visits.page", page_tags);
 
+        let mut host_tags = BTreeMap::new();
+        host_tags.insert("host".to_string(), event.host.clone());
+        bucket.increment("web.visits.host", host_tags);
+
         let mut country_tags = BTreeMap::new();
         country_tags.insert("country".to_string(), country.clone());
         bucket.increment("web.visits.country", country_tags);
@@ -169,6 +173,7 @@ mod tests {
             timestamp: now,
             ip: "85.137.165.132".to_string(),
             page: "/subscription".to_string(),
+            host: "hehe.frkn.org".to_string(),
             referer: "https://frkn.org".to_string(),
             referer_domain: "frkn.org".to_string(),
             user_agent: "Mozilla".to_string(),
@@ -180,5 +185,6 @@ mod tests {
         let samples = aggregator.flush(168);
         assert!(samples.iter().any(|s| s.name == "web.visits.total" && s.value == 1.0));
         assert!(samples.iter().any(|s| s.name == "web.visits.page" && s.tags.get("page") == Some(&"/subscription".to_string())));
+        assert!(samples.iter().any(|s| s.name == "web.visits.host" && s.tags.get("host") == Some(&"hehe.frkn.org".to_string())));
     }
 }

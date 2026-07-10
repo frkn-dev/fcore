@@ -17,6 +17,7 @@ pub struct PixelEvent {
     pub timestamp: i64,
     pub ip: String,
     pub page: String,
+    pub host: String,
     pub referer: String,
     pub referer_domain: String,
     pub user_agent: String,
@@ -64,6 +65,7 @@ impl LogParser {
         }
 
         let page = parsed.query.get("page").cloned().unwrap_or_default();
+        let host = parsed.query.get("host").cloned().unwrap_or_else(|| "direct".to_string());
         let referer = parsed.query.get("ref").cloned().unwrap_or(parsed.referer.clone());
         let referer_domain = extract_domain(&referer);
 
@@ -71,6 +73,7 @@ impl LogParser {
             timestamp: parsed.timestamp,
             ip: parsed.remote_addr,
             page,
+            host,
             referer,
             referer_domain,
             user_agent: parsed.user_agent,
@@ -219,10 +222,11 @@ mod tests {
 
     #[test]
     fn test_parse_pixel_line() {
-        let line = r#"85.137.165.132 - - [10/Jul/2026:00:00:02 +0300] "GET /pixel?page=%2Fsubscription%3Fref%3Dabc&lang=ru&utm_source=telegram HTTP/1.1" 200 43 "https://frkn.org/subscription" "Mozilla/5.0""#;
+        let line = r#"85.137.165.132 - - [10/Jul/2026:00:00:02 +0300] "GET /pixel?page=%2Fsubscription%3Fref%3Dabc&host=hehe.frkn.org&lang=ru&utm_source=telegram HTTP/1.1" 200 43 "https://frkn.org/subscription" "Mozilla/5.0""#;
         let parser = LogParser::new();
         let event = parser.parse_pixel_event(line).expect("Should parse");
         assert_eq!(event.page, "/subscription?ref=abc");
+        assert_eq!(event.host, "hehe.frkn.org");
         assert_eq!(event.lang, "ru");
         assert_eq!(event.utm_source, "telegram");
         assert_eq!(event.referer_domain, "frkn.org");
