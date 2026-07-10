@@ -1,5 +1,12 @@
 use chrono::{DateTime, FixedOffset};
-use regex::Regex;
+use nom::{
+    branch::alt,
+    bytes::complete::{escaped_transform, take_till, take_till1, take_while1},
+    character::complete::{char, digit1, space1},
+    combinator::{map, map_res, opt, value},
+    sequence::{delimited, preceded, tuple},
+    IResult,
+};
 use std::collections::HashMap;
 
 const NGINX_TIME_FORMAT: &str = "%d/%b/%Y:%H:%M:%S %z";
@@ -34,48 +41,25 @@ pub struct ParsedLine {
     pub user_agent: String,
 }
 
-pub struct LogParser {
-    regex: Regex,
-}
+pub struct LogParser;
 
 impl LogParser {
     pub fn new() -> Self {
-        let regex = Regex::new(
-            r#"^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<time>[^\]]+)\]\s+"(?P<method>\S+)\s+(?P<url>\S+)\s+\S+"\s+(?P<status>\d{3})\s+\S+\s+"(?P<referer>[^"]*)"\s+"(?P<ua>[^"]*)""#
-        ).expect("Invalid log parser regex");
-        Self { regex }
+        Self
     }
 
     pub fn parse_line(&self, line: &str) -> Option<ParsedLine> {
-        let caps = self.regex.captures(line)?;
-
-        let remote_addr = caps.name("ip")?.as_str().to_string();
-        let time_str = caps.name("time")?.as_str();
-        let timestamp = parse_nginx_time(time_str).ok()?;
-        let method = caps.name("method")?.as_str().to_string();
-        let url = caps.name("url")?.as_str();
-        let status = caps.name("status")?.as_str().parse::<u16>().ok()?;
-        let referer = caps.name("referer")?.as_str().to_string();
-        let user_agent = caps.name("ua")?.as_str().to_string();
-
-        let (path, query) = parse_url(url);
-
-        Some(ParsedLine {
-            remote_addr,
-            timestamp,
-            method,
-            path,
-            query,
-            status,
-            referer,
-            user_agent,
-        })
+        parse_combined_line(line).ok().map(|(_, parsed)| parsed)
     }
 
     pub fn parse_pixel_event(&self, line: &str) -> Option<PixelEvent> {
         let parsed = self.parse_line(line)?;
 
         if parsed.method != "GET" || !parsed.path.eq_ignore_ascii_case("/pixel") {
+            return None;
+        }
+
+        if parsed.status != 200 {
             return None;
         }
 
@@ -98,6 +82,87 @@ impl LogParser {
             utm_term: parsed.query.get("utm_term").cloned().unwrap_or_default(),
         })
     }
+}
+
+fn parse_combined_line(input: &str) -> IResult<&str, ParsedLine> {
+    let (input, remote_addr) = token(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = token(input)?; // remote_user
+    let (input, _) = space1(input)?;
+    let (input, _) = token(input)?; // remote_user duplicate
+    let (input, _) = space1(input)?;
+    let (input, time_str) = bracketed(input)?;
+    let (input, _) = space1(input)?;
+    let (input, (method, url, _)) = request(input)?;
+    let (input, _) = space1(input)?;
+    let (input, status) = status(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = token(input)?; // body_bytes_sent
+    let (input, _) = space1(input)?;
+    let (input, referer) = quoted(input)?;
+    let (input, _) = space1(input)?;
+    let (input, user_agent) = quoted(input)?;
+    let (input, _) = opt(space1)(input)?;
+
+    let timestamp = match parse_nginx_time(time_str) {
+        Ok(ts) => ts,
+        Err(_) => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))),
+    };
+
+    let (path, query) = parse_url(url);
+
+    Ok((
+        input,
+        ParsedLine {
+            remote_addr: remote_addr.to_string(),
+            timestamp,
+            method: method.to_string(),
+            path,
+            query,
+            status,
+            referer: referer.to_string(),
+            user_agent: user_agent.to_string(),
+        },
+    ))
+}
+
+fn token(input: &str) -> IResult<&str, &str> {
+    take_while1(|c: char| !c.is_whitespace())(input)
+}
+
+fn bracketed(input: &str) -> IResult<&str, &str> {
+    delimited(char('['), take_till(|c| c == ']'), char(']'))(input)
+}
+
+fn quoted(input: &str) -> IResult<&str, String> {
+    delimited(
+        char('"'),
+        map(
+            opt(escaped_transform(
+                take_till1(|c| c == '"' || c == '\\'),
+                '\\',
+                alt((value("\"", char('"')), value("\\", char('\\')))),
+            )),
+            |opt_s| opt_s.unwrap_or_default(),
+        ),
+        char('"'),
+    )(input)
+}
+
+fn request(input: &str) -> IResult<&str, (&str, &str, &str)> {
+    delimited(
+        char('"'),
+        tuple((
+            token,
+            preceded(space1, take_till(|c: char| c.is_whitespace())),
+            preceded(space1, take_till(|c| c == '"')),
+        )),
+        char('"'),
+    )(input)
+}
+
+fn status(input: &str) -> IResult<&str, u16> {
+    map_res(digit1, |s: &str| s.parse::<u16>())(input)
 }
 
 fn parse_nginx_time(value: &str) -> Result<i64, chrono::ParseError> {

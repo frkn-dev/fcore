@@ -41,11 +41,6 @@ file = "metrics.log"
 rotation = "daily"
 level = "info"
 
-[metrics.web]
-max_points = 10000
-retention_seconds = 604800 # 7 days
-snapshot_path = "snapshots/web_metrics.bin"
-
 [tasks]
 db_sync_interval_sec = 1000
 subscription_restore_interval = 600

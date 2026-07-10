@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use fcore::{
     utils::level_from_settings, utils::measure_time, Connection, ConnectionApiOperations,
     ConnectionBaseOperations, MetricStorage, NodeStorageOperations, Publisher, Result,
-    Subscription, SubscriptionOperations, WebMetricStorage,
+    Subscription, SubscriptionOperations,
 };
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
@@ -83,26 +83,6 @@ where
             }
         };
 
-        let web_metric_storage = match WebMetricStorage::load_snapshot(
-            &settings.metrics.web.snapshot_path,
-            settings.metrics.web.max_points,
-            settings.metrics.web.retention_seconds,
-        )
-        .await
-        {
-            Ok(storage) => {
-                tracing::info!("Web metrics snapshot restored");
-                storage
-            }
-            Err(err) => {
-                tracing::warn!("Web metrics snapshot restore failed: {}", err);
-                WebMetricStorage::new(
-                    settings.metrics.web.max_points,
-                    settings.metrics.web.retention_seconds,
-                )
-            }
-        };
-
         let email_store = EmailStore::new(settings.smtp.clone());
         email_store.load_trials().await?;
 
@@ -124,7 +104,6 @@ where
             mem_sync,
             settings.clone(),
             Arc::new(metric_storage),
-            Arc::new(web_metric_storage),
             email_store,
             agw_private_key,
         );

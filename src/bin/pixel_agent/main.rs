@@ -2,8 +2,8 @@ mod aggregator;
 mod config;
 mod geoip;
 mod parser;
-mod sender;
 mod server;
+mod web_storage;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +13,7 @@ use crate::aggregator::Aggregator;
 use crate::config::AgentConfig;
 use crate::geoip::GeoIpResolver;
 use crate::parser::LogParser;
-use crate::sender::MetricSender;
+use crate::web_storage::WebMetricStorage;
 use fcore::utils::level_from_settings;
 
 #[tokio::main]
@@ -33,24 +33,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parser = LogParser::new();
     let geoip = GeoIpResolver::new(&config.geoip_db);
     let aggregator = Arc::new(Mutex::new(Aggregator::new(config.bucket_minutes)));
-    let sender = MetricSender::new(config.api_endpoint.clone(), config.api_token.clone());
+    let storage = Arc::new(
+        WebMetricStorage::load_snapshot(
+            &config.snapshot_path,
+            config.max_points,
+            config.retention_seconds,
+        )
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to load snapshot: {}, starting empty", err);
+            WebMetricStorage::new(config.max_points, config.retention_seconds)
+        }),
+    );
 
-    let prometheus_aggregator = aggregator.clone();
-    let prometheus_config = Arc::clone(&config);
+    let server_aggregator = aggregator.clone();
+    let server_storage = Arc::clone(&storage);
+    let server_config = Arc::clone(&config);
     tokio::spawn(async move {
-        server::start_prometheus_server(
-            prometheus_config.prometheus_listen.clone(),
-            prometheus_config.prometheus_port,
-            prometheus_aggregator,
+        server::start_admin_server(
+            server_config.admin_listen.clone(),
+            server_config.admin_port,
+            server_aggregator,
+            server_storage,
         )
         .await;
     });
 
     let poll_interval_sec = config.poll_interval_sec;
     let flush_interval_sec = config.flush_interval_sec;
+    let snapshot_interval_sec = config.snapshot_interval_sec;
     let retention_hours = config.retention_hours;
+    let snapshot_path = config.snapshot_path.clone();
     let mut poll_interval = tokio::time::interval(Duration::from_secs(poll_interval_sec));
     let mut flush_interval = tokio::time::interval(Duration::from_secs(flush_interval_sec));
+    let mut snapshot_interval = tokio::time::interval(Duration::from_secs(snapshot_interval_sec));
 
     loop {
         tokio::select! {
@@ -67,10 +83,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = flush_interval.tick() => {
                 if let Err(err) = flush_metrics(
                     aggregator.clone(),
-                    &sender,
+                    &storage,
                     retention_hours,
                 ).await {
                     tracing::error!("Flush failed: {}", err);
+                }
+            }
+            _ = snapshot_interval.tick() => {
+                if let Err(err) = storage.save_snapshot(&snapshot_path).await {
+                    tracing::error!("Snapshot failed: {}", err);
                 }
             }
         }
@@ -124,7 +145,7 @@ async fn poll_log(
 
 async fn flush_metrics(
     aggregator: Arc<Mutex<Aggregator>>,
-    sender: &MetricSender,
+    storage: &WebMetricStorage,
     retention_hours: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let samples = {
@@ -137,18 +158,15 @@ async fn flush_metrics(
     }
 
     let max_ts = samples.iter().map(|s| s.timestamp_ms).max().unwrap_or(0);
-    let _count = samples.len();
 
-    match sender.send(&samples).await {
-        Ok(sent) => {
-            let mut agg = aggregator.lock().await;
-            agg.clear_flushed(max_ts);
-            tracing::info!("Sent {} pixel metrics to API", sent);
-        }
-        Err(err) => {
-            tracing::error!("Failed to send metrics: {}", err);
-        }
+    for sample in &samples {
+        storage.insert_sample(sample.clone().into());
     }
+
+    let mut agg = aggregator.lock().await;
+    agg.clear_flushed(max_ts);
+
+    tracing::info!("Flushed {} pixel metrics into local storage", samples.len());
 
     Ok(())
 }

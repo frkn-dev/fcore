@@ -9,7 +9,7 @@ use fcore::{Env, Tag};
 
 use fcore::{
     Connection, ConnectionApiOperations, ConnectionBaseOperations, IpAddrMask, MetricStorage,
-    NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations, WebMetricStorage,
+    NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 /// Provides application state filter
@@ -62,12 +62,6 @@ pub fn with_metrics(
     metrics: Arc<MetricStorage>,
 ) -> impl Filter<Extract = (Arc<MetricStorage>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || metrics.clone())
-}
-
-pub fn with_web_metrics(
-    web_metrics: Arc<WebMetricStorage>,
-) -> impl Filter<Extract = (Arc<WebMetricStorage>,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || web_metrics.clone())
 }
 
 pub fn with_email_store(

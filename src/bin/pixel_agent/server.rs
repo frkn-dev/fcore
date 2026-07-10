@@ -1,58 +1,165 @@
-use crate::aggregator::{Aggregator, MetricSample};
+use crate::aggregator::Aggregator;
+use crate::web_storage::WebMetricStorage;
+use fcore::MetricPoint;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use warp::Filter;
 
-pub async fn start_prometheus_server(
+const ADMIN_HTML: &str = include_str!("admin.html");
+
+#[derive(serde::Serialize)]
+struct SeriesResponse {
+    metric: String,
+    tags: BTreeMap<String, String>,
+    points: Vec<MetricPoint>,
+}
+
+#[derive(serde::Serialize)]
+struct MetricsResponse {
+    from_ms: i64,
+    to_ms: i64,
+    series: Vec<SeriesResponse>,
+}
+
+pub async fn start_admin_server(
     listen: String,
     port: u16,
     aggregator: Arc<Mutex<Aggregator>>,
+    storage: Arc<WebMetricStorage>,
 ) {
-    let route = warp::path("metrics")
+    let index = warp::path::end()
+        .and(warp::get())
+        .map(|| warp::reply::html(ADMIN_HTML));
+
+    let metrics_api = warp::path("api")
+        .and(warp::path("metrics"))
         .and(warp::get())
         .and(warp::path::end())
-        .and(with_aggregator(aggregator))
-        .and_then(metrics_handler);
+        .and(warp::query::<QueryParams>())
+        .and(with_storage(storage.clone()))
+        .and_then(metrics_api_handler);
+
+    let prometheus = warp::path("metrics")
+        .and(warp::get())
+        .and(warp::path::end())
+        .and(with_storage(storage.clone()))
+        .and_then(prometheus_handler);
+
+    let health = warp::path("health")
+        .and(warp::get())
+        .and(warp::path::end())
+        .map(|| "ok");
+
+    let routes = index
+        .or(metrics_api)
+        .or(prometheus)
+        .or(health)
+        .with(warp::cors().allow_any_origin());
 
     let addr: std::net::SocketAddr = format!("{}:{}", listen, port)
         .parse()
-        .expect("Invalid prometheus listen address");
+        .expect("Invalid admin listen address");
 
-    tracing::info!("Prometheus server listening on http://{}/metrics", addr);
-    warp::serve(route).run(addr).await;
+    tracing::info!("Pixel admin server listening on http://{}", addr);
+    warp::serve(routes).run(addr).await;
+
+    let _ = aggregator;
 }
 
-fn with_aggregator(
-    aggregator: Arc<Mutex<Aggregator>>,
-) -> impl Filter<Extract = (Arc<Mutex<Aggregator>>,), Error = Infallible> + Clone {
-    warp::any().map(move || aggregator.clone())
+#[derive(serde::Deserialize)]
+struct QueryParams {
+    #[serde(default)]
+    from_ms: i64,
+    #[serde(default)]
+    to_ms: i64,
 }
 
-async fn metrics_handler(aggregator: Arc<Mutex<Aggregator>>) -> Result<impl warp::Reply, Infallible> {
-    let samples = {
-        let mut agg = aggregator.lock().await;
-        agg.flush(u64::MAX)
+fn with_storage(
+    storage: Arc<WebMetricStorage>,
+) -> impl Filter<Extract = (Arc<WebMetricStorage>,), Error = Infallible> + Clone {
+    warp::any().map(move || storage.clone())
+}
+
+async fn metrics_api_handler(
+    params: QueryParams,
+    storage: Arc<WebMetricStorage>,
+) -> Result<impl warp::Reply, Infallible> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let from_ms = if params.from_ms > 0 { params.from_ms } else { now - 24 * 60 * 60 * 1000 };
+    let to_ms = if params.to_ms > 0 { params.to_ms } else { now };
+
+    let mut series = Vec::new();
+    for metric_map in storage.inner.iter() {
+        let metric = metric_map.key().clone();
+        for entry in metric_map.iter() {
+            let hash = *entry.key();
+            let tags = match storage.metadata.get(&hash) {
+                Some(t) => t.clone(),
+                None => continue,
+            };
+            let points: Vec<MetricPoint> = entry
+                .value()
+                .iter()
+                .filter(|p| p.timestamp >= from_ms && p.timestamp <= to_ms)
+                .cloned()
+                .collect();
+            if points.is_empty() {
+                continue;
+            }
+            series.push(SeriesResponse {
+                metric: metric.clone(),
+                tags,
+                points,
+            });
+        }
+    }
+
+    let response = MetricsResponse {
+        from_ms,
+        to_ms,
+        series,
     };
 
-    let body = render_prometheus(&samples);
-    Ok(warp::reply::with_header(body, "Content-Type", "text/plain; charset=utf-8"))
+    Ok(warp::reply::json(&response))
 }
 
-fn render_prometheus(samples: &[MetricSample]) -> String {
-    let mut lines: Vec<String> = Vec::new();
+async fn prometheus_handler(storage: Arc<WebMetricStorage>) -> Result<impl warp::Reply, Infallible> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let from_ms = now - 24 * 60 * 60 * 1000;
+    let to_ms = now;
 
-    for sample in samples {
-        let name = sanitize_name(&sample.name);
-        let labels = format_labels(&sample.tags);
-        lines.push(format!("{}{} {}", name, labels, sample.value));
+    let mut lines: Vec<String> = Vec::new();
+    for metric_map in storage.inner.iter() {
+        let metric = metric_map.key();
+        for entry in metric_map.iter() {
+            let hash = *entry.key();
+            let tags = match storage.metadata.get(&hash) {
+                Some(t) => t.clone(),
+                None => continue,
+            };
+            let value: f64 = entry
+                .value()
+                .iter()
+                .filter(|p| p.timestamp >= from_ms && p.timestamp <= to_ms)
+                .map(|p| p.value)
+                .sum();
+            if value == 0.0 {
+                continue;
+            }
+            let name = sanitize_name(metric);
+            let labels = format_labels(&tags);
+            lines.push(format!("{}{} {}", name, labels, value));
+        }
     }
 
     if lines.is_empty() {
         lines.push("# no pixel metrics yet".to_string());
     }
 
-    lines.join("\n") + "\n"
+    let body = lines.join("\n") + "\n";
+    Ok(warp::reply::with_header(body, "Content-Type", "text/plain; charset=utf-8"))
 }
 
 fn sanitize_name(name: &str) -> String {

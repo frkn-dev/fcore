@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use fcore::{
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Connections, MetricStorage,
-    NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions, WebMetricStorage,
+    NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions,
 };
 
 use super::email::EmailStore;
@@ -34,7 +34,6 @@ where
     pub sync: MemSync<N, C, S>,
     pub settings: ServiceSettings,
     pub metrics: Arc<MetricStorage>,
-    pub web_metrics: Arc<WebMetricStorage>,
     pub email_store: EmailStore,
     pub agw_private_key: Option<Arc<PKey<Private>>>,
 }
@@ -63,7 +62,6 @@ where
         sync: MemSync<N, C, S>,
         settings: ServiceSettings,
         metrics: Arc<MetricStorage>,
-        web_metrics: Arc<WebMetricStorage>,
         email_store: EmailStore,
         agw_private_key: Option<Arc<PKey<Private>>>,
     ) -> Self {
@@ -71,7 +69,6 @@ where
             sync,
             settings,
             metrics,
-            web_metrics,
             email_store,
             agw_private_key,
         }

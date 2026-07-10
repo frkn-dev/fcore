@@ -3,8 +3,7 @@ use rkyv::Deserialize as RkyvDeserialize;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::Path;
 
-use super::{MetricPoint};
-use crate::error::Result;
+use fcore::MetricPoint;
 
 #[derive(Clone, Debug, Default)]
 pub struct WebMetricSample {
@@ -12,6 +11,17 @@ pub struct WebMetricSample {
     pub tags: BTreeMap<String, String>,
     pub value: f64,
     pub timestamp_ms: i64,
+}
+
+impl From<crate::aggregator::MetricSample> for WebMetricSample {
+    fn from(sample: crate::aggregator::MetricSample) -> Self {
+        Self {
+            name: sample.name,
+            tags: sample.tags,
+            value: sample.value,
+            timestamp_ms: sample.timestamp_ms,
+        }
+    }
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -34,6 +44,7 @@ pub struct WebMetricStorage {
     pub retention_seconds: i64,
 }
 
+#[allow(dead_code)]
 impl WebMetricStorage {
     pub fn new(max_points: usize, retention_seconds: i64) -> Self {
         Self {
@@ -278,7 +289,7 @@ impl WebMetricStorage {
         });
     }
 
-    pub async fn save_snapshot<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    pub async fn save_snapshot<P: AsRef<Path>>(&self, path: P) -> fcore::Result<()> {
         self.perform_gc();
 
         let base = path.as_ref();
@@ -316,7 +327,7 @@ impl WebMetricStorage {
         path: P,
         max_points: usize,
         retention_seconds: i64,
-    ) -> Result<Self> {
+    ) -> fcore::Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         let archived = unsafe { rkyv::archived_root::<WebMetricStorageSnapshot>(&bytes) };
         let snapshot: WebMetricStorageSnapshot = archived.deserialize(&mut rkyv::Infallible)?;
