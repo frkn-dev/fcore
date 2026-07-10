@@ -61,6 +61,8 @@ netlink-packet-amnezia-wireguard = { version = "0.1.2", optional = true }
 netlink-packet-core = { version = "0.8", optional = true }
 netlink-packet-generic = { version = "0.4", optional = true }
 netlink-sys = { version = "0.8", optional = true }
+maxminddb = "0.24"
+nom = "7"
 
 
 [build-dependencies]
@@ -92,4 +94,12 @@ path = "src/bin/api/main.rs"
 [[bin]]
 name = "auth"
 path = "src/bin/auth/main.rs"
+
+[[bin]]
+name = "pixel-agent"
+path = "src/bin/pixel_agent/main.rs"
+
+[[bin]]
+name = "pixel-agent-backfill"
+path = "src/bin/pixel_agent/backfill.rs"
 

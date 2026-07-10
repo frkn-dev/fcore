@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Analytics</title>
+<style>
+  :root { --bg: #f5f6f8; --card: #fff; --text: #222; --muted: #666; --border: #ddd; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+  header { background: #1a1a2e; color: #fff; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { margin: 0; font-size: 1.2rem; }
+  main { padding: 1.5rem; max-width: 1400px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .card h3 { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--muted); text-transform: uppercase; }
+  .card .value { font-size: 1.8rem; font-weight: 600; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; overflow-x: auto; }
+  section h2 { margin: 0 0 1rem; font-size: 1.1rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+  th { background: #fafafa; font-weight: 600; }
+  .small { font-size: 0.8rem; color: var(--muted); }
+  .error { color: #991b1b; }
+  canvas { width: 100%; height: 240px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pixel Analytics</h1>
+  <span class="small" id="status"></span>
+</header>
+<main>
+  <div class="grid" id="dashboard">
+    <div class="card"><h3>Visits (24h)</h3><div class="value" id="total-visits">-</div></div>
+    <div class="card"><h3>Unique countries</h3><div class="value" id="unique-countries">-</div></div>
+    <div class="card"><h3>Top page</h3><div class="value" id="top-page">-</div></div>
+  </div>
+
+  <section>
+    <h2>Visits over time</h2>
+    <canvas id="visits-chart"></canvas>
+  </section>
+
+  <section>
+    <h2>Top pages</h2>
+    <div id="top-pages"><p class="small">Loading…</p></div>
+  </section>
+
+  <section>
+    <h2>Top countries</h2>
+    <div id="top-countries"><p class="small">Loading…</p></div>
+  </section>
+
+  <section>
+    <h2>Top sources</h2>
+    <div id="top-sources"><p class="small">Loading…</p></div>
+  </section>
+
+  <section>
+    <h2>Top referers</h2>
+    <div id="top-referers"><p class="small">Loading…</p></div>
+  </section>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  function setStatus(msg, isError) {
+    const el = $('status');
+    el.textContent = msg;
+    el.className = isError ? 'error' : 'small';
+  }
+
+  async function loadMetrics() {
+    const to = Date.now();
+    const from = to - 24 * 60 * 60 * 1000;
+    try {
+      const data = await fetch(`/api/metrics?from_ms=${from}&to_ms=${to}`).then(r => r.json());
+      render(data);
+      setStatus('updated ' + new Date().toLocaleTimeString());
+    } catch (e) {
+      setStatus('error: ' + e.message, true);
+    }
+  }
+
+  function seriesByName(data, name) {
+    return (data.series || []).filter(s => s.metric === name);
+  }
+
+  function sumSeries(series) {
+    const map = new Map();
+    series.forEach(s => {
+      s.points.forEach(p => {
+        map.set(p.x, (map.get(p.x) || 0) + p.y);
+      });
+    });
+    return Array.from(map.entries()).sort((a, b) => a[0] - b[0]).map(([x, y]) => ({ x, y }));
+  }
+
+  function topByTag(data, metric, tagKey, limit = 10) {
+    const totals = {};
+    seriesByName(data, metric).forEach(s => {
+      const value = s.tags[tagKey];
+      if (!value) return;
+      const sum = s.points.reduce((a, p) => a + p.y, 0);
+      totals[value] = (totals[value] || 0) + sum;
+    });
+    return Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, limit);
+  }
+
+  function render(data) {
+    const visits = seriesByName(data, 'web.visits.total');
+    const total = visits.reduce((sum, s) => sum + s.points.reduce((a, p) => a + p.y, 0), 0);
+    $('total-visits').textContent = Math.round(total).toLocaleString();
+
+    const countries = seriesByName(data, 'web.visits.country');
+    $('unique-countries').textContent = countries.length.toLocaleString();
+
+    const pages = topByTag(data, 'web.visits.page', 'page', 1);
+    $('top-page').textContent = pages.length ? pages[0][0] : '-';
+
+    drawChart($('visits-chart'), sumSeries(visits), 'Visits');
+    renderTable($('top-pages'), topByTag(data, 'web.visits.page', 'page', 20));
+    renderTable($('top-hosts'), topByTag(data, 'web.visits.host', 'host', 20));
+    renderTable($('top-countries'), topByTag(data, 'web.visits.country', 'country', 20));
+    renderTable($('top-sources'), topByTag(data, 'web.visits.utm_source', 'utm_source', 20));
+    renderTable($('top-referers'), topByTag(data, 'web.visits.referer_domain', 'referer_domain', 20));
+  }
+
+  function renderTable(el, rows) {
+    if (!rows.length) {
+      el.innerHTML = '<p class="small">No data</p>';
+      return;
+    }
+    const body = rows.map(([name, value]) => `<tr><td>${name}</td><td class="small">${Math.round(value).toLocaleString()}</td></tr>`).join('');
+    el.innerHTML = `<table><tr><th>Name</th><th>Visits</th></tr>${body}</table>`;
+  }
+
+  function drawChart(canvas, points, label) {
+    if (!points.length) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#999';
+      ctx.fillText('No data', 10, 60);
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(300, Math.floor(rect.width)) || 300;
+    canvas.height = 240;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    const pad = 30;
+
+    const minX = points[0].x;
+    const maxX = points[points.length - 1].x;
+    const values = points.map(p => p.y);
+    let minY = Math.min(...values);
+    let maxY = Math.max(...values);
+    if (minY === maxY) { minY = 0; maxY = maxY || 1; }
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad, pad);
+    ctx.lineTo(pad, h - pad);
+    ctx.lineTo(w - pad, h - pad);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#1a1a2e';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const x = pad + (maxX === minX ? 0 : (p.x - minX) / (maxX - minX)) * (w - 2 * pad);
+      const y = h - pad - (maxY === minY ? 0 : (p.y - minY) / (maxY - minY)) * (h - 2 * pad);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    ctx.fillStyle = '#666';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(label, pad + 4, pad - 6);
+    ctx.fillText(Math.round(maxY).toLocaleString(), 2, pad + 8);
+    ctx.fillText(Math.round(minY).toLocaleString(), 2, h - pad - 4);
+  }
+
+  loadMetrics();
+  setInterval(loadMetrics, 30000);
+</script>
+</body>
+</html>

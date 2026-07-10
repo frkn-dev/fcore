@@ -4,6 +4,7 @@
 dev/config-agent.toml
 dev/config-api.toml
 dev/config-auth.toml
+dev/pixel-logs
 target
 snapshots/*.bin
 dev/data/*

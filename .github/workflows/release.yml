@@ -91,9 +91,43 @@ jobs:
           name: fcore-auth
           path: target/release/auth
 
+  build-pixel-agent:
+    needs: [tests]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Pixel Agent
+        run: cargo build --release --bin pixel-agent --no-default-features
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcore-pixel-agent
+          path: target/release/pixel-agent
+
+  build-pixel-agent-backfill:
+    needs: [tests]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Pixel Agent Backfill
+        run: cargo build --release --bin pixel-agent-backfill --no-default-features
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcore-pixel-agent-backfill
+          path: target/release/pixel-agent-backfill
+
   release:
     name: Create Release
-    needs: [build-api, build-auth, build-node]
+    needs: [build-api, build-auth, build-node, build-pixel-agent, build-pixel-agent-backfill]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -113,6 +147,8 @@ jobs:
           cp artifacts/fcore-node-armv7-unknown-linux-gnueabihf/node release_dist/node-armv7
           cp artifacts/fcore-api/api release_dist/api-x86_64
           cp artifacts/fcore-auth/auth release_dist/auth-x86_64
+          cp artifacts/fcore-pixel-agent/pixel-agent release_dist/pixel-agent-x86_64
+          cp artifacts/fcore-pixel-agent-backfill/pixel-agent-backfill release_dist/pixel-agent-backfill-x86_64
           chmod +x release_dist/*
 
       - name: Upload to GitHub Release
@@ -125,5 +161,6 @@ jobs:
             config-node-example.toml
             config-api-example.toml
             config-auth-example.toml
+            config-pixel-agent-example.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

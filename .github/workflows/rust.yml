@@ -135,9 +135,83 @@ jobs:
           name: fcore-auth
           path: target/x86_64-unknown-linux-musl/release/auth
 
+  build-pixel-agent:
+    needs: [tests]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pixel-agent
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build Pixel Agent
+        run: |
+          cross build --release \
+            --bin pixel-agent \
+            --no-default-features \
+            --target x86_64-unknown-linux-musl
+
+      - name: Verify binary
+        run: |
+          file target/x86_64-unknown-linux-musl/release/pixel-agent
+          ldd target/x86_64-unknown-linux-musl/release/pixel-agent || true
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcore-pixel-agent
+          path: target/x86_64-unknown-linux-musl/release/pixel-agent
+
+  build-pixel-agent-backfill:
+    needs: [tests]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pixel-agent-backfill
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build Pixel Agent Backfill
+        run: |
+          cross build --release \
+            --bin pixel-agent-backfill \
+            --no-default-features \
+            --target x86_64-unknown-linux-musl
+
+      - name: Verify binary
+        run: |
+          file target/x86_64-unknown-linux-musl/release/pixel-agent-backfill
+          ldd target/x86_64-unknown-linux-musl/release/pixel-agent-backfill || true
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcore-pixel-agent-backfill
+          path: target/x86_64-unknown-linux-musl/release/pixel-agent-backfill
+
   collect-binaries:
     runs-on: ubuntu-latest
-    needs: [build-node, build-api, build-auth]
+    needs: [build-node, build-api, build-auth, build-pixel-agent, build-pixel-agent-backfill]
 
     steps:
       - name: Download all artifacts
