@@ -10,6 +10,7 @@ PIXEL_AGENT_VERSION="${PIXEL_AGENT_VERSION:-v0.5.15}"
 INSTALL_DIR="/opt/pixel-agent"
 ARCH=$(uname -m)
 PIXEL_AGENT_URL="https://github.com/frkn-dev/fcore/releases/download/$PIXEL_AGENT_VERSION/pixel-agent-$ARCH"
+BACKFILL_URL="https://github.com/frkn-dev/fcore/releases/download/$PIXEL_AGENT_VERSION/pixel-agent-backfill-$ARCH"
 PIXEL_AGENT_CONFIG_PATH="$INSTALL_DIR/config.toml"
 
 # Agent settings
@@ -34,6 +35,11 @@ echo "Installing pixel-agent version $PIXEL_AGENT_VERSION..."
 echo "$PIXEL_AGENT_URL"
 curl -L -o pixel-agent "$PIXEL_AGENT_URL"
 chmod +x pixel-agent
+
+echo "Installing pixel-agent-backfill..."
+echo "$BACKFILL_URL"
+curl -L -o pixel-agent-backfill "$BACKFILL_URL"
+chmod +x pixel-agent-backfill
 
 cat <<EOF | tee /etc/systemd/system/pixel-agent.service
 [Unit]

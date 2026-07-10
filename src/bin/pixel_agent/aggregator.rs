@@ -104,6 +104,7 @@ impl Aggregator {
         samples
     }
 
+    #[allow(dead_code)]
     pub fn clear_flushed(&mut self, sent_up_to: i64) {
         self.buckets.retain(|ts, _| *ts > sent_up_to);
     }

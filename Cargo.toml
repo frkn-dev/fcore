@@ -99,3 +99,7 @@ path = "src/bin/auth/main.rs"
 name = "pixel-agent"
 path = "src/bin/pixel_agent/main.rs"
 
+[[bin]]
+name = "pixel-agent-backfill"
+path = "src/bin/pixel_agent/backfill.rs"
+
