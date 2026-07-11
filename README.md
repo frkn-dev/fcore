@@ -11,14 +11,14 @@ providing a single pane of glass for your network infrastructure.
 
 ### Binaries
 
-| Binary | Purpose |
-|--------|---------|
-| `api` | Core API: subscriptions, connections, nodes, traffic accounting, metrics ingestion, admin panel. |
-| `node` | Agent that runs on every proxy node, drives Xray/Hysteria2/Wireguard/Amnezia-Wireguard/MTproto and reports stats. |
-| `auth` | Auth sidecar: keeps a local copy of connection state and answers `/auth` requests from proxy nodes. |
-| `pixel-agent` | Parses nginx pixel logs and serves web analytics with a built-in admin UI and Prometheus endpoint. |
-| `pixel-agent-backfill` | One-shot tool for rebuilding the pixel analytics snapshot from archived logs. |
-| `mrkting` | Marketing service: trial creation, email capture and welcome emails. |
+| Binary                 | Purpose                                                                                                           |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `api`                  | Core API: subscriptions, connections, nodes, traffic accounting, metrics ingestion, admin panel.                  |
+| `node`                 | Agent that runs on every proxy node, drives Xray/Hysteria2/Wireguard/Amnezia-Wireguard/MTproto and reports stats. |
+| `auth`                 | Auth sidecar: keeps a local copy of connection state and answers `/auth` requests from proxy nodes.               |
+| `pixel-agent`          | Parses nginx pixel logs and serves web analytics with a built-in admin UI and Prometheus endpoint.                |
+| `pixel-agent-backfill` | One-shot tool for rebuilding the pixel analytics snapshot from archived logs.                                     |
+| `mrkting`              | Marketing service: trial creation, email capture and welcome emails.                                              |
 
 ### External dependencies
 
@@ -92,4 +92,4 @@ sudo ./deploy/mrkting-deploy.sh v0.5.16
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the GPLv3 - see the LICENSE file for details.

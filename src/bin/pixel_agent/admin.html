@@ -76,7 +76,7 @@
     const to = Date.now();
     const from = to - 24 * 60 * 60 * 1000;
     try {
-      const data = await fetch(`/api/metrics?from_ms=${from}&to_ms=${to}`).then(r => r.json());
+      const data = await fetch(`api/metrics?from_ms=${from}&to_ms=${to}`).then(r => r.json());
       render(data);
       setStatus('updated ' + new Date().toLocaleTimeString());
     } catch (e) {
