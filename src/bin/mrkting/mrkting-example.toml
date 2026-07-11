@@ -1,0 +1,43 @@
+[service]
+listen = "127.0.0.1"
+port = 9103
+log_level = "info"
+
+[pg]
+host = "localhost"
+port = 5432
+db = "mrkting"
+username = "postgres"
+password = "change-me"
+
+[api]
+endpoint = "http://127.0.0.1:3000"
+token = "change-me-in-production"
+
+[smtp]
+server = "smtp.example.com"
+username = "noreply@example.com"
+password = "change-me"
+port = 587
+from = "FRKN <noreply@example.com>"
+title = "Ваша подписка создана"
+company_name = "FRKN"
+support = "https://t.me/frkn_support"
+company_website = "https://frkn.org"
+
+[email_encryption]
+# Base64-encoded 32-byte AES-256-GCM key.
+key = "Y2hhbmdlbWUzMmJ5dGVza2V5Zm9yZW5jcnlwdGlvbg=="
+
+[trial]
+days = 3
+limit_bytes = 10737418240
+enabled_envs = ["dev", "wl", "ru"]
+enabled_tags = [
+    "VlessXhttpReality",
+    "VlessXhttpCdn",
+    "VlessTcpReality",
+    "VlessGrpcReality",
+    "Hysteria2",
+    "Mtproto"
+]

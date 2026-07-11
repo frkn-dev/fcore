@@ -93,7 +93,6 @@ impl TagReq {
 
 #[derive(Debug, Deserialize)]
 pub struct Subscription {
-    pub referred_by: Option<String>,
     pub refer_code: Option<String>,
     pub days: Option<i64>,
     pub limit_bytes: Option<i64>,
@@ -243,24 +242,6 @@ pub struct ConnectionInfoRequest {
 
 impl ConnectionInfoRequest {
     pub fn validate(&self) -> Result<(), Error> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Trial {
-    pub user: Option<String>,
-    pub email: Option<String>,
-    pub referred_by: Option<String>,
-    #[serde(default)]
-    pub language: Option<String>,
-}
-
-impl Trial {
-    pub fn validate(&self) -> Result<(), Error> {
-        if self.user.is_some() && self.email.is_some() {
-            return Err(Error::Custom("Only one param is allowed".to_string()));
-        }
         Ok(())
     }
 }

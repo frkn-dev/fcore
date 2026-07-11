@@ -1,0 +1,31 @@
+[service]
+log_level = "info"
+listen = "127.0.0.1"
+port = 3000
+snapshot_interval = 60
+snapshot_path = "/var/lib/fcore/auth/snapshot-auth.bin"
+origin = "http://localhost:8080"
+updates_endpoint_zmq = "tcp://localhost:3001"
+
+[node]
+env = "experimental"
+hostname = "auth-node.local"
+default_interface = "eth0"
+address = "192.168.1.10"
+uuid = "9557b391-0000-1111-2222-6cbdd7400000"
+label = "🏴‍☠️ Auth Node"
+max_bandwidth_bps = 1000000000 # 1 Gbps
+country = "RU"
+type = "common"
+# Optional cluster FQDN. When set, client configs use this domain instead of the node IP.
+# cluster = "auth-cdn.example.com"
+
+[metrics]
+publisher = "tcp://localhost:3002"
+interval = 30
+enabled = true
+endpoint = "0.0.0.0:3000"
+
+[api]
+endpoint = "http://127.0.0.1:3000"
+token = "change-me-in-production"

@@ -11,7 +11,6 @@ use crate::{
 
 mod bootstrap;
 mod config;
-mod email;
 mod http;
 mod metrics;
 mod postgres;

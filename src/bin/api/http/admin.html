@@ -124,7 +124,6 @@
         <label>Days <input id="sub-days" type="number" value="30"></label>
         <label>Limit bytes <input id="sub-limit" type="number" placeholder="optional"></label>
         <label>Refer code <input id="sub-refcode" placeholder="auto"></label>
-        <label>Referred by <input id="sub-referred" placeholder="optional"></label>
         <button class="btn btn-primary" onclick="createSubscription()">Create</button>
       </div>
     </div>
@@ -223,12 +222,10 @@
     const days = parseInt($('sub-days').value, 10);
     const limit = $('sub-limit').value.trim();
     const referCode = $('sub-refcode').value.trim();
-    const referredBy = $('sub-referred').value.trim() || null;
     const body = {
       days: isNaN(days) ? null : days,
       limit_bytes: limit ? parseInt(limit, 10) : null,
-      refer_code: referCode || null,
-      referred_by: referredBy
+      refer_code: referCode || null
     };
     try {
       await apiPost('/subscription', body);

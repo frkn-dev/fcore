@@ -1,0 +1,48 @@
+[service]
+log_level = "info"
+snapshot_interval = 60
+snapshot_path = "/var/lib/fcore/node/snapshot-node.bin"
+updates_endpoint_zmq = "tcp://localhost:3001"
+
+[xray]
+enabled = true
+path = "/opt/xray/xray-config.json"
+
+[h2]
+enabled = true
+path = "/opt/hysteria/config.yaml"
+
+[wg]
+enabled = false
+path = "/etc/wireguard/utun7.conf"
+
+[awg]
+enabled = false
+path = "/etc/amnezia-wg/awg.conf"
+
+[mtproto]
+enabled = false
+path = "/opt/teleproxy/config.toml"
+
+[node]
+env = "experimental"
+hostname = "node.local"
+default_interface = "eth0"
+address = "192.168.1.100"
+uuid = "ab514c21-aaaa-bbbb-cccc-32f8cb1ada40"
+label = "🏴‍☠️ Node"
+max_bandwidth_bps = 1000000000 # 1 Gbps
+country = "RU"
+type = "common"
+# Optional cluster FQDN. When set, client configs use this domain instead of the node IP.
+# cluster = "node-cdn.example.com"
+
+[api]
+endpoint = "http://127.0.0.1:3000"
+token = "change-me-in-production"
+
+[metrics]
+publisher = "tcp://localhost:3002"
+interval = 30
+enabled = true
+endpoint = "0.0.0.0:3000"

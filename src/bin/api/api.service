@@ -1,0 +1,23 @@
+[Unit]
+Description=FRKN API Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=fcore
+Group=fcore
+ExecStart=/usr/local/bin/api /etc/fcore/api/config.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/var/lib/fcore/api
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fcore/api
+ReadWritePaths=/var/log/fcore/api
+
+[Install]
+WantedBy=multi-user.target

@@ -45,16 +45,14 @@ impl PgSubscription {
             .query_one(
                 r#"
             INSERT INTO subscriptions
-            (id, expires_at, referred_by, refer_code, referral_bonus_awarded, parent_id, scope_env, premium_token)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (id, expires_at, refer_code, parent_id, scope_env, premium_token)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *
             "#,
                 &[
                     &new_sub.id,
                     &new_sub.expires_at,
-                    &new_sub.referred_by,
                     &ref_code,
-                    &new_sub.referral_bonus_awarded,
                     &new_sub.parent_id,
                     &scope_env,
                     &new_sub.premium_token,
@@ -78,7 +76,6 @@ impl PgSubscription {
         &self,
         id: uuid::Uuid,
         expires_at: chrono::DateTime<chrono::Utc>,
-        referred_by: Option<&str>,
         ref_code: &String,
         parent_id: Option<uuid::Uuid>,
         scope_env: Option<&Env>,
@@ -95,18 +92,16 @@ impl PgSubscription {
                 r#"
             UPDATE subscriptions
             SET expires_at  = $1,
-                referred_by = $2,
-                updated_at  = $3,
-                refer_code = $4,
-                parent_id = $5,
-                scope_env = $6,
-                premium_token = $7
-            WHERE id = $8
+                updated_at  = $2,
+                refer_code = $3,
+                parent_id = $4,
+                scope_env = $5,
+                premium_token = $6
+            WHERE id = $7
             RETURNING *
             "#,
                 &[
                     &expires_at,
-                    &referred_by,
                     &now,
                     ref_code,
                     &parent_id,
@@ -174,31 +169,6 @@ impl PgSubscription {
         );
 
         Ok(Subscription::from(updated_row))
-    }
-
-    pub async fn set_referral_bonus_awarded(
-        &self,
-        sub_id: &uuid::Uuid,
-        awarded: bool,
-    ) -> Result<Subscription> {
-        let mut manager = self.manager.lock().await;
-        let client = manager.get_client().await?;
-        let now = chrono::Utc::now();
-
-        let row = client
-            .query_one(
-                r#"
-                UPDATE subscriptions
-                SET referral_bonus_awarded = $1,
-                    updated_at = $2
-                WHERE id = $3
-                RETURNING *
-                "#,
-                &[&awarded, &now, sub_id],
-            )
-            .await?;
-
-        Ok(Subscription::from(row))
     }
 
     pub async fn set_premium_fields(

@@ -194,7 +194,7 @@ where
     let ref_code = fcore::utils::get_uuid_last_octet_simple(&sub_id);
     let expires_at = req.days.map(|d| Utc::now() + chrono::Duration::days(d));
 
-    let mut sub = Subscription::new(sub_id, None, ref_code, expires_at, req.limit_bytes);
+    let mut sub = Subscription::new(sub_id, ref_code, expires_at, req.limit_bytes);
     sub.set_parent_id(parent.id());
 
     subscription_audit::log_transaction_start(sub_id, req.days);
@@ -249,7 +249,6 @@ where
 
     let update_req = super::super::request::Subscription {
         days: req.days,
-        referred_by: None,
         refer_code: None,
         limit_bytes: req.limit_bytes,
     };

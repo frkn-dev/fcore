@@ -40,7 +40,6 @@ pub struct SubscriptionResponse {
     pub expires: DateTime<Utc>,
     pub days: i64,
     pub ref_code: String,
-    pub invited_count: usize,
     pub locations: Vec<EnvInfo>,
     pub downlink: i64,
     pub uplink: i64,

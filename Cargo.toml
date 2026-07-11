@@ -15,6 +15,8 @@ panic = "abort"
 strip = true
 
 [dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 base32 = "0.5.1"
@@ -102,4 +104,8 @@ path = "src/bin/pixel_agent/main.rs"
 [[bin]]
 name = "pixel-agent-backfill"
 path = "src/bin/pixel_agent/backfill.rs"
+
+[[bin]]
+name = "mrkting"
+path = "src/bin/mrkting/main.rs"
 

@@ -8,7 +8,6 @@ use fcore::{
     NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions,
 };
 
-use super::email::EmailStore;
 use super::{config::ServiceSettings, sync::MemSync};
 
 pub struct Service<N, C, S>
@@ -34,7 +33,6 @@ where
     pub sync: MemSync<N, C, S>,
     pub settings: ServiceSettings,
     pub metrics: Arc<MetricStorage>,
-    pub email_store: EmailStore,
     pub agw_private_key: Option<Arc<PKey<Private>>>,
 }
 
@@ -62,14 +60,12 @@ where
         sync: MemSync<N, C, S>,
         settings: ServiceSettings,
         metrics: Arc<MetricStorage>,
-        email_store: EmailStore,
         agw_private_key: Option<Arc<PKey<Private>>>,
     ) -> Self {
         Self {
             sync,
             settings,
             metrics,
-            email_store,
             agw_private_key,
         }
     }

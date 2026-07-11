@@ -17,7 +17,6 @@ use tracing_subscriber::{
 
 use super::{
     config::ServiceSettings,
-    email::EmailStore,
     postgres::pg::PgContext,
     service::{Cache, Service},
     sync::MemSync,
@@ -81,9 +80,6 @@ where
             }
         };
 
-        let email_store = EmailStore::new(settings.smtp.clone());
-        email_store.load_trials().await?;
-
         let agw_private_key = settings
             .service
             .agw_private_key_path
@@ -102,7 +98,6 @@ where
             mem_sync,
             settings.clone(),
             Arc::new(metric_storage),
-            email_store,
             agw_private_key,
         );
 

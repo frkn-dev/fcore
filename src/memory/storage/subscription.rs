@@ -15,7 +15,6 @@ where
     fn add(&mut self, new_subscription: S) -> OperationStatus;
     fn delete(&mut self, id: &uuid::Uuid);
     fn update(&mut self, subscription: S);
-    fn count_invited_by(&self, refer_code: &str) -> usize;
     fn exist_refer_code(&self, code: &str) -> bool;
 }
 
@@ -23,12 +22,6 @@ impl<S> Operations<S> for Subscriptions<S>
 where
     S: SubscriptionOp + Send + Sync + Clone + 'static + PartialEq + SubscriptionOp,
 {
-    fn count_invited_by(&self, refer_code: &str) -> usize {
-        self.values()
-            .filter(|s| s.referred_by() == Some(refer_code))
-            .count()
-    }
-
     fn find_by_id(&self, id: &uuid::Uuid) -> Option<&S> {
         self.get(id)
     }

@@ -198,7 +198,6 @@ where
 
     let sub = Subscription::new(
         sub_id,
-        req.referred_by,
         ref_code,
         expires_at,
         req.limit_bytes,
@@ -422,7 +421,6 @@ where
     let expires = sub.expires_at().unwrap_or_default();
     let days = sub.days_remaining().unwrap_or(0);
     let ref_code = sub.refer_code();
-    let invited_count = mem.subscriptions.count_invited_by(&sub.refer_code());
     drop(mem);
 
     let traffic =
@@ -479,7 +477,6 @@ where
         expires,
         days,
         ref_code,
-        invited_count,
         locations,
         downlink: traffic.total.downlink as i64,
         uplink: traffic.total.uplink as i64,
@@ -846,36 +843,4 @@ where
     };
 
     Ok(Box::new(warp::reply::json(&response)))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RefCodeQueryParam {
-    pub code: String,
-}
-
-pub async fn validate_ref_code_handler<N, C, S>(
-    param: RefCodeQueryParam,
-    memory: MemSync<N, C, S>,
-) -> Result<impl warp::Reply, warp::Rejection>
-where
-    N: NodeStorageOperations + Sync + Send + Clone + 'static,
-    C: ConnectionApiOperations
-        + ConnectionBaseOperations
-        + Sync
-        + Send
-        + Clone
-        + 'static
-        + From<Connection>
-        + PartialEq,
-    Connection: From<C>,
-    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
-{
-    let mem = memory.memory.read().await;
-    let valid = mem
-        .subscriptions
-        .find_by_refer_code(&param.code)
-        .map(|s| s.is_active())
-        .unwrap_or(false);
-
-    Ok(warp::reply::json(&serde_json::json!({ "valid": valid })))
 }

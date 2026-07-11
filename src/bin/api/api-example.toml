@@ -1,0 +1,52 @@
+[service]
+listen = "127.0.0.1"
+port = 3000
+token = "change-me-in-production"
+key_sign_token = [1, 2, 3, 4, 5, 6, 7, 8]
+cors_origins = ["http://localhost:8080"]
+wireguard_network = "10.0.0.0/8"
+amnezia_wireguard_network = "10.0.0.0/8"
+log_level = "info"
+updates_endpoint_zmq = "tcp://*:3001"
+subscription_title = "FRKN Subscription"
+support_contact = "https://t.me/frkn_support"
+base_url = "https://frkn.org"
+admin_enabled = true
+admin_token = "change-me-in-production"
+agw_private_key_path = "/etc/fcore/api/agw_private.pem"
+
+[metrics]
+reciever = "tcp://0.0.0.0:3002"
+max_points = 10000
+retention_seconds = 604800 # 7 days
+snapshot_path = "/var/lib/fcore/api/metrics.bin"
+
+[metrics.log]
+enabled = true
+directory = "/var/log/fcore/api"
+file = "metrics.log"
+rotation = "daily"
+level = "info"
+
+[tasks]
+db_sync_interval_sec = 1000
+subscription_restore_interval = 600
+subscription_expire_interval = 600
+traffic_persist_interval_sec = 3600
+connection_expire_interval = 600
+monitor_nodes_interval = 60
+heartbeat_node_offline_threshold_sec = 120
+
+[subscription_audit]
+enabled = true
+directory = "/var/log/fcore/api"
+file = "subscription_audit.log"
+rotation = "daily"
+level = "info"
+
+[pg]
+host = "localhost"
+port = 5432
+db = "api"
+username = "postgres"
+password = "change-me"

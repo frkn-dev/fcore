@@ -527,10 +527,6 @@ where
                 sub.extend(days);
             }
 
-            if let Some(ref_by) = req.referred_by.clone() {
-                sub.set_referred_by(ref_by);
-            }
-
             if let Some(ref_code) = req.refer_code.clone() {
                 sub.set_refer_code(ref_code);
             }
@@ -561,7 +557,6 @@ where
                 .update_subscription(
                     *sub_id,
                     expires_at,
-                    sub.referred_by(),
                     &sub.refer_code(),
                     sub.parent_id(),
                     sub.scope_env(),

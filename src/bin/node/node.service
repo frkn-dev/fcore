@@ -1,0 +1,18 @@
+[Unit]
+Description=FRKN Node Agent
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/node /etc/fcore/node/config.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/var/lib/fcore/node
+
+# The node agent manages network interfaces (WireGuard, Xray, Hysteria2),
+# so it runs as root. Capabilities could be narrowed further if desired.
+
+[Install]
+WantedBy=multi-user.target

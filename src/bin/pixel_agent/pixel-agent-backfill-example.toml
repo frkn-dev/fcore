@@ -1,0 +1,17 @@
+# Backfill uses the same configuration as pixel-agent.
+# The only difference is the optional second CLI argument: path to a log file
+# (or "-" for stdin). Gzip archives are supported.
+log_level = "info"
+log_path = "/var/log/nginx/pixel.log"
+offset_path = "/var/lib/pixel-agent/offset-backfill.dat"
+snapshot_path = "/var/lib/pixel-agent/metrics.snapshot"
+geoip_db = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
+admin_listen = "0.0.0.0"
+admin_port = 9102
+poll_interval_sec = 30
+flush_interval_sec = 300
+snapshot_interval_sec = 300
+bucket_minutes = 5
+retention_hours = 168
+max_points = 10000
+retention_seconds = 604800

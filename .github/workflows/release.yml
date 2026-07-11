@@ -125,9 +125,26 @@ jobs:
           name: fcore-pixel-agent-backfill
           path: target/release/pixel-agent-backfill
 
+  build-mrkting:
+    needs: [tests]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Marketing
+        run: cargo build --release --bin mrkting --no-default-features
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcore-mrkting
+          path: target/release/mrkting
+
   release:
     name: Create Release
-    needs: [build-api, build-auth, build-node, build-pixel-agent, build-pixel-agent-backfill]
+    needs: [build-api, build-auth, build-node, build-pixel-agent, build-pixel-agent-backfill, build-mrkting]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -149,6 +166,7 @@ jobs:
           cp artifacts/fcore-auth/auth release_dist/auth-x86_64
           cp artifacts/fcore-pixel-agent/pixel-agent release_dist/pixel-agent-x86_64
           cp artifacts/fcore-pixel-agent-backfill/pixel-agent-backfill release_dist/pixel-agent-backfill-x86_64
+          cp artifacts/fcore-mrkting/mrkting release_dist/mrkting-x86_64
           chmod +x release_dist/*
 
       - name: Upload to GitHub Release
@@ -158,9 +176,19 @@ jobs:
             release_dist/*
             docs/*
             README.md
-            config-node-example.toml
-            config-api-example.toml
-            config-auth-example.toml
-            config-pixel-agent-example.toml
+            src/bin/api/api-example.toml
+            src/bin/auth/auth-example.toml
+            src/bin/node/node-example.toml
+            src/bin/pixel_agent/pixel-agent-example.toml
+            src/bin/pixel_agent/pixel-agent-backfill-example.toml
+            src/bin/mrkting/mrkting-example.toml
+            src/bin/api/api.service
+            src/bin/auth/auth.service
+            src/bin/node/node.service
+            src/bin/pixel_agent/pixel-agent.service
+            src/bin/pixel_agent/pixel-agent-backfill.service
+            src/bin/pixel_agent/pixel-agent-backfill.timer
+            src/bin/mrkting/mrkting.service
+            deploy/*.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

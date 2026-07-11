@@ -1,0 +1,22 @@
+[Unit]
+Description=FRKN Auth Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=fcore
+Group=fcore
+ExecStart=/usr/local/bin/auth /etc/fcore/auth/config.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/var/lib/fcore/auth
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fcore/auth
+
+[Install]
+WantedBy=multi-user.target

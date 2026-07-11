@@ -14,12 +14,10 @@ use std::fmt;
 pub struct Subscription {
     pub id: uuid::Uuid,
     pub expires_at: Option<DateTime<Utc>>,
-    pub referred_by: Option<String>,
     pub refer_code: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub is_deleted: bool,
-    pub referral_bonus_awarded: bool,
     pub parent_id: Option<uuid::Uuid>,
     pub scope_env: Option<Env>,
     pub premium_token: Option<String>,
@@ -30,7 +28,6 @@ pub struct Subscription {
 impl Subscription {
     pub fn new(
         id: uuid::Uuid,
-        ref_by: Option<String>,
         ref_code: String,
         exp_at: Option<DateTime<Utc>>,
         limit_bytes: Option<i64>,
@@ -39,12 +36,10 @@ impl Subscription {
         Self {
             id,
             expires_at: exp_at,
-            referred_by: ref_by,
             refer_code: ref_code,
             created_at: now,
             updated_at: now,
             is_deleted: false,
-            referral_bonus_awarded: false,
             parent_id: None,
             scope_env: None,
             premium_token: None,
@@ -64,12 +59,10 @@ impl Default for Subscription {
         Self {
             id,
             expires_at: None,
-            referred_by: None,
             refer_code,
             created_at: now,
             updated_at: now,
             is_deleted: false,
-            referral_bonus_awarded: false,
             parent_id: None,
             scope_env: None,
             premium_token: None,
@@ -89,14 +82,10 @@ impl From<tokio_postgres::Row> for Subscription {
         Self {
             id: row.get("id"),
             expires_at,
-            referred_by: row.get("referred_by"),
             refer_code: row.get("refer_code"),
             created_at,
             updated_at,
             is_deleted: row.get::<_, bool>("is_deleted"),
-            referral_bonus_awarded: row
-                .try_get::<_, bool>("referral_bonus_awarded")
-                .unwrap_or(false),
             parent_id: row.get("parent_id"),
             scope_env: row
                 .try_get::<_, String>("scope_env")
@@ -158,8 +147,6 @@ pub trait Operations {
     fn created_at(&self) -> DateTime<Utc>;
     fn refer_code(&self) -> String;
     fn set_refer_code(&mut self, code: String);
-    fn referred_by(&self) -> Option<&str>;
-    fn set_referred_by(&mut self, code: String);
     fn is_active(&self) -> bool;
     fn days_remaining(&self) -> Option<i64>;
     fn set_expires_at(&mut self, expires_at: DateTime<Utc>) -> Result<(), String>;
@@ -168,9 +155,6 @@ pub trait Operations {
 
     fn limit_bytes(&self) -> Option<i64>;
     fn set_limit_bytes(&mut self, bytes: i64);
-
-    fn referral_bonus_awarded(&self) -> bool;
-    fn set_referral_bonus_awarded(&mut self, awarded: bool);
 
     fn parent_id(&self) -> Option<uuid::Uuid>;
     fn set_parent_id(&mut self, parent_id: uuid::Uuid);
@@ -225,14 +209,6 @@ impl Operations for Subscription {
         self.refer_code = code;
     }
 
-    fn referred_by(&self) -> Option<&str> {
-        self.referred_by.as_deref().map(str::trim)
-    }
-
-    fn set_referred_by(&mut self, code: String) {
-        self.referred_by = Some(code);
-    }
-
     fn is_active(&self) -> bool {
         !self.is_deleted && self.expires_at > Some(Utc::now())
     }
@@ -263,15 +239,6 @@ impl Operations for Subscription {
 
     fn set_limit_bytes(&mut self, bytes: i64) {
         self.limit_bytes = Some(bytes)
-    }
-
-    fn referral_bonus_awarded(&self) -> bool {
-        self.referral_bonus_awarded
-    }
-
-    fn set_referral_bonus_awarded(&mut self, awarded: bool) {
-        self.referral_bonus_awarded = awarded;
-        self.updated_at = Utc::now();
     }
 
     fn parent_id(&self) -> Option<uuid::Uuid> {

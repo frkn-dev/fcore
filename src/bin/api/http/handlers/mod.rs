@@ -7,7 +7,6 @@ pub mod metrics;
 pub mod node;
 pub mod premium;
 pub mod subscription;
-pub mod trial;
 
 use warp::http::StatusCode;
 

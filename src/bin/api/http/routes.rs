@@ -4,7 +4,7 @@ use uuid::Uuid;
 use warp::Filter;
 
 use fcore::{
-    http::filters::{with_i64, with_param_bool, with_param_string},
+    http::filters::{with_param_bool, with_param_string},
     Connection, ConnectionApiOperations, ConnectionBaseOperations, NodeStorageOperations, Result,
     Subscription, SubscriptionOperations,
 };
@@ -15,7 +15,7 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*,
-        node::*, premium::*, subscription::*, trial::*,
+        node::*, premium::*, subscription::*,
     },
     param::*,
     rejection,
@@ -447,32 +447,6 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(post_activate_key_handler);
 
-        //Trial
-        let post_trial_route = warp::post()
-            .and(warp::path("trial"))
-            .and(warp::path::end())
-            .and(warp::body::json())
-            .and(warp::header::optional::<String>("x-trace-id"))
-            .and(with_sync(self.sync.clone()))
-            .and(with_email_store(self.email_store.clone()))
-            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
-            .and(with_param_ipaddrmask(
-                params.amnezia_wireguard_network.clone(),
-            ))
-            .and(with_param_envs(params.enabled_envs.clone()))
-            .and(with_param_tags(params.enabled_tags.clone()))
-            .and(with_i64(params.trial_limit_days))
-            .and(with_i64(params.trial_limit_bytes))
-            .and_then(post_trial_handler);
-
-        let validate_ref_code_route = warp::get()
-            .and(warp::path("validate"))
-            .and(warp::path("ref_code"))
-            .and(warp::path::end())
-            .and(warp::query::<RefCodeQueryParam>())
-            .and(with_sync(self.sync.clone()))
-            .and_then(validate_ref_code_handler);
-
         // Amnezia gateway routes
         let post_amnezia_services_route = warp::post()
             .and(warp::path("v1"))
@@ -562,9 +536,6 @@ where
             .or(get_key_validation_route)
             .or(post_key_route)
             .or(post_activate_key_route)
-            //Trial
-            .or(post_trial_route)
-            .or(validate_ref_code_route)
             // Amnezia
             .or(post_amnezia_services_route)
             .or(post_amnezia_account_route)

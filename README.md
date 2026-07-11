@@ -1,4 +1,5 @@
-[![Release](https://github.com/frkn-dev/fcore/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/frkn-dev/fcore/actions/workflows/release.yml) [![Fc0re Build](https://github.com/frkn-dev/pony/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/frkn-dev/fcore/actions/workflows/rust.yml)
+[![Release](https://github.com/frkn-dev/fcore/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/frkn-dev/fcore/actions/workflows/release.yml)
+[![Fcore Build](https://github.com/frkn-dev/fcore/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/frkn-dev/fcore/actions/workflows/rust.yml)
 
 # Fc0re - a cluster platform for Xray/Shadowsocks/Hysteria2/Wireguard/Amnezia-Wireguard/MTproto
 
@@ -8,33 +9,39 @@ providing a single pane of glass for your network infrastructure.
 
 ## Architecture
 
-Contains parts
+### Binaries
 
-- node — manages Xray/Shadowsocks/Hysteria2/Wireguard/Amnezia-Wireguard/MTproto connections/users/metrics
-- api — manages cluster of servers, gets API calls and send commands to servers using ZeroMQ PUB/SUB mechanizme
-- auth — handles auth for Hysteri2 clients and trial API
+| Binary | Purpose |
+|--------|---------|
+| `api` | Core API: subscriptions, connections, nodes, traffic accounting, metrics ingestion, admin panel. |
+| `node` | Agent that runs on every proxy node, drives Xray/Hysteria2/Wireguard/Amnezia-Wireguard/MTproto and reports stats. |
+| `auth` | Auth sidecar: keeps a local copy of connection state and answers `/auth` requests from proxy nodes. |
+| `pixel-agent` | Parses nginx pixel logs and serves web analytics with a built-in admin UI and Prometheus endpoint. |
+| `pixel-agent-backfill` | One-shot tool for rebuilding the pixel analytics snapshot from archived logs. |
+| `mrkting` | Marketing service: trial creation, email capture and welcome emails. |
 
-### As dependencies the platfrom has
+### External dependencies
 
-- ZeroMQ — communicating bus
-- PostgreSQL — user and node data storage
-- Xray Core
-- Hysteria2
-- Teleproxy (MTProxy)
-- Wireguard
-- Amnezia Wireguard
-- Nginx — reverse proxy
+- **ZeroMQ** — control bus between API, nodes and auth services.
+- **PostgreSQL** — subscription and node data storage.
+- **Xray Core**
+- **Hysteria2**
+- **Teleproxy (MTProxy)**
+- **Wireguard**
+- **Amnezia Wireguard**
+- **Nginx** — reverse proxy and pixel image endpoint
 
 ### Features
 
 - Standalone Node — can run without external dependencies.
-- Automatic Xray Config Parsing — reads xray-config.json to fetch inbounds and settings automatically.
+- Automatic Xray Config Parsing — reads `xray-config.json` to fetch inbounds and settings automatically.
 - Low Resource Usage — works perfectly on low-cost 1 CPU ($3 VPS) machines.
 - Protocol Support — handles VLESS TCP, VLESS gRPC, VLESS Xhttp, Hysteria2, Wireguard and Amnezia Wireguard connections.
 - Cluster Management — API manages users and nodes across the entire cluster.
 - Node Health Monitoring — API periodically checks the health and status of all connected nodes.
-- Metrics System — system and logic metrics are collected in Graphite format and stored in Clickhouse for analytics.
-- Trial User Support — supports trial users.
+- Metrics System — system and logic metrics are collected in Graphite format and stored in memory with snapshot persistence.
+- Web Analytics — built-in pixel analytics (visits, top pages, countries, referrers).
+- Trial and Marketing Flows — managed by the standalone `mrkting` service.
 
 ## Getting Started
 
@@ -45,26 +52,42 @@ Contains parts
 - **ZeroMQ** libraries installed on your system
 - **Protobuf Compiler** (`protoc`)
 
-### Installation & Build
-
-1. **Clone the repository:**
+### Build from source
 
 ```bash
-git clone [https://github.com/frkn-dev/fcore.git](https://github.com/frkn-dev/fcore.git)
+git clone https://github.com/frkn-dev/fcore.git
 cd fcore
+
+cargo build --release --bin api --no-default-features
+cargo build --release --bin auth --no-default-features
+cargo build --release --bin node --features xray,wireguard,amnezia-wg
+cargo build --release --bin pixel-agent --no-default-features
+cargo build --release --bin pixel-agent-backfill --no-default-features
+cargo build --release --bin mrkting --no-default-features
 ```
 
-2. **Build all components:**
+### Configuration
+
+Each binary has its own example config, systemd unit and README inside `src/bin/<name>/`:
 
 ```bash
-cargo build --release
+cp src/bin/api/api-example.toml /etc/fcore/api/config.toml
+cp src/bin/auth/auth-example.toml /etc/fcore/auth/config.toml
+cp src/bin/node/node-example.toml /etc/fcore/node/config.toml
+cp src/bin/pixel_agent/pixel-agent-example.toml /etc/pixel-agent/config.toml
+cp src/bin/mrkting/mrkting-example.toml /etc/fcore/mrkting/config.toml
 ```
 
-3. **Configuration**
+### Deploy from a GitHub Release
+
+Each binary has an install script in `deploy/`:
 
 ```bash
-cp config-node-example.toml config-node.toml
-cp config-api-example.toml config-api.toml
+sudo ./deploy/api-deploy.sh v0.5.16
+sudo ./deploy/auth-deploy.sh v0.5.16
+sudo ./deploy/node-deploy.sh v0.5.16
+sudo ./deploy/pixel-agent-deploy.sh v0.5.16
+sudo ./deploy/mrkting-deploy.sh v0.5.16
 ```
 
 ## License
