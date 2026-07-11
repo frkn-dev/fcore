@@ -88,8 +88,8 @@ impl PgEmails {
 
     pub async fn insert(
         &self,
-        email: &str,
-        email_hmac: &str,
+        email: Option<&str>,
+        email_hmac: Option<&str>,
         trial: bool,
         referred_by: Option<&str>,
         expires_at: Option<DateTime<Utc>>,
@@ -178,8 +178,8 @@ impl PgEmails {
 pub struct EmailRow {
     pub id: uuid::Uuid,
     pub subscription_id: Option<uuid::Uuid>,
-    pub email: String,
-    pub email_hmac: String,
+    pub email: Option<String>,
+    pub email_hmac: Option<String>,
     pub trial: bool,
     pub referred_by: Option<String>,
     pub ref_code: Option<String>,

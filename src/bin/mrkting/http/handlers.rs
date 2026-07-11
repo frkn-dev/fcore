@@ -35,13 +35,9 @@ pub async fn post_account_handler(
         .and_then(|s| uuid::Uuid::parse_str(&s).ok())
         .unwrap_or_else(uuid::Uuid::new_v4);
 
-    let email = match req.email() {
-        Some(e) if !e.is_empty() => e.to_lowercase(),
-        _ => return Ok(bad_request("Email is required")),
-    };
+    let email_opt = req.email().map(|e| e.to_lowercase());
 
-    let email_hmac = state.cipher.hmac(&email);
-
+    // Link email to an existing subscription.
     if let Some(subscription_id) = req.subscription_id {
         let info = match state.api_client.get_subscription(subscription_id).await {
             Ok(i) => i,
@@ -52,27 +48,30 @@ pub async fn post_account_handler(
             }
         };
 
-        let encrypted = match state.cipher.encrypt(&email) {
-            Ok(c) => c,
-            Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
-        };
+        if let Some(ref email) = email_opt {
+            let email_hmac = state.cipher.hmac(email);
+            let encrypted = match state.cipher.encrypt(email) {
+                Ok(c) => c,
+                Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
+            };
 
-        if let Err(e) = state
-            .pg
-            .emails()
-            .insert(
-                &encrypted,
-                &email_hmac,
-                false,
-                req.referred_by.as_deref(),
-                info.expires_at,
-                Some(subscription_id),
-                Some(&info.refer_code),
-            )
-            .await
-        {
-            tracing::error!("Failed to link email: {}", e);
-            return Ok(internal_error("Failed to save email"));
+            if let Err(e) = state
+                .pg
+                .emails()
+                .insert(
+                    Some(&encrypted),
+                    Some(&email_hmac),
+                    false,
+                    req.referred_by.as_deref(),
+                    info.expires_at,
+                    Some(subscription_id),
+                    Some(&info.refer_code),
+                )
+                .await
+            {
+                tracing::error!("Failed to link email: {}", e);
+                return Ok(internal_error("Failed to save email"));
+            }
         }
 
         return Ok(Box::new(warp::reply::json(
@@ -95,45 +94,52 @@ pub async fn post_account_handler(
         }
     };
 
-    if req.trial {
-        match state.pg.emails().find_by_hmac(&email_hmac).await {
-            Ok(Some(_)) => return Ok(bad_request("Trial already requested")),
-            Err(e) => {
-                tracing::error!("Failed to lookup email hmac: {}", e);
-                return Ok(internal_error("Database error"));
+    let mut row_id: Option<uuid::Uuid> = None;
+    if let Some(ref email) = email_opt {
+        let email_hmac = state.cipher.hmac(email);
+
+        if req.trial {
+            match state.pg.emails().find_by_hmac(&email_hmac).await {
+                Ok(Some(_)) => return Ok(bad_request("Trial already requested")),
+                Err(e) => {
+                    tracing::error!("Failed to lookup email hmac: {}", e);
+                    return Ok(internal_error("Database error"));
+                }
+                _ => {}
             }
-            _ => {}
         }
+
+        let encrypted = match state.cipher.encrypt(email) {
+            Ok(c) => c,
+            Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
+        };
+
+        let referred_by = req.referred_by.clone().unwrap_or_else(|| "WEB".to_string());
+        let expires_at = Some(Utc::now() + chrono::Duration::days(days));
+
+        row_id = Some(
+            match state
+                .pg
+                .emails()
+                .insert(
+                    Some(&encrypted),
+                    Some(&email_hmac),
+                    req.trial,
+                    Some(&referred_by),
+                    expires_at,
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("Failed to insert email: {}", e);
+                    return Ok(internal_error("Failed to save email"));
+                }
+            },
+        );
     }
-
-    let encrypted = match state.cipher.encrypt(&email) {
-        Ok(c) => c,
-        Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
-    };
-
-    let referred_by = req.referred_by.clone().unwrap_or_else(|| "WEB".to_string());
-    let expires_at = Some(Utc::now() + chrono::Duration::days(days));
-
-    let row_id = match state
-        .pg
-        .emails()
-        .insert(
-            &encrypted,
-            &email_hmac,
-            req.trial,
-            Some(&referred_by),
-            expires_at,
-            None,
-            None,
-        )
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to insert email: {}", e);
-            return Ok(internal_error("Failed to save email"));
-        }
-    };
 
     let info = match state
         .api_client
@@ -147,13 +153,15 @@ pub async fn post_account_handler(
         }
     };
 
-    if let Err(e) = state
-        .pg
-        .emails()
-        .update_subscription_id_and_ref_code(row_id, info.id, &info.refer_code)
-        .await
-    {
-        tracing::error!("Failed to update email record {}: {}", row_id, e);
+    if let Some(row_id) = row_id {
+        if let Err(e) = state
+            .pg
+            .emails()
+            .update_subscription_id_and_ref_code(row_id, info.id, &info.refer_code)
+            .await
+        {
+            tracing::error!("Failed to update email record {}: {}", row_id, e);
+        }
     }
 
     create_connections(
@@ -164,15 +172,18 @@ pub async fn post_account_handler(
     )
     .await;
 
-    state
-        .mailer
-        .send_welcome_email(email, info.id, req.language);
+    if let Some(ref email) = email_opt {
+        state
+            .mailer
+            .send_welcome_email(email.clone(), info.id, req.language);
+    }
 
     Ok(Box::new(warp::reply::json(
         &serde_json::json!({
             "subscription_id": info.id,
             "ref_code": info.refer_code,
-            "message": "Account created. Check email",
+            "message": "Account created",
+            "email_sent": email_opt.is_some(),
         }),
     )))
 }

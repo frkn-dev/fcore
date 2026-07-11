@@ -20,6 +20,7 @@ impl AccountRequest {
             .as_deref()
             .or(self.user.as_deref())
             .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
     }
 }
 

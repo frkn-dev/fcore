@@ -208,8 +208,8 @@ CREATE SCHEMA IF NOT EXISTS mrkting;
 CREATE TABLE mrkting.emails (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subscription_id UUID REFERENCES subscriptions(id) ON DELETE SET NULL,
-    email TEXT NOT NULL,
-    email_hmac TEXT NOT NULL,
+    email TEXT,
+    email_hmac TEXT,
     trial BOOLEAN NOT NULL DEFAULT false,
     referred_by VARCHAR(13),
     ref_code VARCHAR(13),
@@ -225,4 +225,8 @@ CREATE INDEX idx_emails_ref_code ON mrkting.emails(ref_code);
 
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS referred_by;
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS referral_bonus_awarded;
+
+-- Allow mrkting emails without email address.
+ALTER TABLE mrkting.emails ALTER COLUMN email DROP NOT NULL;
+ALTER TABLE mrkting.emails ALTER COLUMN email_hmac DROP NOT NULL;
 
