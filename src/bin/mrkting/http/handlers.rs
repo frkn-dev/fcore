@@ -86,13 +86,7 @@ pub async fn post_account_handler(
     let (days, limit_bytes) = if req.trial {
         (state.settings.trial.days, state.settings.trial.limit_bytes)
     } else {
-        match (req.days, req.limit_bytes) {
-            (Some(d), Some(l)) => (d, l),
-            _ => {
-                return Ok(bad_request(
-                    "days and limit_bytes are required for non-trial accounts"))
-            }
-        }
+        (req.days.unwrap_or(0), req.limit_bytes.unwrap_or(0))
     };
 
     // Prevent duplicate trial requests for the same email.
@@ -130,7 +124,11 @@ pub async fn post_account_handler(
             Ok(c) => c,
             Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
         };
-        let expires_at = Some(Utc::now() + chrono::Duration::days(days));
+        let expires_at = if days > 0 {
+            Some(Utc::now() + chrono::Duration::days(days))
+        } else {
+            None
+        };
 
         if let Err(e) = state
             .pg
