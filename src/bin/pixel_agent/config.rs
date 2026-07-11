@@ -1,6 +1,10 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+fn default_cors_origins() -> Vec<String> {
+    vec!["http://localhost:8080".to_string()]
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct AgentConfig {
@@ -22,6 +26,9 @@ pub struct AgentConfig {
 
     #[serde(default = "default_admin_port")]
     pub admin_port: u16,
+
+    #[serde(default = "default_cors_origins")]
+    pub cors_origins: Vec<String>,
 
     #[serde(default = "default_poll_interval_sec")]
     pub poll_interval_sec: u64,

@@ -5,6 +5,7 @@ snapshot_path = "/var/lib/pixel-agent/metrics.snapshot"
 geoip_db = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
 admin_listen = "0.0.0.0"
 admin_port = 9102
+cors_origins = ["http://localhost:8080", "https://frkn.org", "https://api.frkn.org"]
 poll_interval_sec = 30
 flush_interval_sec = 300
 snapshot_interval_sec = 300

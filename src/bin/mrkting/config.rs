@@ -41,6 +41,10 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_cors_origins() -> Vec<String> {
+    vec!["http://localhost:8080".to_string()]
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceConfig {
     #[serde(default = "default_listen_address")]
@@ -48,6 +52,8 @@ pub struct ServiceConfig {
     pub port: u16,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_cors_origins")]
+    pub cors_origins: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

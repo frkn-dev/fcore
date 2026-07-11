@@ -11,6 +11,7 @@ use super::{
 pub fn routes(
     state: AppState,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    let cors_origins = state.settings.service.cors_origins.clone();
     let with_state = warp::any().map(move || state.clone());
 
     let healthcheck = warp::get()
@@ -41,10 +42,17 @@ pub fn routes(
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_validate_ref_code_handler);
 
-    let cors = warp::cors()
-        .allow_any_origin()
+    let mut cors_builder = warp::cors()
         .allow_methods(vec!["GET", "POST", "OPTIONS"])
-        .allow_headers(vec!["Content-Type", "Authorization", "X-Trace-Id"]);
+        .allow_headers(vec!["Content-Type", "Authorization", "X-Trace-Id"])
+        .allow_credentials(true)
+        .max_age(86400);
+
+    for origin in &cors_origins {
+        cors_builder = cors_builder.allow_origin(origin.as_str());
+    }
+
+    let cors = cors_builder.build();
 
     healthcheck
         .or(account)

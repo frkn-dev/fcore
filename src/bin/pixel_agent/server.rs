@@ -26,6 +26,7 @@ struct MetricsResponse {
 pub async fn start_admin_server(
     listen: String,
     port: u16,
+    cors_origins: Vec<String>,
     aggregator: Arc<Mutex<Aggregator>>,
     storage: Arc<WebMetricStorage>,
 ) {
@@ -55,8 +56,19 @@ pub async fn start_admin_server(
     let routes = index
         .or(metrics_api)
         .or(prometheus)
-        .or(health)
-        .with(warp::cors().allow_any_origin());
+        .or(health);
+
+    let mut cors_builder = warp::cors()
+        .allow_methods(vec!["GET", "POST", "OPTIONS"])
+        .allow_headers(vec!["Content-Type", "Authorization"])
+        .allow_credentials(true)
+        .max_age(86400);
+
+    for origin in &cors_origins {
+        cors_builder = cors_builder.allow_origin(origin.as_str());
+    }
+
+    let routes = routes.with(cors_builder.build());
 
     let addr: std::net::SocketAddr = format!("{}:{}", listen, port)
         .parse()
