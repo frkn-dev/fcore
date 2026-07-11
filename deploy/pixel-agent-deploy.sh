@@ -10,8 +10,7 @@ CONFIG_DIR="/etc/pixel-agent"
 DATA_DIR="/var/lib/pixel-agent"
 GEOIP_DIR="/usr/share/GeoIP"
 GEOIP_DB="${GEOIP_DIR}/GeoLite2-Country.mmdb"
-GEOIP_VERSION="2.3.2026061719"
-GEOIP_TARBALL_URL="https://registry.npmjs.org/@ip-location-db/geolite2-country-mmdb/-/geolite2-country-mmdb-${GEOIP_VERSION}.tgz"
+GEOIP_URL="https://raw.githubusercontent.com/adysec/IP_database/main/geolite/GeoLite2-Country.mmdb"
 SERVICE="pixel-agent"
 
 BIN_URL="https://github.com/${REPO}/releases/download/${VERSION}/pixel-agent-x86_64"
@@ -38,10 +37,7 @@ chmod +x "${INSTALL_DIR}/pixel-agent-backfill"
 mkdir -p "$GEOIP_DIR"
 if [[ ! -f "$GEOIP_DB" ]]; then
     echo "Downloading GeoIP database..."
-    curl -fsSL -o /tmp/geoip-country.tgz "$GEOIP_TARBALL_URL"
-    tar -xzf /tmp/geoip-country.tgz -C /tmp
-    cp "/tmp/package/geolite2-country.mmdb" "$GEOIP_DB"
-    rm -rf /tmp/geoip-country.tgz /tmp/package
+    curl -fsSL -o "$GEOIP_DB" "$GEOIP_URL"
     echo "GeoIP database installed to $GEOIP_DB"
 else
     echo "GeoIP database already exists at $GEOIP_DB; skipping."

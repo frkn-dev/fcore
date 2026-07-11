@@ -18,8 +18,7 @@ LOG_LEVEL="${LOG_LEVEL:-info}"
 LOG_PATH="${LOG_PATH:-/var/log/nginx/pixel.log}"
 GEOIP_DIR="${GEOIP_DIR:-/usr/share/GeoIP}"
 GEOIP_DB="${GEOIP_DB:-$GEOIP_DIR/GeoLite2-Country.mmdb}"
-GEOIP_VERSION="${GEOIP_VERSION:-2.3.2026061719}"
-GEOIP_TARBALL_URL="https://registry.npmjs.org/@ip-location-db/geolite2-country-mmdb/-/geolite2-country-mmdb-${GEOIP_VERSION}.tgz"
+GEOIP_URL="${GEOIP_URL:-https://raw.githubusercontent.com/adysec/IP_database/main/geolite/GeoLite2-Country.mmdb}"
 ADMIN_LISTEN="${ADMIN_LISTEN:-0.0.0.0}"
 ADMIN_PORT="${ADMIN_PORT:-9102}"
 POLL_INTERVAL_SEC="${POLL_INTERVAL_SEC:-30}"
@@ -71,10 +70,7 @@ chown pixel-agent:pixel-agent /var/lib/pixel-agent
 mkdir -p "$GEOIP_DIR"
 if [[ ! -f "$GEOIP_DB" ]]; then
     echo "Downloading GeoIP database..."
-    curl -fsSL -o /tmp/geoip-country.tgz "$GEOIP_TARBALL_URL"
-    tar -xzf /tmp/geoip-country.tgz -C /tmp
-    cp "/tmp/package/geolite2-country.mmdb" "$GEOIP_DB"
-    rm -rf /tmp/geoip-country.tgz /tmp/package
+    curl -fsSL -o "$GEOIP_DB" "$GEOIP_URL"
     echo "GeoIP database installed to $GEOIP_DB"
 else
     echo "GeoIP database already exists at $GEOIP_DB. Skip."

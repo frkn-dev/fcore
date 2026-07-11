@@ -19,15 +19,12 @@ Standalone daemon that parses nginx pixel logs and exposes web analytics with a 
 
 ## GeoIP database
 
-The agent needs a GeoLite2 Country MMDB database to resolve visitor countries. The install/deploy scripts download it automatically from a public npm mirror. If you install manually, download it with:
+The agent needs a GeoLite2 Country MMDB database to resolve visitor countries. The install/deploy scripts download it automatically from a public mirror. If you install manually, download it with:
 
 ```bash
 mkdir -p /usr/share/GeoIP
-curl -fsSL -o /tmp/geoip-country.tgz \
-  https://registry.npmjs.org/@ip-location-db/geolite2-country-mmdb/-/geolite2-country-mmdb-2.3.2026061719.tgz
-tar -xzf /tmp/geoip-country.tgz -C /tmp
-cp /tmp/package/geolite2-country.mmdb /usr/share/GeoIP/GeoLite2-Country.mmdb
-rm -rf /tmp/geoip-country.tgz /tmp/package
+curl -fsSL -o /usr/share/GeoIP/GeoLite2-Country.mmdb \
+  https://raw.githubusercontent.com/adysec/IP_database/main/geolite/GeoLite2-Country.mmdb
 ```
 
 ## Quick start
