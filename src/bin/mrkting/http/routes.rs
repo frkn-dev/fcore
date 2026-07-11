@@ -2,8 +2,8 @@ use warp::Filter;
 
 use super::{
     handlers::{
-        get_referral_stats_handler, get_validate_ref_code_handler, healthcheck_handler,
-        post_account_handler, AppState,
+        get_referral_stats_handler, get_subscription_by_ref_code_handler,
+        get_validate_ref_code_handler, healthcheck_handler, post_account_handler, AppState,
     },
     request::{AccountRequest, RefCodeQuery},
 };
@@ -54,9 +54,18 @@ pub fn routes(
 
     let cors = cors_builder.build();
 
+    let subscription_by_ref_code = warp::get()
+        .and(warp::path("subscription"))
+        .and(warp::path("by_ref_code"))
+        .and(warp::path::end())
+        .and(with_state.clone())
+        .and(warp::query::<RefCodeQuery>())
+        .and_then(get_subscription_by_ref_code_handler);
+
     healthcheck
         .or(account)
         .or(referrals)
         .or(validate)
+        .or(subscription_by_ref_code)
         .with(cors)
 }

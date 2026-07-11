@@ -266,6 +266,55 @@ pub async fn get_validate_ref_code_handler(
     )))
 }
 
+pub async fn get_subscription_by_ref_code_handler(
+    state: AppState,
+    query: RefCodeQuery,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    let row = match state.pg.emails().get_by_ref_code(&query.code).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({"status": 404, "message": "Ref code not found"}),
+                ),
+                warp::http::StatusCode::NOT_FOUND,
+            )))
+        }
+        Err(e) => {
+            tracing::error!("Failed to lookup ref code: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    let subscription_id = match row.subscription_id {
+        Some(id) => id,
+        None => {
+            return Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({"status": 404, "message": "Subscription not linked"}),
+                ),
+                warp::http::StatusCode::NOT_FOUND,
+            )))
+        }
+    };
+
+    let info = match state.api_client.get_subscription(subscription_id).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::error!("Failed to fetch subscription {}: {}", subscription_id, e);
+            return Ok(internal_error("Failed to fetch subscription"));
+        }
+    };
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "subscription_id": subscription_id,
+            "ref_code": query.code,
+            "expires_at": info.expires_at,
+        }),
+    )))
+}
+
 fn bad_request(msg: &str) -> Box<dyn Reply + Send> {
     Box::new(warp::reply::with_status(
         warp::reply::json(&serde_json::json!({"status": 400, "message": msg})),
