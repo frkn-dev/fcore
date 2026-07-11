@@ -202,31 +202,7 @@ ALTER TABLE subscriptions
     DROP COLUMN IF EXISTS daily_start_downlink_bytes,
     DROP COLUMN IF EXISTS last_daily_reset_at;
 
--- Marketing schema: emails, referrals, trials.
-CREATE SCHEMA IF NOT EXISTS mrkting;
-
-CREATE TABLE mrkting.emails (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    subscription_id UUID REFERENCES subscriptions(id) ON DELETE SET NULL,
-    email TEXT,
-    email_hmac TEXT,
-    trial BOOLEAN NOT NULL DEFAULT false,
-    referred_by VARCHAR(13),
-    ref_code VARCHAR(13),
-    created_at TIMESTAMPTZ DEFAULT now(),
-    expires_at TIMESTAMPTZ
-);
-
-CREATE INDEX idx_emails_subscription_id ON mrkting.emails(subscription_id);
-CREATE INDEX idx_emails_hmac ON mrkting.emails(email_hmac);
-CREATE INDEX idx_emails_trial_created ON mrkting.emails(trial, created_at);
-CREATE INDEX idx_emails_referred_by ON mrkting.emails(referred_by);
-CREATE INDEX idx_emails_ref_code ON mrkting.emails(ref_code);
-
+-- Remove referral columns that moved to the mrkting DB.
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS referred_by;
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS referral_bonus_awarded;
-
--- Allow mrkting emails without email address.
-ALTER TABLE mrkting.emails ALTER COLUMN email DROP NOT NULL;
-ALTER TABLE mrkting.emails ALTER COLUMN email_hmac DROP NOT NULL;
 
