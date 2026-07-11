@@ -1,7 +1,9 @@
+use chrono::Utc;
 use tracing::{error, Instrument};
 
 use fcore::{
     http::{helpers as http, response::Instance},
+    utils::get_uuid_last_octet_simple,
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Distributor, Error, Key,
     NodeStorageOperations, Status, Subscription, SubscriptionOperations,
 };
@@ -104,6 +106,7 @@ where
 }
 
 /// Post activate key
+/// If subscription_id is not provided, a new subscription is created using the key's days.
 pub async fn post_activate_key_handler<N, C, S>(
     req: ActivateKeyReq,
     trace_id_header: Option<String>,
@@ -134,22 +137,59 @@ where
         return Ok(http::bad_request("Key already activated"));
     }
 
-    subscription_audit::log_transaction_start(req.subscription_id, Some(key.days as i64));
+    let sub_id = match req.subscription_id {
+        Some(id) => id,
+        None => {
+            let sub_id = uuid::Uuid::new_v4();
+            let ref_code = get_uuid_last_octet_simple(&sub_id);
+            let expires_at = Some(Utc::now() + chrono::Duration::days(key.days as i64));
+            let sub = Subscription::new(sub_id, ref_code, expires_at, req.limit_bytes);
+
+            subscription_audit::log_transaction_start(sub_id, Some(key.days as i64));
+
+            match SyncOp::add_sub(&memory, sub.clone())
+                .instrument(subscription_audit::transaction_span(
+                    "key_activate_create_sub",
+                    sub_id,
+                    Some(trace_id),
+                ))
+                .await
+            {
+                Ok(Status::Ok(_)) | Ok(Status::Updated(_)) => sub_id,
+                Ok(Status::AlreadyExist(_)) => sub_id,
+                Ok(Status::NotFound(_)) => {
+                    return Ok(http::not_found("Subscription not found"));
+                }
+                Ok(Status::BadRequest(_, msg)) => {
+                    return Ok(http::bad_request(&format!("Failed to create subscription: {}", msg)));
+                }
+                Err(err) => {
+                    return Ok(http::bad_request(&format!(
+                        "Failed to create subscription: {}",
+                        err
+                    )));
+                }
+                _ => return Ok(http::not_modified("")),
+            }
+        }
+    };
+
+    subscription_audit::log_transaction_start(sub_id, Some(key.days as i64));
 
     match SyncOp::add_days(
         &memory,
-        &req.subscription_id,
+        &sub_id,
         key.days as i64,
     )
     .instrument(subscription_audit::transaction_span(
         "key_activate_handler",
-        req.subscription_id,
+        sub_id,
         Some(trace_id),
     ))
     .await
     {
         Ok(Status::Updated(_)) => {
-            key.activate(&req.subscription_id);
+            key.activate(&sub_id);
             if let Err(err) = key_db.activate(&key).await {
                 return Ok(http::bad_request(&format!(
                     "Key activation failed: {}",

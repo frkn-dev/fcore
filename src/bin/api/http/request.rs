@@ -167,7 +167,8 @@ pub struct KeyReq {
 #[derive(Serialize, Deserialize)]
 pub struct ActivateKeyReq {
     pub code: String,
-    pub subscription_id: uuid::Uuid,
+    pub subscription_id: Option<uuid::Uuid>,
+    pub limit_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
