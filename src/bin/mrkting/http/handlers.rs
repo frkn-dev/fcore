@@ -4,7 +4,7 @@ use warp::Reply;
 
 use super::request::{AccountRequest, RefCodeQuery};
 use crate::{
-    api_client::{ApiClient},
+    api_client::ApiClient,
     config::{ServiceSettings, TrialConfig},
     crypto::EmailCipher,
     email::Mailer,
@@ -49,6 +49,7 @@ pub async fn post_account_handler(
         };
 
         if let Some(ref email) = email_opt {
+            let referred_by = resolve_referrer(req.referred_by.as_deref(), &info.refer_code);
             let email_hmac = state.cipher.hmac(email);
             let encrypted = match state.cipher.encrypt(email) {
                 Ok(c) => c,
@@ -62,7 +63,7 @@ pub async fn post_account_handler(
                     Some(&encrypted),
                     Some(&email_hmac),
                     false,
-                    req.referred_by.as_deref(),
+                    referred_by.as_deref(),
                     info.expires_at,
                     Some(subscription_id),
                     Some(&info.refer_code),
@@ -94,11 +95,10 @@ pub async fn post_account_handler(
         }
     };
 
-    let mut row_id: Option<uuid::Uuid> = None;
-    if let Some(ref email) = email_opt {
-        let email_hmac = state.cipher.hmac(email);
-
-        if req.trial {
+    // Prevent duplicate trial requests for the same email.
+    if req.trial {
+        if let Some(ref email) = email_opt {
+            let email_hmac = state.cipher.hmac(email);
             match state.pg.emails().find_by_hmac(&email_hmac).await {
                 Ok(Some(_)) => return Ok(bad_request("Trial already requested")),
                 Err(e) => {
@@ -108,39 +108,9 @@ pub async fn post_account_handler(
                 _ => {}
             }
         }
-
-        let encrypted = match state.cipher.encrypt(email) {
-            Ok(c) => c,
-            Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
-        };
-
-        let referred_by = req.referred_by.clone().unwrap_or_else(|| "WEB".to_string());
-        let expires_at = Some(Utc::now() + chrono::Duration::days(days));
-
-        row_id = Some(
-            match state
-                .pg
-                .emails()
-                .insert(
-                    Some(&encrypted),
-                    Some(&email_hmac),
-                    req.trial,
-                    Some(&referred_by),
-                    expires_at,
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::error!("Failed to insert email: {}", e);
-                    return Ok(internal_error("Failed to save email"));
-                }
-            },
-        );
     }
 
+    // Create subscription first so we know the generated ref_code.
     let info = match state
         .api_client
         .create_subscription(days, limit_bytes, Some(trace_id))
@@ -153,15 +123,36 @@ pub async fn post_account_handler(
         }
     };
 
-    if let Some(row_id) = row_id {
+    if let Some(ref email) = email_opt {
+        let referred_by = resolve_referrer(req.referred_by.as_deref(), &info.refer_code);
+        let email_hmac = state.cipher.hmac(email);
+        let encrypted = match state.cipher.encrypt(email) {
+            Ok(c) => c,
+            Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
+        };
+        let expires_at = Some(Utc::now() + chrono::Duration::days(days));
+
         if let Err(e) = state
             .pg
             .emails()
-            .update_subscription_id_and_ref_code(row_id, info.id, &info.refer_code)
+            .insert(
+                Some(&encrypted),
+                Some(&email_hmac),
+                req.trial,
+                referred_by.as_deref(),
+                expires_at,
+                Some(info.id),
+                Some(&info.refer_code),
+            )
             .await
         {
-            tracing::error!("Failed to update email record {}: {}", row_id, e);
+            tracing::error!("Failed to insert email: {}", e);
+            return Ok(internal_error("Failed to save email"));
         }
+
+        state
+            .mailer
+            .send_welcome_email(email.clone(), info.id, req.language);
     }
 
     create_connections(
@@ -172,12 +163,6 @@ pub async fn post_account_handler(
     )
     .await;
 
-    if let Some(ref email) = email_opt {
-        state
-            .mailer
-            .send_welcome_email(email.clone(), info.id, req.language);
-    }
-
     Ok(Box::new(warp::reply::json(
         &serde_json::json!({
             "subscription_id": info.id,
@@ -186,6 +171,21 @@ pub async fn post_account_handler(
             "email_sent": email_opt.is_some(),
         }),
     )))
+}
+
+/// Resolve the referrer code. Returns None for self-referrals and "WEB" when no code is provided.
+fn resolve_referrer(referred_by: Option<&str>, own_ref_code: &str) -> Option<String> {
+    match referred_by {
+        Some(code) if code.eq_ignore_ascii_case(own_ref_code) => {
+            tracing::warn!(
+                "Self-referral attempt detected: referred_by equals own ref_code {}",
+                own_ref_code
+            );
+            None
+        }
+        Some(code) if !code.trim().is_empty() => Some(code.trim().to_string()),
+        _ => Some("WEB".to_string()),
+    }
 }
 
 async fn create_connections(

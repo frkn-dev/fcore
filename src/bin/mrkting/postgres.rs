@@ -120,23 +120,6 @@ impl PgEmails {
         Ok(row.get("id"))
     }
 
-    pub async fn update_subscription_id_and_ref_code(
-        &self,
-        id: uuid::Uuid,
-        subscription_id: uuid::Uuid,
-        ref_code: &str,
-    ) -> Result<()> {
-        let mut manager = self.manager.lock().await;
-        let client = manager.get_client().await?;
-        client
-            .execute(
-                "UPDATE mrkting.emails SET subscription_id = $1, ref_code = $2 WHERE id = $3",
-                &[&subscription_id, &ref_code, &id],
-            )
-            .await?;
-        Ok(())
-    }
-
     pub async fn find_by_hmac(&self, email_hmac: &str) -> Result<Option<EmailRow>> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
