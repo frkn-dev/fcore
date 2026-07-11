@@ -16,7 +16,10 @@ PIXEL_AGENT_CONFIG_PATH="$INSTALL_DIR/config.toml"
 # Agent settings
 LOG_LEVEL="${LOG_LEVEL:-info}"
 LOG_PATH="${LOG_PATH:-/var/log/nginx/pixel.log}"
-GEOIP_DB="${GEOIP_DB:-/usr/share/GeoIP/GeoLite2-Country.mmdb}"
+GEOIP_DIR="${GEOIP_DIR:-/usr/share/GeoIP}"
+GEOIP_DB="${GEOIP_DB:-$GEOIP_DIR/GeoLite2-Country.mmdb}"
+GEOIP_VERSION="${GEOIP_VERSION:-2.3.2026061719}"
+GEOIP_TARBALL_URL="https://registry.npmjs.org/@ip-location-db/geolite2-country-mmdb/-/geolite2-country-mmdb-${GEOIP_VERSION}.tgz"
 ADMIN_LISTEN="${ADMIN_LISTEN:-0.0.0.0}"
 ADMIN_PORT="${ADMIN_PORT:-9102}"
 POLL_INTERVAL_SEC="${POLL_INTERVAL_SEC:-30}"
@@ -63,6 +66,19 @@ EOF
 id -u pixel-agent &>/dev/null || useradd --system --no-create-home pixel-agent
 mkdir -p /var/lib/pixel-agent
 chown pixel-agent:pixel-agent /var/lib/pixel-agent
+
+# Download GeoIP database if missing
+mkdir -p "$GEOIP_DIR"
+if [[ ! -f "$GEOIP_DB" ]]; then
+    echo "Downloading GeoIP database..."
+    curl -fsSL -o /tmp/geoip-country.tgz "$GEOIP_TARBALL_URL"
+    tar -xzf /tmp/geoip-country.tgz -C /tmp
+    cp "/tmp/package/geolite2-country.mmdb" "$GEOIP_DB"
+    rm -rf /tmp/geoip-country.tgz /tmp/package
+    echo "GeoIP database installed to $GEOIP_DB"
+else
+    echo "GeoIP database already exists at $GEOIP_DB. Skip."
+fi
 
 systemctl daemon-reload
 systemctl enable pixel-agent

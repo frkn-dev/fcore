@@ -8,6 +8,10 @@ REPO="frkn-dev/fcore"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/pixel-agent"
 DATA_DIR="/var/lib/pixel-agent"
+GEOIP_DIR="/usr/share/GeoIP"
+GEOIP_DB="${GEOIP_DIR}/GeoLite2-Country.mmdb"
+GEOIP_VERSION="2.3.2026061719"
+GEOIP_TARBALL_URL="https://registry.npmjs.org/@ip-location-db/geolite2-country-mmdb/-/geolite2-country-mmdb-${GEOIP_VERSION}.tgz"
 SERVICE="pixel-agent"
 
 BIN_URL="https://github.com/${REPO}/releases/download/${VERSION}/pixel-agent-x86_64"
@@ -29,6 +33,19 @@ chmod +x "${INSTALL_DIR}/${SERVICE}"
 
 curl -fsSL -o "${INSTALL_DIR}/pixel-agent-backfill" "https://github.com/${REPO}/releases/download/${VERSION}/pixel-agent-backfill-x86_64"
 chmod +x "${INSTALL_DIR}/pixel-agent-backfill"
+
+# Download GeoIP database if missing
+mkdir -p "$GEOIP_DIR"
+if [[ ! -f "$GEOIP_DB" ]]; then
+    echo "Downloading GeoIP database..."
+    curl -fsSL -o /tmp/geoip-country.tgz "$GEOIP_TARBALL_URL"
+    tar -xzf /tmp/geoip-country.tgz -C /tmp
+    cp "/tmp/package/geolite2-country.mmdb" "$GEOIP_DB"
+    rm -rf /tmp/geoip-country.tgz /tmp/package
+    echo "GeoIP database installed to $GEOIP_DB"
+else
+    echo "GeoIP database already exists at $GEOIP_DB; skipping."
+fi
 
 cp "src/bin/pixel_agent/pixel-agent.service" "/etc/systemd/system/${SERVICE}.service"
 cp "src/bin/pixel_agent/pixel-agent-backfill.service" "/etc/systemd/system/pixel-agent-backfill.service"

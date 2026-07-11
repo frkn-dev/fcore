@@ -17,6 +17,19 @@ Standalone daemon that parses nginx pixel logs and exposes web analytics with a 
 - `pixel-agent-backfill.service` / `pixel-agent-backfill.timer` — periodic backfill.
 - `docs/nginx.conf` — example nginx reverse proxy for the admin UI.
 
+## GeoIP database
+
+The agent needs a GeoLite2 Country MMDB database to resolve visitor countries. The install/deploy scripts download it automatically from a public npm mirror. If you install manually, download it with:
+
+```bash
+mkdir -p /usr/share/GeoIP
+curl -fsSL -o /tmp/geoip-country.tgz \
+  https://registry.npmjs.org/@ip-location-db/geolite2-country-mmdb/-/geolite2-country-mmdb-2.3.2026061719.tgz
+tar -xzf /tmp/geoip-country.tgz -C /tmp
+cp /tmp/package/geolite2-country.mmdb /usr/share/GeoIP/GeoLite2-Country.mmdb
+rm -rf /tmp/geoip-country.tgz /tmp/package
+```
+
 ## Quick start
 
 ```bash
