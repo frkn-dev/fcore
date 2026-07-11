@@ -63,11 +63,6 @@ where
     async fn update_sub(&self, sub_id: &uuid::Uuid, sub_req: SubReq) -> SyncResult<Status>;
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
     async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
-    async fn apply_referral_bonuses(
-        &self,
-        b_sub_id: &uuid::Uuid,
-        paid_days: i64,
-    ) -> SyncResult<()>;
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
@@ -583,7 +578,7 @@ where
         }
 
         if let Some(days) = req.days {
-            self.apply_referral_bonuses(sub_id, days).await?;
+            let _ = days;
         }
 
         info!("Successfully updated subscription: {}", sub_id);
@@ -592,7 +587,6 @@ where
 
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {
         let status = self.add_days_inner(sub_id, days).await?;
-        self.apply_referral_bonuses(sub_id, days).await?;
         Ok(status)
     }
 
@@ -665,120 +659,4 @@ where
         }
     }
 
-    async fn apply_referral_bonuses(
-        &self,
-        b_sub_id: &uuid::Uuid,
-        paid_days: i64,
-    ) -> SyncResult<()> {
-        let bonus_days = self
-            .referral_bonus_tiers
-            .iter()
-            .filter(|(threshold, _)| **threshold <= paid_days)
-            .max_by_key(|(threshold, _)| *threshold)
-            .map(|(_, bonus)| *bonus)
-            .unwrap_or(0);
-
-        if bonus_days <= 0 {
-            return Ok(());
-        }
-
-        let referrer_id = {
-            let mem = self.memory.read().await;
-            let b = match mem.subscriptions.find_by_id(b_sub_id) {
-                Some(s) => s,
-                None => return Ok(()),
-            };
-            if b.referral_bonus_awarded() {
-                return Ok(());
-            }
-            let ref_by = match b.referred_by() {
-                Some(c) => c,
-                None => return Ok(()),
-            };
-            if self.system_refer_codes.iter().any(|c| c == ref_by) {
-                return Ok(());
-            }
-            if ref_by == b.refer_code() {
-                return Ok(());
-            }
-            mem.subscriptions
-                .find_by_refer_code(ref_by)
-                .map(|s| s.id())
-        };
-
-        if let Some(referrer_id) = referrer_id {
-            let (old_referrer_expires, old_invited_expires) = {
-                let mem = self.memory.read().await;
-                (
-                    mem.subscriptions
-                        .find_by_id(&referrer_id)
-                        .and_then(|s| s.expires_at()),
-                    mem.subscriptions.find_by_id(b_sub_id).and_then(|s| s.expires_at()),
-                )
-            };
-
-            if let Err(e) = self.add_days_inner(&referrer_id, bonus_days).await {
-                error!(
-                    "Failed to add referral bonus days to referrer {}: {:?}",
-                    referrer_id, e
-                );
-                return Err(e);
-            }
-            if let Err(e) = self.add_days_inner(b_sub_id, bonus_days).await {
-                error!(
-                    "Failed to add referral bonus days to invited {}: {:?}",
-                    b_sub_id, e
-                );
-                return Err(e);
-            }
-
-            let (new_referrer_expires, new_invited_expires) = {
-                let mem = self.memory.read().await;
-                (
-                    mem.subscriptions
-                        .find_by_id(&referrer_id)
-                        .and_then(|s| s.expires_at()),
-                    mem.subscriptions.find_by_id(b_sub_id).and_then(|s| s.expires_at()),
-                )
-            };
-
-            {
-                let mut mem = self.memory.write().await;
-                if let Some(sub) = mem.subscriptions.find_by_id_mut(b_sub_id) {
-                    sub.set_referral_bonus_awarded(true);
-                }
-            }
-
-            if let Err(e) = self
-                .db
-                .sub()
-                .set_referral_bonus_awarded(b_sub_id, true)
-                .await
-            {
-                error!(
-                    "Failed to mark referral bonus awarded for {}: {:?}",
-                    b_sub_id, e
-                );
-                return Err(SyncError::Database(e));
-            }
-
-            subscription_audit::log_referral_bonus(
-                *b_sub_id,
-                referrer_id,
-                paid_days,
-                bonus_days,
-                old_invited_expires,
-                new_invited_expires,
-                old_referrer_expires,
-                new_referrer_expires,
-            );
-
-            info!(
-                "Referral bonus awarded: referrer {} and invited {} got {} days (paid {} days)",
-                referrer_id, b_sub_id, bonus_days, paid_days
-            );
-        }
-
-        Ok(())
-    }
 }

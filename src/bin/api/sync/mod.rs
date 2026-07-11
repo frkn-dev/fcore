@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -20,8 +19,6 @@ where
     pub memory: Arc<RwLock<Cache<N, C, S>>>,
     pub db: PgContext,
     pub publisher: Publisher,
-    pub referral_bonus_tiers: BTreeMap<i64, i64>,
-    pub system_refer_codes: Vec<String>,
 }
 
 impl<N, C, S> MemSync<N, C, S>
@@ -41,20 +38,11 @@ where
         memory: Arc<RwLock<Cache<N, C, S>>>,
         db: PgContext,
         publisher: Publisher,
-        referral_bonus: std::collections::HashMap<String, i64>,
-        system_refer_codes: Vec<String>,
     ) -> Self {
-        let referral_bonus_tiers = referral_bonus
-            .into_iter()
-            .filter_map(|(k, v)| k.parse::<i64>().ok().map(|threshold| (threshold, v)))
-            .collect::<BTreeMap<i64, i64>>();
-
         Self {
             memory,
             db,
             publisher,
-            referral_bonus_tiers,
-            system_refer_codes,
         }
     }
 }

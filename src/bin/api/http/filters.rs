@@ -52,12 +52,6 @@ pub fn with_param_ipaddrmask(
     warp::any().map(move || param.clone())
 }
 
-pub fn with_param_vec_string(
-    param: Vec<String>,
-) -> impl Filter<Extract = (Vec<String>,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || param.clone())
-}
-
 pub fn with_metrics(
     metrics: Arc<MetricStorage>,
 ) -> impl Filter<Extract = (Arc<MetricStorage>,), Error = std::convert::Infallible> + Clone {

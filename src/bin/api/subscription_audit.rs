@@ -86,36 +86,6 @@ pub fn log_days_change(
     );
 }
 
-/// Logs a referral bonus awarded to both the referrer and the invited user.
-pub fn log_referral_bonus(
-    invited_sub_id: Uuid,
-    referrer_sub_id: Uuid,
-    paid_days: i64,
-    bonus_days: i64,
-    old_invited_expires: Option<DateTime<Utc>>,
-    new_invited_expires: Option<DateTime<Utc>>,
-    old_referrer_expires: Option<DateTime<Utc>>,
-    new_referrer_expires: Option<DateTime<Utc>>,
-) {
-    tracing::info!(
-        target: "subscription.audit",
-        event = "referral_bonus",
-        invited_sub_id = %invited_sub_id,
-        referrer_sub_id = %referrer_sub_id,
-        paid_days = paid_days,
-        bonus_days = bonus_days,
-        old_invited_expires_at = old_invited_expires.map(|d| d.to_rfc3339()),
-        new_invited_expires_at = new_invited_expires.map(|d| d.to_rfc3339()),
-        old_referrer_expires_at = old_referrer_expires.map(|d| d.to_rfc3339()),
-        new_referrer_expires_at = new_referrer_expires.map(|d| d.to_rfc3339()),
-        old_invited_days_remaining = days_remaining(old_invited_expires),
-        new_invited_days_remaining = days_remaining(new_invited_expires),
-        old_referrer_days_remaining = days_remaining(old_referrer_expires),
-        new_referrer_days_remaining = days_remaining(new_referrer_expires),
-        "referral bonus awarded",
-    );
-}
-
 /// Logs the moment a subscription expires and its connections are deactivated.
 pub fn log_subscription_expired(
     sub_id: Uuid,

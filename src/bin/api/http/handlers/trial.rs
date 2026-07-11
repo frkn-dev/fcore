@@ -6,7 +6,7 @@ use fcore::{
     http::helpers as http, http::response::Instance, utils, utils::get_uuid_last_octet_simple,
     Connection, ConnectionApiOperations, ConnectionBaseOperations, ConnectionStorageApiOperations,
     Env, IpAddrMask, NodeStorageOperations, Proto, Status, Subscription, SubscriptionOperations,
-    SubscriptionStorageOperations, Tag, Topic, WgKeys, WgParam,
+    Tag, Topic, WgKeys, WgParam,
 };
 
 use super::super::super::{
@@ -23,7 +23,6 @@ pub async fn post_trial_handler<N, C, S>(
     store: EmailStore,
     wireguard_network: IpAddrMask,
     amnezia_wireguard_network: IpAddrMask,
-    system_refer_codes: Vec<String>,
     envs: Vec<Env>,
     protos: Vec<Tag>,
     trial_days: i64,
@@ -59,16 +58,6 @@ where
 
     let ref_by = req.referred_by.clone().unwrap_or_else(|| "WEB".to_string());
     let sub_id = uuid::Uuid::new_v4();
-
-    // Verify that the referral code exists (if provided and it is not a system code).
-    if let Some(ref_by_code) = req.referred_by.clone() {
-        let mem = memory.memory.read().await;
-        if !system_refer_codes.iter().any(|c| c == &ref_by_code)
-            && mem.subscriptions.find_by_refer_code(&ref_by_code).is_none()
-        {
-            return Ok(http::bad_request("Refer code not found"));
-        }
-    }
 
     let now = Utc::now();
 

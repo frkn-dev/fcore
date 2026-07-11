@@ -171,7 +171,6 @@ pub async fn post_subscription_handler<N, C, S>(
     req: SubReq,
     trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
-    system_refer_codes: Vec<String>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -192,16 +191,6 @@ where
     let ref_code = req
         .refer_code
         .unwrap_or_else(|| get_uuid_last_octet_simple(&sub_id));
-
-    // Verify that the referral code exists (if provided and it is not a system code).
-    if let Some(ref_by) = req.referred_by.clone() {
-        let mem = memory.memory.read().await;
-        if !system_refer_codes.iter().any(|c| c == &ref_by)
-            && mem.subscriptions.find_by_refer_code(&ref_by).is_none()
-        {
-            return Ok(http::bad_request("Refer code no found"));
-        }
-    }
 
     let expires_at: Option<DateTime<Utc>> = req
         .days
@@ -857,4 +846,36 @@ where
     };
 
     Ok(Box::new(warp::reply::json(&response)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefCodeQueryParam {
+    pub code: String,
+}
+
+pub async fn validate_ref_code_handler<N, C, S>(
+    param: RefCodeQueryParam,
+    memory: MemSync<N, C, S>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let mem = memory.memory.read().await;
+    let valid = mem
+        .subscriptions
+        .find_by_refer_code(&param.code)
+        .map(|s| s.is_active())
+        .unwrap_or(false);
+
+    Ok(warp::reply::json(&serde_json::json!({ "valid": valid })))
 }

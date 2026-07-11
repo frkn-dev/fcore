@@ -353,7 +353,6 @@ where
             .and(warp::body::json())
             .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
-            .and(with_param_vec_string(params.system_refer_codes.clone()))
             .and_then(post_subscription_handler);
 
         let put_subscription_route = warp::put()
@@ -460,12 +459,19 @@ where
             .and(with_param_ipaddrmask(
                 params.amnezia_wireguard_network.clone(),
             ))
-            .and(with_param_vec_string(params.system_refer_codes.clone()))
             .and(with_param_envs(params.enabled_envs.clone()))
             .and(with_param_tags(params.enabled_tags.clone()))
             .and(with_i64(params.trial_limit_days))
             .and(with_i64(params.trial_limit_bytes))
             .and_then(post_trial_handler);
+
+        let validate_ref_code_route = warp::get()
+            .and(warp::path("validate"))
+            .and(warp::path("ref_code"))
+            .and(warp::path::end())
+            .and(warp::query::<RefCodeQueryParam>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(validate_ref_code_handler);
 
         // Amnezia gateway routes
         let post_amnezia_services_route = warp::post()
@@ -558,6 +564,7 @@ where
             .or(post_activate_key_route)
             //Trial
             .or(post_trial_route)
+            .or(validate_ref_code_route)
             // Amnezia
             .or(post_amnezia_services_route)
             .or(post_amnezia_account_route)
