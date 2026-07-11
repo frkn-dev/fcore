@@ -41,5 +41,14 @@ pub fn routes(
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_validate_ref_code_handler);
 
-    healthcheck.or(account).or(referrals).or(validate)
+    let cors = warp::cors()
+        .allow_any_origin()
+        .allow_methods(vec!["GET", "POST", "OPTIONS"])
+        .allow_headers(vec!["Content-Type", "Authorization", "X-Trace-Id"]);
+
+    healthcheck
+        .or(account)
+        .or(referrals)
+        .or(validate)
+        .with(cors)
 }
