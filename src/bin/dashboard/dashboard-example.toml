@@ -1,0 +1,16 @@
+[pixel]
+endpoint = "http://127.0.0.1:9102"
+# token = "optional-pixel-token"
+
+[payment]
+endpoint = "http://127.0.0.1:3006"
+analytics_token = "your-analytics-token"
+
+[mrkting]
+endpoint = "http://127.0.0.1:3007"
+# token = "optional-mrkting-token"
+
+[dashboard]
+listen = "127.0.0.1"
+port = 9103
+refresh_sec = 30

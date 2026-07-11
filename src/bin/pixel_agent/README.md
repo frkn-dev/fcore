@@ -6,6 +6,7 @@ Standalone daemon that parses nginx pixel logs and exposes web analytics with a 
 
 - Tails `/var/log/nginx/pixel.log` every polling interval.
 - Parses pixel hits into page views, referrers, countries and UTM data.
+- Strips query strings from page paths so `/subscription?id=...` is recorded as `/subscription`.
 - Aggregates metrics into time buckets and persists snapshots.
 - Serves an admin dashboard on `admin_listen:admin_port`.
 - Exposes `/metrics` in Prometheus format.

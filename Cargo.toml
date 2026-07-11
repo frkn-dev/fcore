@@ -109,3 +109,7 @@ path = "src/bin/pixel_agent/backfill.rs"
 name = "mrkting"
 path = "src/bin/mrkting/main.rs"
 
+[[bin]]
+name = "dashboard"
+path = "src/bin/dashboard/main.rs"
+
