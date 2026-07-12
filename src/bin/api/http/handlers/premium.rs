@@ -26,6 +26,16 @@ pub struct PremiumChildCreateRequest {
     pub limit_bytes: Option<i64>,
 }
 
+impl PremiumChildCreateRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        match self.days {
+            Some(days) if days > 0 => Ok(()),
+            Some(_) => Err("days must be greater than 0".to_string()),
+            None => Err("days is required".to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PremiumChildUpdateRequest {
     pub days: Option<i64>,
@@ -192,6 +202,16 @@ where
     let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     let sub_id = Uuid::new_v4();
     let ref_code = fcore::utils::get_uuid_last_octet_simple(&sub_id);
+
+    if let Err(e) = req.validate() {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 400, "message": e}),
+            ),
+            warp::http::StatusCode::BAD_REQUEST,
+        )));
+    }
+
     let expires_at = req.days.map(|d| Utc::now() + chrono::Duration::days(d));
 
     let mut sub = Subscription::new(sub_id, ref_code, expires_at, req.limit_bytes);
@@ -207,13 +227,13 @@ where
         ))
         .await
     {
-        Ok(_) => Ok(warp::reply::with_status(
+        Ok(_) => Ok(Box::new(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({ "id": sub_id })),
             StatusCode::CREATED,
-        )),
+        ))),
         Err(e) => {
             tracing::error!("Failed to create premium child subscription: {:?}", e);
-            Ok(http::internal_error(&format!("{}", e)))
+            Ok(Box::new(http::internal_error(&format!("{}", e))))
         }
     }
 }

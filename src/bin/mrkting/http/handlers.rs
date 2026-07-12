@@ -89,6 +89,13 @@ pub async fn post_account_handler(
         (req.days, req.limit_bytes)
     };
 
+    if !req.trial {
+        match days {
+            Some(d) if d > 0 => {}
+            _ => return Ok(bad_request("days is required and must be greater than 0")),
+        }
+    }
+
     // Prevent duplicate trial requests for the same email.
     if req.trial {
         if let Some(ref email) = email_opt {

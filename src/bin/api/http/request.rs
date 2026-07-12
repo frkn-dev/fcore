@@ -98,6 +98,16 @@ pub struct Subscription {
     pub limit_bytes: Option<i64>,
 }
 
+impl Subscription {
+    pub fn validate(&self) -> Result<(), String> {
+        match self.days {
+            Some(days) if days > 0 => Ok(()),
+            Some(_) => Err("days must be greater than 0".to_string()),
+            None => Err("days is required".to_string()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeRequest {
     pub env: Env,

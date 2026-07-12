@@ -188,6 +188,10 @@ where
     let trace_id = subscription_audit::trace_id_from_header(trace_id_header);
     let sub_id = uuid::Uuid::new_v4();
 
+    if let Err(e) = req.validate() {
+        return Ok(http::bad_request(&e));
+    }
+
     let ref_code = req
         .refer_code
         .unwrap_or_else(|| get_uuid_last_octet_simple(&sub_id));
