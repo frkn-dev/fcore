@@ -183,10 +183,8 @@ impl Operations for Subscription {
         }
     }
     fn extend(&mut self, days: i64) {
-        if let Some(expires_at) = self.expires_at {
-            let new_exp = expires_at + chrono::Duration::days(days);
-            self.expires_at = Some(new_exp);
-        };
+        let base = self.expires_at.unwrap_or_else(Utc::now);
+        self.expires_at = Some(base + chrono::Duration::days(days));
         self.updated_at = Utc::now();
     }
 
