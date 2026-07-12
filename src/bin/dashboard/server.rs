@@ -1,4 +1,5 @@
 use crate::config::Config;
+use chrono::Datelike;
 use serde::Serialize;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -23,11 +24,80 @@ pub struct OverviewResponse {
 #[derive(serde::Deserialize, Debug)]
 pub struct OverviewQuery {
     #[serde(default = "default_overview_period")]
-    pub period: i64,
+    pub period: String,
 }
 
-fn default_overview_period() -> i64 {
-    1
+fn default_overview_period() -> String {
+    "24h".to_string()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OverviewPeriod {
+    Today,
+    Yesterday,
+    Last24h,
+    Last7d,
+    Last30d,
+    Last90d,
+    ThisMonth,
+}
+
+impl OverviewPeriod {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "today" => Some(Self::Today),
+            "yesterday" => Some(Self::Yesterday),
+            "24h" => Some(Self::Last24h),
+            "7d" => Some(Self::Last7d),
+            "30d" => Some(Self::Last30d),
+            "90d" => Some(Self::Last90d),
+            "month" => Some(Self::ThisMonth),
+            _ => s.parse::<i64>().ok().and_then(|_| Some(Self::Last24h)),
+        }
+    }
+
+    /// Returns (from_ms, to_ms, api_period_days) for backend queries.
+    fn bounds(&self) -> (i64, i64, i64) {
+        let now = chrono::Utc::now();
+        let to_ms = now.timestamp_millis();
+
+        match self {
+            Self::Today => {
+                let start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
+                let from_ms = start.and_utc().timestamp_millis();
+                (from_ms, to_ms, 2)
+            }
+            Self::Yesterday => {
+                let yesterday = now.date_naive() - chrono::Days::new(1);
+                let start = yesterday.and_hms_opt(0, 0, 0).unwrap();
+                let end = yesterday.and_hms_opt(23, 59, 59).unwrap();
+                let from_ms = start.and_utc().timestamp_millis();
+                let to_ms = end.and_utc().timestamp_millis();
+                (from_ms, to_ms, 2)
+            }
+            Self::Last24h => {
+                let from_ms = to_ms - 24 * 60 * 60 * 1000;
+                (from_ms, to_ms, 2)
+            }
+            Self::Last7d => {
+                let from_ms = to_ms - 7 * 24 * 60 * 60 * 1000;
+                (from_ms, to_ms, 7)
+            }
+            Self::Last30d => {
+                let from_ms = to_ms - 30 * 24 * 60 * 60 * 1000;
+                (from_ms, to_ms, 30)
+            }
+            Self::Last90d => {
+                let from_ms = to_ms - 90 * 24 * 60 * 60 * 1000;
+                (from_ms, to_ms, 90)
+            }
+            Self::ThisMonth => {
+                let start = now.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+                let from_ms = start.and_utc().timestamp_millis();
+                (from_ms, to_ms, 31)
+            }
+        }
+    }
 }
 
 pub async fn start_server(config: Config) {
@@ -100,7 +170,8 @@ async fn overview_handler(
     query: OverviewQuery,
     state: Arc<AppState>,
 ) -> Result<impl warp::Reply, Infallible> {
-    let overview = build_overview(state, query.period.max(1)).await.unwrap_or(OverviewResponse {
+    let period = OverviewPeriod::from_str(&query.period).unwrap_or(OverviewPeriod::Last24h);
+    let overview = build_overview(state, period).await.unwrap_or(OverviewResponse {
         visits: 0,
         payments: 0,
         revenue: 0.0,
@@ -109,13 +180,15 @@ async fn overview_handler(
     Ok(warp::reply::json(&overview))
 }
 
-async fn build_overview(state: Arc<AppState>, period_days: i64) -> Result<OverviewResponse, reqwest::Error> {
-    let now = chrono::Utc::now().timestamp_millis();
-    let from_ms = now - period_days * 24 * 60 * 60 * 1000;
+async fn build_overview(
+    state: Arc<AppState>,
+    period: OverviewPeriod,
+) -> Result<OverviewResponse, reqwest::Error> {
+    let (from_ms, to_ms, api_period) = period.bounds();
 
     let pixel_url = format!(
         "{}/api/metrics?from_ms={}&to_ms={}",
-        state.config.pixel.endpoint, from_ms, now
+        state.config.pixel.endpoint, from_ms, to_ms
     );
     let mut pixel_req = state.http.get(&pixel_url);
     if let Some(token) = &state.config.pixel.token {
@@ -134,7 +207,7 @@ async fn build_overview(state: Arc<AppState>, period_days: i64) -> Result<Overvi
 
     let payment_url = format!(
         "{}/analytics/sales?period={}&granularity=daily",
-        state.config.payment.endpoint, period_days
+        state.config.payment.endpoint, api_period
     );
     let payment_req = state
         .http
@@ -146,7 +219,7 @@ async fn build_overview(state: Arc<AppState>, period_days: i64) -> Result<Overvi
     let (payments, revenue) = match payment_req.send().await {
         Ok(resp) => {
             let data: serde_json::Value = resp.json().await.unwrap_or_default();
-            extract_latest_sales(&data)
+            extract_sales_in_range(&data, from_ms, to_ms)
         }
         Err(err) => {
             tracing::warn!("Failed to fetch payment sales: {}", err);
@@ -154,10 +227,9 @@ async fn build_overview(state: Arc<AppState>, period_days: i64) -> Result<Overvi
         }
     };
 
-    // Trials from mrkting for the same period
     let trials_url = format!(
         "{}/analytics/trials?period={}&granularity=daily",
-        state.config.mrkting.endpoint, period_days
+        state.config.mrkting.endpoint, api_period
     );
     let mut trials_req = state.http.get(&trials_url);
     if let Some(token) = &state.config.mrkting.token {
@@ -166,10 +238,7 @@ async fn build_overview(state: Arc<AppState>, period_days: i64) -> Result<Overvi
     let trials = match trials_req.send().await {
         Ok(resp) => {
             let data: serde_json::Value = resp.json().await.unwrap_or_default();
-            data.get("totals")
-                .and_then(|t| t.get("trials"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
+            extract_trials_in_range(&data, from_ms, to_ms)
         }
         Err(err) => {
             tracing::warn!("Failed to fetch trials: {}", err);
@@ -205,19 +274,62 @@ fn count_visits(data: &serde_json::Value) -> u64 {
     total
 }
 
-fn extract_latest_sales(data: &serde_json::Value) -> (u64, f64) {
-    if let Some(totals) = data.get("totals") {
-        let confirmed = totals
-            .get("confirmed")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let revenue = totals
-            .get("revenue")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        return (confirmed, revenue);
+fn extract_sales_in_range(data: &serde_json::Value, from_ms: i64, to_ms: i64) -> (u64, f64) {
+    let mut payments = 0u64;
+    let mut revenue = 0.0;
+    if let Some(data_arr) = data.get("data").and_then(|d| d.as_array()) {
+        for bucket in data_arr {
+            if let Some(bucket_str) = bucket.get("bucket").and_then(|b| b.as_str()) {
+                if let Ok(bucket_ms) = parse_bucket_ms(bucket_str) {
+                    if bucket_ms >= from_ms && bucket_ms <= to_ms {
+                        payments += bucket
+                            .get("confirmed")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        revenue += bucket
+                            .get("revenue")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                    }
+                }
+            }
+        }
     }
-    (0, 0.0)
+    (payments, revenue)
+}
+
+fn extract_trials_in_range(data: &serde_json::Value, from_ms: i64, to_ms: i64) -> u64 {
+    let mut total = 0u64;
+    if let Some(data_arr) = data.get("data").and_then(|d| d.as_array()) {
+        for bucket in data_arr {
+            if let Some(bucket_str) = bucket.get("bucket").and_then(|b| b.as_str()) {
+                if let Ok(bucket_ms) = parse_bucket_ms(bucket_str) {
+                    if bucket_ms >= from_ms && bucket_ms <= to_ms {
+                        total += bucket
+                            .get("trials")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+
+fn parse_bucket_ms(bucket: &str) -> Result<i64, chrono::ParseError> {
+    let dt = if bucket.len() == 7 {
+        chrono::NaiveDate::parse_from_str(bucket, "%Y-%m")?
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+    } else {
+        chrono::NaiveDate::parse_from_str(bucket, "%Y-%m-%d")?
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+    };
+    Ok(dt.timestamp_millis())
 }
 
 async fn sales_proxy_handler(
