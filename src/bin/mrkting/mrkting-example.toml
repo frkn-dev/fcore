@@ -2,7 +2,7 @@
 listen = "127.0.0.1"
 port = 9103
 log_level = "info"
-cors_origins = ["http://localhost:8080", "https://frkn.org", "https://beta.frkn.org"]
+cors_origins = ["http://localhost:8080", "https://dashboard.frkn.org", "https://frkn.org", "https://beta.frkn.org"]
 
 [pg]
 host = "localhost"

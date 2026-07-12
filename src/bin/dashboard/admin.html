@@ -23,9 +23,11 @@
   .small { font-size: 0.8rem; color: var(--muted); }
   .error { color: #991b1b; }
   canvas { width: 100%; height: 240px; }
-  .toolbar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  .toolbar { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
   .toolbar button { padding: 0.4rem 0.8rem; border: 1px solid var(--border); background: #fff; border-radius: 4px; cursor: pointer; }
   .toolbar button.active { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
+  .overview-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+  .overview-header h2 { margin: 0; font-size: 1.1rem; }
 </style>
 </head>
 <body>
@@ -34,11 +36,20 @@
   <span class="small" id="status"></span>
 </header>
 <main>
+  <div class="overview-header">
+    <h2 id="overview-title">Overview (24h)</h2>
+    <div class="toolbar" id="overview-toolbar">
+      <button class="active" data-period="1">24h</button>
+      <button data-period="7">7 days</button>
+      <button data-period="30">30 days</button>
+      <button data-period="90">90 days</button>
+    </div>
+  </div>
   <div class="grid" id="overview">
-    <div class="card"><h3>Visits (24h)</h3><div class="value" id="visits-24h">-</div></div>
-    <div class="card"><h3>Trials (24h)</h3><div class="value" id="trials-24h">-</div></div>
-    <div class="card"><h3>Payments (24h)</h3><div class="value" id="payments-24h">-</div></div>
-    <div class="card"><h3>Revenue (24h)</h3><div class="value" id="revenue-24h">-</div></div>
+    <div class="card"><h3>Visits</h3><div class="value" id="visits">-</div></div>
+    <div class="card"><h3>Trials</h3><div class="value" id="trials">-</div></div>
+    <div class="card"><h3>Payments</h3><div class="value" id="payments">-</div></div>
+    <div class="card"><h3>Revenue</h3><div class="value" id="revenue">-</div></div>
   </div>
 
   <section>
@@ -75,13 +86,13 @@
     return Math.round(value).toLocaleString() + ' ₽';
   }
 
-  async function loadOverview() {
+  async function loadOverview(period) {
     try {
-      const data = await fetch('api/overview').then(r => r.json());
-      $('visits-24h').textContent = data.visits_24h.toLocaleString();
-      $('trials-24h').textContent = data.trials_24h.toLocaleString();
-      $('payments-24h').textContent = data.payments_24h.toLocaleString();
-      $('revenue-24h').textContent = formatCurrency(data.revenue_24h);
+      const data = await fetch(`api/overview?period=${period}`).then(r => r.json());
+      $('visits').textContent = data.visits.toLocaleString();
+      $('trials').textContent = data.trials.toLocaleString();
+      $('payments').textContent = data.payments.toLocaleString();
+      $('revenue').textContent = formatCurrency(data.revenue);
     } catch (e) {
       setStatus('overview error: ' + e.message, true);
     }
@@ -205,10 +216,22 @@
 
   let currentPeriod = 30;
   let currentGranularity = 'daily';
+  let overviewPeriod = 1;
 
-  document.querySelectorAll('.toolbar button').forEach(btn => {
+  document.querySelectorAll('#overview-toolbar button').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('#overview-toolbar button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      overviewPeriod = parseInt(btn.dataset.period, 10);
+      const label = btn.textContent;
+      $('overview-title').textContent = 'Overview (' + label + ')';
+      loadOverview(overviewPeriod);
+    });
+  });
+
+  document.querySelectorAll('section .toolbar button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('section .toolbar button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       currentPeriod = btn.dataset.period;
       currentGranularity = btn.dataset.granularity;
@@ -217,7 +240,11 @@
   });
 
   async function refresh() {
-    await Promise.all([loadOverview(), loadSales(currentPeriod, currentGranularity), loadVisits()]);
+    await Promise.all([
+      loadOverview(overviewPeriod),
+      loadSales(currentPeriod, currentGranularity),
+      loadVisits()
+    ]);
     setStatus('updated ' + new Date().toLocaleTimeString());
   }
 

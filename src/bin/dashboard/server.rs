@@ -14,10 +14,20 @@ pub struct AppState {
 
 #[derive(Serialize)]
 pub struct OverviewResponse {
-    pub visits_24h: u64,
-    pub payments_24h: u64,
-    pub revenue_24h: f64,
-    pub trials_24h: u64,
+    pub visits: u64,
+    pub payments: u64,
+    pub revenue: f64,
+    pub trials: u64,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct OverviewQuery {
+    #[serde(default = "default_overview_period")]
+    pub period: i64,
+}
+
+fn default_overview_period() -> i64 {
+    1
 }
 
 pub async fn start_server(config: Config) {
@@ -34,6 +44,7 @@ pub async fn start_server(config: Config) {
         .and(warp::path("overview"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(warp::query::<OverviewQuery>())
         .and(with_state(state.clone()))
         .and_then(overview_handler);
 
@@ -85,19 +96,22 @@ fn with_state(
     warp::any().map(move || state.clone())
 }
 
-async fn overview_handler(state: Arc<AppState>) -> Result<impl warp::Reply, Infallible> {
-    let overview = build_overview(state).await.unwrap_or(OverviewResponse {
-        visits_24h: 0,
-        payments_24h: 0,
-        revenue_24h: 0.0,
-        trials_24h: 0,
+async fn overview_handler(
+    query: OverviewQuery,
+    state: Arc<AppState>,
+) -> Result<impl warp::Reply, Infallible> {
+    let overview = build_overview(state, query.period.max(1)).await.unwrap_or(OverviewResponse {
+        visits: 0,
+        payments: 0,
+        revenue: 0.0,
+        trials: 0,
     });
     Ok(warp::reply::json(&overview))
 }
 
-async fn build_overview(state: Arc<AppState>) -> Result<OverviewResponse, reqwest::Error> {
+async fn build_overview(state: Arc<AppState>, period_days: i64) -> Result<OverviewResponse, reqwest::Error> {
     let now = chrono::Utc::now().timestamp_millis();
-    let from_ms = now - 24 * 60 * 60 * 1000;
+    let from_ms = now - period_days * 24 * 60 * 60 * 1000;
 
     let pixel_url = format!(
         "{}/api/metrics?from_ms={}&to_ms={}",
@@ -107,7 +121,7 @@ async fn build_overview(state: Arc<AppState>) -> Result<OverviewResponse, reqwes
     if let Some(token) = &state.config.pixel.token {
         pixel_req = pixel_req.header("Authorization", format!("Bearer {}", token));
     }
-    let visits_24h = match pixel_req.send().await {
+    let visits = match pixel_req.send().await {
         Ok(resp) => {
             let data: serde_json::Value = resp.json().await.unwrap_or_default();
             count_visits(&data)
@@ -119,8 +133,8 @@ async fn build_overview(state: Arc<AppState>) -> Result<OverviewResponse, reqwes
     };
 
     let payment_url = format!(
-        "{}/analytics/sales?period=1&granularity=daily",
-        state.config.payment.endpoint
+        "{}/analytics/sales?period={}&granularity=daily",
+        state.config.payment.endpoint, period_days
     );
     let payment_req = state
         .http
@@ -129,7 +143,7 @@ async fn build_overview(state: Arc<AppState>) -> Result<OverviewResponse, reqwes
             "Authorization",
             format!("Bearer {}", state.config.payment.analytics_token),
         );
-    let (payments_24h, revenue_24h) = match payment_req.send().await {
+    let (payments, revenue) = match payment_req.send().await {
         Ok(resp) => {
             let data: serde_json::Value = resp.json().await.unwrap_or_default();
             extract_latest_sales(&data)
@@ -140,16 +154,16 @@ async fn build_overview(state: Arc<AppState>) -> Result<OverviewResponse, reqwes
         }
     };
 
-    // Trials from mrkting (24h = period 1 daily)
+    // Trials from mrkting for the same period
     let trials_url = format!(
-        "{}/analytics/trials?period=1&granularity=daily",
-        state.config.mrkting.endpoint
+        "{}/analytics/trials?period={}&granularity=daily",
+        state.config.mrkting.endpoint, period_days
     );
     let mut trials_req = state.http.get(&trials_url);
     if let Some(token) = &state.config.mrkting.token {
         trials_req = trials_req.header("Authorization", format!("Bearer {}", token));
     }
-    let trials_24h = match trials_req.send().await {
+    let trials = match trials_req.send().await {
         Ok(resp) => {
             let data: serde_json::Value = resp.json().await.unwrap_or_default();
             data.get("totals")
@@ -164,10 +178,10 @@ async fn build_overview(state: Arc<AppState>) -> Result<OverviewResponse, reqwes
     };
 
     Ok(OverviewResponse {
-        visits_24h,
-        payments_24h,
-        revenue_24h,
-        trials_24h,
+        visits,
+        payments,
+        revenue,
+        trials,
     })
 }
 
