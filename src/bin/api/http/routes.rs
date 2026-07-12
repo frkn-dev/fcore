@@ -438,6 +438,9 @@ where
             .and(with_param_vec(params.key_sign_token.clone()))
             .and_then(post_key_handler);
 
+        let enabled_envs = params.enabled_envs.clone();
+        let enabled_tags = params.enabled_tags.clone();
+
         let post_activate_key_route = warp::post()
             .and(warp::path("key"))
             .and(warp::path("activate"))
@@ -445,6 +448,10 @@ where
             .and(warp::body::json())
             .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(params.amnezia_wireguard_network.clone()))
+            .and(warp::any().map(move || enabled_envs.clone()))
+            .and(warp::any().map(move || enabled_tags.clone()))
             .and_then(post_activate_key_handler);
 
         // Amnezia gateway routes

@@ -101,6 +101,157 @@ where
     ))
 }
 
+/// Internal helper to create a connection. Returns the connection id or an error message.
+pub async fn create_connection_inner<N, C, S>(
+    env: &fcore::Env,
+    proto: fcore::Tag,
+    subscription_id: Option<uuid::Uuid>,
+    days: Option<u16>,
+    memory: &MemSync<N, C, S>,
+    wg_network: &IpAddrMask,
+    awg_network: &IpAddrMask,
+) -> Result<(uuid::Uuid, Connection), String>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let expired_at: Option<DateTime<Utc>> = days
+        .map(|d| Utc::now() + chrono::Duration::days(d.into()));
+
+    let mem = memory.memory.read().await;
+    if let Some(sub_id) = subscription_id {
+        if mem.subscriptions.find_by_id(&sub_id).is_none() {
+            return Err(format!("Subscription {} not found", sub_id));
+        }
+        if let Some(sub) = mem.subscriptions.find_by_id(&sub_id) {
+            if !sub.is_active() {
+                return Err(format!("Subscription is not active {}", sub_id));
+            }
+        }
+    }
+
+    let proto = match proto {
+        Tag::Wireguard => {
+            let last_ip: Option<Ipv4Addr> = mem
+                .connections
+                .get_last_wg_addr()
+                .and_then(|mask| mask.as_ipv4());
+
+            let next = match last_ip {
+                Some(ip) => IpAddrMask::increment_ipv4(ip),
+                None => wg_network.first_peer_ip(),
+            };
+
+            let next = next.ok_or("Failed to allocate IP")?;
+
+            if !wg_network.contains_ipv4(next) {
+                return Err("IP out of range".to_string());
+            }
+
+            Proto::Wireguard {
+                param: WgParam {
+                    keys: WgKeys::default(),
+                    address: IpAddrMask {
+                        address: IpAddr::V4(next),
+                        cidr: 32,
+                    },
+                },
+            }
+        }
+        Tag::AmneziaWg => {
+            let last_ip: Option<Ipv4Addr> = mem
+                .connections
+                .get_last_awg_addr()
+                .and_then(|mask| mask.as_ipv4());
+
+            let next = match last_ip {
+                Some(ip) => IpAddrMask::increment_ipv4(ip),
+                None => awg_network.first_peer_ip(),
+            };
+
+            let next = next.ok_or("Failed to allocate IP")?;
+
+            if !awg_network.contains_ipv4(next) {
+                return Err("IP out of range".to_string());
+            }
+
+            Proto::AmneziaWg {
+                param: WgParam {
+                    keys: WgKeys::default(),
+                    address: IpAddrMask {
+                        address: IpAddr::V4(next),
+                        cidr: 32,
+                    },
+                },
+            }
+        }
+        Tag::Shadowsocks => {
+            let password = utils::generate_random_password(15);
+            Proto::Shadowsocks { password }
+        }
+        Tag::VlessTcpReality
+        | Tag::VlessGrpcReality
+        | Tag::VlessXhttpReality
+        | Tag::VlessXhttpCdn
+        | Tag::Vmess => Proto::Xray(proto),
+        Tag::Hysteria2 => {
+            let token = uuid::Uuid::new_v4();
+            Proto::Hysteria2 { token }
+        }
+        Tag::Mtproto => {
+            let secret = utils::generate_random_password(15);
+            Proto::Mtproto { secret }
+        }
+    };
+
+    drop(mem);
+
+    let conn: Connection = Connection::new(env, subscription_id, proto, expired_at);
+    let conn_id = uuid::Uuid::new_v4();
+    let msg = conn.as_create_message(&conn_id);
+
+    let messages = vec![msg];
+
+    match SyncOp::add_conn(memory, &conn_id, conn.clone()).await {
+        Ok(Status::Ok(id)) => {
+            let bytes = match rkyv::to_bytes::<_, 1024>(&messages) {
+                Ok(b) => b,
+                Err(e) => return Err(format!("Serialization error: {}", e)),
+            };
+
+            let topic = if conn.get_token().is_some() {
+                Some(Topic::Auth)
+            } else if conn.get_proto().is_mtproto() {
+                None
+            } else {
+                Some(conn.get_env().into())
+            };
+
+            if let Some(topic) = topic {
+                let _ = memory.publisher.send_binary(&topic, bytes.as_ref()).await;
+            }
+
+            Ok((id, conn))
+        }
+        Ok(Status::AlreadyExist(id)) => Ok((id, conn)),
+        Ok(Status::BadRequest(_, msg)) => Err(format!("BadRequest {} {}", conn_id, msg)),
+        Ok(_) => Err("Unsupported operation status".to_string()),
+        Err(err) => Err(format!(
+            "Internal error while processing connection {}: {}",
+            conn_id, err
+        )),
+    }
+}
+
 /// Handler creates connection
 // POST /connection
 pub async fn create_connection_handler<N, C, S>(
@@ -126,174 +277,29 @@ where
         return Ok(http::bad_request(&e.to_string()));
     }
 
-    let expired_at: Option<DateTime<Utc>> = conn_req
-        .days
-        .map(|days| Utc::now() + chrono::Duration::days(days.into()));
-
-    let mem = memory.memory.read().await;
-    if let Some(sub_id) = conn_req.subscription_id {
-        let sub = mem.subscriptions.find_by_id(&sub_id);
-
-        if sub.is_none() {
-            return Ok(http::bad_request(&format!(
-                "Subscription {} not found",
-                sub_id
-            )));
-        }
-
-        if let Some(sub) = mem.subscriptions.find_by_id(&sub_id) {
-            if !sub.is_active() {
-                return Ok(http::bad_request(&format!(
-                    "Subscription is not active {} ",
-                    sub_id
-                )));
-            }
-        } else {
-            return Ok(http::not_found(&format!(
-                "Subscription {} not found",
-                sub_id
-            )));
-        }
-    }
-
-    let proto = match conn_req.proto {
-        Tag::Wireguard => {
-            let last_ip: Option<Ipv4Addr> = mem
-                .connections
-                .get_last_wg_addr()
-                .and_then(|mask| mask.as_ipv4());
-
-            let next = match last_ip {
-                Some(ip) => IpAddrMask::increment_ipv4(ip),
-                None => wg_network.first_peer_ip(),
-            };
-
-            let next = match next {
-                Some(ip) => ip,
-                None => return Ok(http::internal_error("Failed to allocate IP")),
-            };
-
-            if !wg_network.contains_ipv4(next) {
-                return Ok(http::internal_error("IP out of range"));
-            }
-
-            Proto::Wireguard {
-                param: WgParam {
-                    keys: WgKeys::default(),
-                    address: IpAddrMask {
-                        address: IpAddr::V4(next),
-                        cidr: 32,
-                    },
-                },
-            }
-        }
-        Tag::AmneziaWg => {
-            let last_ip: Option<Ipv4Addr> = mem
-                .connections
-                .get_last_awg_addr()
-                .and_then(|mask| mask.as_ipv4());
-
-            let next = match last_ip {
-                Some(ip) => IpAddrMask::increment_ipv4(ip),
-                None => awg_network.first_peer_ip(),
-            };
-
-            let next = match next {
-                Some(ip) => ip,
-                None => return Ok(http::internal_error("Failed to allocate IP")),
-            };
-
-            if !awg_network.contains_ipv4(next) {
-                return Ok(http::internal_error("IP out of range"));
-            }
-
-            Proto::AmneziaWg {
-                param: WgParam {
-                    keys: WgKeys::default(),
-                    address: IpAddrMask {
-                        address: IpAddr::V4(next),
-                        cidr: 32,
-                    },
-                },
-            }
-        }
-        Tag::Shadowsocks => {
-            let password = utils::generate_random_password(15);
-            Proto::Shadowsocks { password }
-        }
-        Tag::VlessTcpReality
-        | Tag::VlessGrpcReality
-        | Tag::VlessXhttpReality
-        | Tag::VlessXhttpCdn
-        | Tag::Vmess => Proto::Xray(conn_req.proto),
-        Tag::Hysteria2 => {
-            let token = uuid::Uuid::new_v4();
-            Proto::Hysteria2 { token }
-        }
-        Tag::Mtproto => {
-            let secret = utils::generate_random_password(15);
-            Proto::Mtproto { secret }
-        }
-    };
-
-    drop(mem);
-
-    let conn: Connection =
-        Connection::new(&conn_req.env, conn_req.subscription_id, proto, expired_at);
-
-    debug!("New connection to create {}", conn);
-    let conn_id = uuid::Uuid::new_v4();
-    let msg = conn.as_create_message(&conn_id);
-
-    let messages = vec![msg];
-
-    match SyncOp::add_conn(&memory, &conn_id, conn.clone()).await {
-        Ok(Status::Ok(id)) => {
-            let bytes = match rkyv::to_bytes::<_, 1024>(&messages) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Ok(http::internal_error(&format!("Serialization error: {}", e)));
-                }
-            };
-
-            let topic = if let Some(_token) = conn.get_token() {
-                // Hysteria2 uses external auth provided which handles all envs
-                Some(Topic::Auth)
-            } else if conn.get_proto().is_mtproto() {
-                None
+    match create_connection_inner(
+        &conn_req.env,
+        conn_req.proto,
+        conn_req.subscription_id,
+        conn_req.days,
+        &memory,
+        &wg_network,
+        &awg_network,
+    )
+    .await
+    {
+        Ok((id, conn)) => Ok(http::success_response(
+            format!("Connection {} has been created", id),
+            Some(id),
+            Instance::Connection(conn),
+        )),
+        Err(msg) => {
+            if msg.contains("not found") || msg.contains("not active") || msg.contains("IP out of range") {
+                Ok(http::bad_request(&msg))
             } else {
-                Some(conn.get_env().into())
-            };
-
-            if let Some(topic) = topic {
-                let _ = memory.publisher.send_binary(&topic, bytes.as_ref()).await;
+                Ok(http::internal_error(&msg))
             }
-
-            Ok(http::success_response(
-                format!("Connection {} has been created", id),
-                Some(id),
-                Instance::Connection(conn),
-            ))
         }
-
-        Ok(Status::AlreadyExist(id)) => Ok(http::not_modified(&format!(
-            "Connection {} already exists",
-            id
-        ))),
-
-        Ok(Status::BadRequest(id, msg)) => {
-            Ok(http::bad_request(&format!("BadRequest {} {}", id, msg)))
-        }
-
-        Ok(status) => Ok(http::bad_request(&format!(
-            "Unsupported operation status: {}",
-            status
-        ))),
-
-        Err(err) => Ok(http::internal_error(&format!(
-            "Internal error while processing connection {}: {}",
-            conn_id, err
-        ))),
     }
 }
 

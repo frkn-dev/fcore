@@ -4,8 +4,8 @@ use tracing::{error, Instrument};
 use fcore::{
     http::{helpers as http, response::Instance},
     utils::get_uuid_last_octet_simple,
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, Distributor, Error, Key,
-    NodeStorageOperations, Status, Subscription, SubscriptionOperations,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, Distributor, Env, Error, Key,
+    NodeStorageOperations, Status, Subscription, SubscriptionOperations, Tag,
 };
 
 use super::super::{
@@ -14,6 +14,7 @@ use super::super::{
     param::KeyQueryParams,
     request::{ActivateKeyReq, KeyReq},
 };
+use super::connection::create_connection_inner;
 
 /// Get specific & validate key handler
 pub async fn get_key_validate_handler<N, C, S>(
@@ -106,11 +107,16 @@ where
 }
 
 /// Post activate key
-/// If subscription_id is not provided, a new subscription is created using the key's days.
+/// If subscription_id is not provided, a new subscription is created using the key's days
+/// and default connections are created for the configured envs/tags.
 pub async fn post_activate_key_handler<N, C, S>(
     req: ActivateKeyReq,
     trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
+    wg_network: fcore::IpAddrMask,
+    awg_network: fcore::IpAddrMask,
+    enabled_envs: Vec<Env>,
+    enabled_tags: Vec<Tag>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -195,6 +201,23 @@ where
                     "Key activation failed: {}",
                     err
                 )));
+            }
+
+            let wg_net = &wg_network;
+            let awg_net = &awg_network;
+            for env in &enabled_envs {
+                for tag in &enabled_tags {
+                    if let Err(err) = create_connection_inner(
+                        env, *tag, Some(sub_id), None, &memory, wg_net, awg_net,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "Failed to create connection for sub {} env {:?} tag {:?}: {}",
+                            sub_id, env, tag, err
+                        );
+                    }
+                }
             }
 
             Ok(http::success_response(
