@@ -28,3 +28,14 @@ impl AccountRequest {
 pub struct RefCodeQuery {
     pub code: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct TrialsQuery {
+    pub period: i64,
+    #[serde(default = "default_trials_granularity")]
+    pub granularity: String,
+}
+
+fn default_trials_granularity() -> String {
+    "daily".to_string()
+}

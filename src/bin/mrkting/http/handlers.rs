@@ -2,7 +2,7 @@ use chrono::Utc;
 use std::sync::Arc;
 use warp::Reply;
 
-use super::request::{AccountRequest, RefCodeQuery};
+use super::request::{AccountRequest, RefCodeQuery, TrialsQuery};
 use crate::{
     api_client::ApiClient,
     config::{ServiceSettings, TrialConfig},
@@ -305,6 +305,42 @@ pub async fn get_subscription_by_ref_code_handler(
             "subscription_id": subscription_id,
             "ref_code": query.code,
             "expires_at": info.expires_at,
+        }),
+    )))
+}
+
+pub async fn get_trials_handler(
+    state: AppState,
+    query: TrialsQuery,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    if query.period <= 0 {
+        return Ok(bad_request("period must be > 0"));
+    }
+    let granularity = match query.granularity.as_str() {
+        "daily" | "monthly" => query.granularity.as_str(),
+        _ => return Ok(bad_request("granularity must be daily or monthly")),
+    };
+
+    let buckets = match state.pg.emails().trials_by_period(granularity, query.period).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("Failed to fetch trials: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    let total: i64 = buckets.iter().map(|(_, c)| c).sum();
+    let data: Vec<_> = buckets
+        .into_iter()
+        .map(|(bucket, trials)| serde_json::json!({ "bucket": bucket, "trials": trials }))
+        .collect();
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "granularity": granularity,
+            "period": query.period,
+            "totals": { "trials": total },
+            "data": data,
         }),
     )))
 }

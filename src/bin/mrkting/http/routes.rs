@@ -3,9 +3,9 @@ use warp::Filter;
 use super::{
     handlers::{
         get_referral_stats_handler, get_subscription_by_ref_code_handler,
-        get_validate_ref_code_handler, healthcheck_handler, post_account_handler, AppState,
+        get_trials_handler, get_validate_ref_code_handler, healthcheck_handler, post_account_handler, AppState,
     },
-    request::{AccountRequest, RefCodeQuery},
+    request::{AccountRequest, RefCodeQuery, TrialsQuery},
 };
 
 pub fn routes(
@@ -62,10 +62,19 @@ pub fn routes(
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_subscription_by_ref_code_handler);
 
+    let trials = warp::get()
+        .and(warp::path("analytics"))
+        .and(warp::path("trials"))
+        .and(warp::path::end())
+        .and(with_state.clone())
+        .and(warp::query::<TrialsQuery>())
+        .and_then(get_trials_handler);
+
     healthcheck
         .or(account)
         .or(referrals)
         .or(validate)
         .or(subscription_by_ref_code)
+        .or(trials)
         .with(cors)
 }

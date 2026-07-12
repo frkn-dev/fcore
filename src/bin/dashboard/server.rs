@@ -140,8 +140,28 @@ async fn build_overview(state: Arc<AppState>) -> Result<OverviewResponse, reqwes
         }
     };
 
-    // Trials endpoint does not exist yet; stubbed at zero.
-    let trials_24h = 0;
+    // Trials from mrkting (24h = period 1 daily)
+    let trials_url = format!(
+        "{}/analytics/trials?period=1&granularity=daily",
+        state.config.mrkting.endpoint
+    );
+    let mut trials_req = state.http.get(&trials_url);
+    if let Some(token) = &state.config.mrkting.token {
+        trials_req = trials_req.header("Authorization", format!("Bearer {}", token));
+    }
+    let trials_24h = match trials_req.send().await {
+        Ok(resp) => {
+            let data: serde_json::Value = resp.json().await.unwrap_or_default();
+            data.get("totals")
+                .and_then(|t| t.get("trials"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        }
+        Err(err) => {
+            tracing::warn!("Failed to fetch trials: {}", err);
+            0
+        }
+    };
 
     Ok(OverviewResponse {
         visits_24h,
