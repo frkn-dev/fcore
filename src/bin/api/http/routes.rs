@@ -245,6 +245,44 @@ where
             .and(warp::header::optional::<String>("authorization"))
             .and_then(admin_api_assign_premium_handler);
 
+        let admin_api_create_subscription_route = warp::post()
+            .and(warp::path!("admin" / "api" / "subscriptions"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_create_subscription_handler);
+
+        let admin_api_extend_subscription_route = warp::post()
+            .and(warp::path!("admin" / "api" / "subscriptions" / Uuid / "extend"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_extend_subscription_handler);
+
+        let admin_api_delete_subscription_route = warp::delete()
+            .and(warp::path!("admin" / "api" / "subscriptions" / Uuid))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_delete_subscription_handler);
+
+        let admin_api_delete_connection_route = warp::delete()
+            .and(warp::path!("admin" / "api" / "connections" / Uuid))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_delete_connection_handler);
+
         let admin_routes = admin_page_route
             .or(admin_api_state_route)
             .or(admin_api_nodes_route)
@@ -252,7 +290,11 @@ where
             .or(admin_api_subscriptions_route)
             .or(admin_api_subscription_connections_route)
             .or(admin_api_connections_route)
-            .or(admin_api_assign_premium_route);
+            .or(admin_api_assign_premium_route)
+            .or(admin_api_create_subscription_route)
+            .or(admin_api_extend_subscription_route)
+            .or(admin_api_delete_subscription_route)
+            .or(admin_api_delete_connection_route);
 
         // Premium routes
         let premium_state_route = warp::get()

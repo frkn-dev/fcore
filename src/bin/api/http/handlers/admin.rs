@@ -7,10 +7,10 @@ use warp::http::StatusCode;
 
 use fcore::{
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricStorage, Node,
-    NodeStatus, NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations,
+    NodeStatus, NodeStorageOperations, Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
-use crate::sync::MemSync;
+use crate::sync::{tasks::SyncOp, MemSync};
 
 const ADMIN_HTML: &str = include_str!("../admin.html");
 
@@ -639,4 +639,308 @@ where
     Ok(Box::new(warp::reply::json(&serde_json::json!({
         "premium_token": premium_token
     }))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminCreateSubscriptionRequest {
+    pub days: i64,
+    pub limit_bytes: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminExtendSubscriptionRequest {
+    pub days: i64,
+}
+
+pub async fn admin_api_create_subscription_handler<N, C, S>(
+    req: AdminCreateSubscriptionRequest,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    if req.days <= 0 {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 400, "message": "days must be greater than 0"}),
+            ),
+            StatusCode::BAD_REQUEST,
+        )));
+    }
+
+    let sub_id = uuid::Uuid::new_v4();
+    let ref_code = fcore::utils::get_uuid_last_octet_simple(&sub_id);
+    let expires_at = Utc::now() + chrono::Duration::days(req.days);
+    let sub = Subscription::new(sub_id, ref_code, Some(expires_at), req.limit_bytes);
+
+    match SyncOp::add_sub(&memory, sub.clone())
+        .await
+    {
+        Ok(Status::Ok(_)) | Ok(Status::Updated(_)) => Ok(Box::new(warp::reply::json(
+            &serde_json::json!({"id": sub_id, "ref_code": sub.refer_code()}),
+        ))),
+        Ok(Status::AlreadyExist(_)) => Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 409, "message": "Subscription already exists"}),
+            ),
+            StatusCode::CONFLICT,
+        ))),
+        Ok(_) => Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 400, "message": "Failed to create subscription"}),
+            ),
+            StatusCode::BAD_REQUEST,
+        ))),
+        Err(e) => {
+            error!("Failed to create subscription: {:?}", e);
+            Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({"status": 500, "message": "Internal error"}),
+                ),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )))
+        }
+    }
+}
+
+pub async fn admin_api_extend_subscription_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    req: AdminExtendSubscriptionRequest,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    if req.days <= 0 {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 400, "message": "days must be greater than 0"}),
+            ),
+            StatusCode::BAD_REQUEST,
+        )));
+    }
+
+    match SyncOp::add_days(&memory, &subscription_id, req.days)
+        .await
+    {
+        Ok(Status::Updated(_)) => Ok(Box::new(warp::reply::json(
+            &serde_json::json!({"id": subscription_id, "days_added": req.days}),
+        ))),
+        Ok(Status::NotFound(_)) => Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 404, "message": "Subscription not found"}),
+            ),
+            StatusCode::NOT_FOUND,
+        ))),
+        Ok(_) => Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 400, "message": "Failed to extend subscription"}),
+            ),
+            StatusCode::BAD_REQUEST,
+        ))),
+        Err(e) => {
+            error!("Failed to extend subscription: {:?}", e);
+            Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({"status": 500, "message": "Internal error"}),
+                ),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )))
+        }
+    }
+}
+
+pub async fn admin_api_delete_subscription_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let conn_ids: Vec<uuid::Uuid> = {
+        let mem = memory.memory.read().await;
+        mem.connections
+            .iter()
+            .filter(|(_, conn)| conn.get_subscription_id() == Some(subscription_id) && !conn.get_deleted())
+            .map(|(id, _)| *id)
+            .collect()
+    };
+
+    for conn_id in conn_ids {
+        let conn_opt = {
+            let mem = memory.memory.read().await;
+            mem.connections.get(&conn_id).cloned()
+        };
+        if let Some(conn) = conn_opt {
+            if let Err(e) = SyncOp::delete_connection(&memory, &conn_id, &conn).await {
+                error!("Failed to delete connection {} for subscription {}: {:?}", conn_id, subscription_id, e);
+            }
+        }
+    }
+
+    {
+        let mut mem = memory.memory.write().await;
+        if let Some(sub) = mem.subscriptions.find_by_id_mut(&subscription_id) {
+            sub.mark_deleted();
+        } else {
+            return Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({"status": 404, "message": "Subscription not found"}),
+                ),
+                StatusCode::NOT_FOUND,
+            )));
+        }
+    }
+
+    if let Err(e) = memory.db.sub().delete(&subscription_id).await {
+        error!("Failed to delete subscription {} from database: {:?}", subscription_id, e);
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 500, "message": "Database error"}),
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )));
+    }
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({"id": subscription_id, "deleted": true}),
+    )))
+}
+
+pub async fn admin_api_delete_connection_handler<N, C, S>(
+    connection_id: uuid::Uuid,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let conn_opt = {
+        let mem = memory.memory.read().await;
+        mem.connections.get(&connection_id).cloned()
+    };
+
+    let Some(conn) = conn_opt else {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 404, "message": "Connection not found"}),
+            ),
+            StatusCode::NOT_FOUND,
+        )));
+    };
+
+    if conn.get_deleted() {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 400, "message": "Connection already deleted"}),
+            ),
+            StatusCode::BAD_REQUEST,
+        )));
+    }
+
+    match SyncOp::delete_connection(&memory, &connection_id, &conn).await {
+        Ok(Status::Ok(_)) => Ok(Box::new(warp::reply::json(
+            &serde_json::json!({"id": connection_id, "deleted": true}),
+        ))),
+        Ok(Status::NotFound(_)) => Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 404, "message": "Connection not found"}),
+            ),
+            StatusCode::NOT_FOUND,
+        ))),
+        Ok(_) => Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 400, "message": "Failed to delete connection"}),
+            ),
+            StatusCode::BAD_REQUEST,
+        ))),
+        Err(e) => {
+            error!("Failed to delete connection {}: {:?}", connection_id, e);
+            Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({"status": 500, "message": "Internal error"}),
+                ),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )))
+        }
+    }
 }

@@ -123,7 +123,6 @@
       <div class="form-row">
         <label>Days <input id="sub-days" type="number" value="30"></label>
         <label>Limit bytes <input id="sub-limit" type="number" placeholder="optional"></label>
-        <label>Refer code <input id="sub-refcode" placeholder="auto"></label>
         <button class="btn btn-primary" onclick="createSubscription()">Create</button>
       </div>
     </div>
@@ -221,14 +220,12 @@
   async function createSubscription() {
     const days = parseInt($('sub-days').value, 10);
     const limit = $('sub-limit').value.trim();
-    const referCode = $('sub-refcode').value.trim();
     const body = {
       days: isNaN(days) ? null : days,
-      limit_bytes: limit ? parseInt(limit, 10) : null,
-      refer_code: referCode || null
+      limit_bytes: limit ? parseInt(limit, 10) : null
     };
     try {
-      await apiPost('/subscription', body);
+      await apiPost('/admin/api/subscriptions', body);
       setStatus('Subscription created');
       toggleSubForm();
       await loadSubscriptions();
@@ -305,6 +302,45 @@
       await loadNodes();
     } catch (e) {
       setStatus('Delete node failed: ' + e.message, true);
+    }
+  }
+
+  async function deleteSubscription(id) {
+    if (!confirm('Delete subscription ' + id + '? All its connections will be removed too.')) return;
+    try {
+      await apiDelete(`/admin/api/subscriptions/${id}`);
+      setStatus('Subscription deleted');
+      await loadSubscriptions();
+    } catch (e) {
+      setStatus('Delete subscription failed: ' + e.message, true);
+    }
+  }
+
+  async function extendSubscription(id) {
+    const days = prompt('Extend subscription by how many days?', '30');
+    if (days === null) return;
+    const n = parseInt(days, 10);
+    if (isNaN(n) || n <= 0) {
+      setStatus('Invalid days', true);
+      return;
+    }
+    try {
+      await apiPost(`/admin/api/subscriptions/${id}/extend`, { days: n });
+      setStatus('Subscription extended');
+      await loadSubscriptions();
+    } catch (e) {
+      setStatus('Extend subscription failed: ' + e.message, true);
+    }
+  }
+
+  async function deleteConnection(id) {
+    if (!confirm('Delete connection ' + id + '?')) return;
+    try {
+      await apiDelete(`/admin/api/connections/${id}`);
+      setStatus('Connection deleted');
+      await loadAll();
+    } catch (e) {
+      setStatus('Delete connection failed: ' + e.message, true);
     }
   }
 
@@ -407,6 +443,10 @@
         <td>${s.connections_count}</td>
         <td>${s.online || 0}</td>
         <td class="nowrap">↓${formatBytes(s.traffic.downlink)} / ↑${formatBytes(s.traffic.uplink)}</td>
+        <td class="nowrap" onclick="event.stopPropagation()">
+          <button class="btn btn-primary btn-sm" onclick="extendSubscription('${s.id}')">Extend</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteSubscription('${s.id}')">Delete</button>
+        </td>
       </tr>
       <tr>
         <td colspan="7" id="sub-details-${s.id}" class="details" style="display:none">
@@ -438,7 +478,7 @@
       </tr>
     `).join('');
 
-    $('subscriptions').innerHTML = `<table><tr><th>ID</th><th>Expires</th><th>State</th><th>Limit</th><th>Connections</th><th>Online</th><th>Traffic</th></tr>${rows}</table>`;
+    $('subscriptions').innerHTML = `<table><tr><th>ID</th><th>Expires</th><th>State</th><th>Limit</th><th>Connections</th><th>Online</th><th>Traffic</th><th>Actions</th></tr>${rows}</table>`;
   }
 
   function renderConnectionRows(conns) {
@@ -452,9 +492,10 @@
         <td>${c.expires_at ? new Date(c.expires_at).toLocaleString() : '-'}</td>
         <td><span class="badge ${c.is_deleted ? 'deleted' : 'active'}">${c.is_deleted ? 'deleted' : 'active'}</span></td>
         <td class="nowrap">↓${formatBytes(c.downlink)} / ↑${formatBytes(c.uplink)}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteConnection('${c.id}')">Delete</button></td>
       </tr>
     `).join('');
-    return `<table><tr><th>ID</th><th>Env</th><th>Proto</th><th>Online</th><th>Expires</th><th>State</th><th>Traffic</th></tr>${rows}</table>`;
+    return `<table><tr><th>ID</th><th>Env</th><th>Proto</th><th>Online</th><th>Expires</th><th>State</th><th>Traffic</th><th></th></tr>${rows}</table>`;
   }
 
   async function toggleSubscription(id) {

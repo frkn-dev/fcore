@@ -198,4 +198,25 @@ impl PgSubscription {
 
         Ok(Subscription::from(row))
     }
+
+    pub async fn delete(&self, sub_id: &uuid::Uuid) -> Result<Subscription> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let now = chrono::Utc::now();
+
+        let row = client
+            .query_one(
+                r#"
+                UPDATE subscriptions
+                SET is_deleted = true,
+                    updated_at = $1
+                WHERE id = $2
+                RETURNING *
+                "#,
+                &[&now, sub_id],
+            )
+            .await?;
+
+        Ok(Subscription::from(row))
+    }
 }
