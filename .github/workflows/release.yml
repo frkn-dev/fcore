@@ -142,9 +142,26 @@ jobs:
           name: fcore-mrkting
           path: target/release/mrkting
 
+  build-dashboard:
+    needs: [tests]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Dashboard
+        run: cargo build --release --bin dashboard --no-default-features
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcore-dashboard
+          path: target/release/dashboard
+
   release:
     name: Create Release
-    needs: [build-api, build-auth, build-node, build-pixel-agent, build-pixel-agent-backfill, build-mrkting]
+    needs: [build-api, build-auth, build-node, build-pixel-agent, build-pixel-agent-backfill, build-mrkting, build-dashboard]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -167,6 +184,7 @@ jobs:
           cp artifacts/fcore-pixel-agent/pixel-agent release_dist/pixel-agent-x86_64
           cp artifacts/fcore-pixel-agent-backfill/pixel-agent-backfill release_dist/pixel-agent-backfill-x86_64
           cp artifacts/fcore-mrkting/mrkting release_dist/mrkting-x86_64
+          cp artifacts/fcore-dashboard/dashboard release_dist/dashboard-x86_64
           chmod +x release_dist/*
 
       - name: Upload to GitHub Release
@@ -182,6 +200,7 @@ jobs:
             src/bin/pixel_agent/pixel-agent-example.toml
             src/bin/pixel_agent/pixel-agent-backfill-example.toml
             src/bin/mrkting/mrkting-example.toml
+            src/bin/dashboard/dashboard-example.toml
             src/bin/api/api.service
             src/bin/auth/auth.service
             src/bin/node/node.service
@@ -189,6 +208,7 @@ jobs:
             src/bin/pixel_agent/pixel-agent-backfill.service
             src/bin/pixel_agent/pixel-agent-backfill.timer
             src/bin/mrkting/mrkting.service
+            src/bin/dashboard/dashboard.service
             deploy/*.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

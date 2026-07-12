@@ -5,13 +5,15 @@ VERSION="${1:?usage: $0 v0.x.x}"
 ARCH=$(uname -m)
 
 REPO="frkn-dev/fcore"
-INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/fcore/mrkting"
-DATA_DIR="/var/lib/fcore/mrkting"
-LOG_DIR="/var/log/fcore/mrkting"
+INSTALL_DIR="/opt/mrkting"
+CONFIG_DIR="/opt/mrkting"
+DATA_DIR="/opt/mrkting"
+LOG_DIR="/opt/mrkting"
 SERVICE="mrkting"
 
-BIN_URL="https://github.com/${REPO}/releases/download/${VERSION}/mrkting-x86_64"
+BIN_URL="https://github.com/${REPO}/releases/download/${VERSION}/fcore-mrkting-x86_64"
+
+echo $BIN_URL
 
 case "$ARCH" in
     x86_64) ;;
