@@ -48,8 +48,8 @@ impl ApiClient {
 
     pub async fn create_subscription(
         &self,
-        days: i64,
-        limit_bytes: i64,
+        days: Option<i64>,
+        limit_bytes: Option<i64>,
         trace_id: Option<Uuid>,
     ) -> anyhow::Result<SubscriptionInfo> {
         let body = serde_json::json!({

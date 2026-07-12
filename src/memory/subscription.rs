@@ -210,7 +210,7 @@ impl Operations for Subscription {
     }
 
     fn is_active(&self) -> bool {
-        !self.is_deleted && self.expires_at > Some(Utc::now())
+        !self.is_deleted && self.expires_at.map(|expires_at| expires_at > Utc::now()).unwrap_or(true)
     }
 
     fn days_remaining(&self) -> Option<i64> {

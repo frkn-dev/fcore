@@ -84,9 +84,9 @@ pub async fn post_account_handler(
     }
 
     let (days, limit_bytes) = if req.trial {
-        (state.settings.trial.days, state.settings.trial.limit_bytes)
+        (Some(state.settings.trial.days), Some(state.settings.trial.limit_bytes))
     } else {
-        (req.days.unwrap_or(0), req.limit_bytes.unwrap_or(0))
+        (req.days, req.limit_bytes)
     };
 
     // Prevent duplicate trial requests for the same email.
@@ -124,11 +124,7 @@ pub async fn post_account_handler(
             Ok(c) => c,
             Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
         };
-        let expires_at = if days > 0 {
-            Some(Utc::now() + chrono::Duration::days(days))
-        } else {
-            None
-        };
+        let expires_at = req.days.map(|days| Utc::now() + chrono::Duration::days(days));
 
         if let Err(e) = state
             .pg
