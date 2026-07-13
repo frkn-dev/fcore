@@ -50,6 +50,7 @@ pub struct ServiceConfig {
     #[serde(default = "default_listen_address")]
     pub listen: Ipv4Addr,
     pub port: u16,
+    pub token: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_cors_origins")]

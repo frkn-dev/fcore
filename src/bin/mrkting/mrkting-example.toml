@@ -1,6 +1,7 @@
 [service]
 listen = "127.0.0.1"
 port = 9103
+token = "change-me-in-production"
 log_level = "info"
 cors_origins = ["http://localhost:8080", "https://dashboard.frkn.org", "https://frkn.org", "https://beta.frkn.org"]
 

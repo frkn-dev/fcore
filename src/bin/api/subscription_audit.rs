@@ -79,6 +79,8 @@ pub fn log_days_change(
         new_expires_at = new,
         old_days_remaining = old_days,
         new_days_remaining = new_days,
+        days_before_update = old_days,
+        days_after_update = new_days,
         delta_days = delta_days,
         direction = direction,
         initiator = initiator,

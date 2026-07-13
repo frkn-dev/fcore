@@ -1,4 +1,7 @@
+use std::sync::Arc;
 use warp::Filter;
+
+use fcore::http::filters::auth;
 
 use super::{
     handlers::{
@@ -13,6 +16,7 @@ pub fn routes(
     state: AppState,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     let cors_origins = state.settings.service.cors_origins.clone();
+    let auth_filter = auth(Arc::new(state.settings.service.token.clone()));
     let with_state = warp::any().map(move || state.clone());
 
     let healthcheck = warp::get()
@@ -39,6 +43,7 @@ pub fn routes(
         .and(warp::path("validate"))
         .and(warp::path("ref_code"))
         .and(warp::path::end())
+        .and(auth_filter.clone())
         .and(with_state.clone())
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_validate_ref_code_handler);
@@ -67,6 +72,7 @@ pub fn routes(
         .and(warp::path("subscription"))
         .and(warp::path("by_ref_code"))
         .and(warp::path::end())
+        .and(auth_filter.clone())
         .and(with_state.clone())
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_subscription_by_ref_code_handler);
@@ -75,6 +81,7 @@ pub fn routes(
         .and(warp::path("analytics"))
         .and(warp::path("trials"))
         .and(warp::path::end())
+        .and(auth_filter)
         .and(with_state.clone())
         .and(warp::query::<TrialsQuery>())
         .and_then(get_trials_handler);

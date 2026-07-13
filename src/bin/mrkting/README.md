@@ -4,10 +4,13 @@ Standalone service for marketing flows: trial creation, email capture, welcome e
 
 ## What it does
 
-- `POST /account` — creates a trial subscription via the API or attaches an email to an existing subscription.
-- `GET /validate/ref_code?code=XXX` — checks whether a referral code is valid.
-- `GET /referrals?code=XXX` — returns the number of users invited by a referral code.
-- `GET /subscription/by_ref_code?code=XXX` — returns `subscription_id` linked to a referral code.
+- `GET /healthcheck` — no auth.
+- `POST /account` — no auth (public registration/trial).
+- `GET /referrals?code=XXX` — no auth.
+- `GET /check/ref_code?code=XXX` — no auth, returns `{ "valid": true|false }`.
+- `GET /validate/ref_code?code=XXX` — **requires `Authorization: Bearer {service.token}`**, returns `{ "valid": true|false, "subscription_id": "..." }`.
+- `GET /subscription/by_ref_code?code=XXX` — **requires `Authorization: Bearer {service.token}`**.
+- `GET /analytics/trials?period=&granularity=` — **requires `Authorization: Bearer {service.token}`**.
 - Stores emails encrypted so they can be decrypted for mailouts.
 
 ## Files
