@@ -19,6 +19,7 @@ pub struct OverviewResponse {
     pub payments: u64,
     pub revenue: f64,
     pub trials: u64,
+    pub conversions: u64,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -182,6 +183,7 @@ async fn overview_handler(
         payments: 0,
         revenue: 0.0,
         trials: 0,
+        conversions: 0,
     });
     Ok(warp::reply::json(&overview))
 }
@@ -252,12 +254,51 @@ async fn build_overview(
         }
     };
 
+    let conversions_url = format!(
+        "{}/analytics/conversions?period={}&granularity=daily",
+        state.config.mrkting.endpoint, api_period
+    );
+    let mut conversions_req = state.http.get(&conversions_url);
+    if let Some(token) = &state.config.mrkting.token {
+        conversions_req = conversions_req.header("Authorization", format!("Bearer {}", token));
+    }
+    let conversions = match conversions_req.send().await {
+        Ok(resp) => {
+            let data: serde_json::Value = resp.json().await.unwrap_or_default();
+            extract_conversions_in_range(&data, from_ms, to_ms)
+        }
+        Err(err) => {
+            tracing::warn!("Failed to fetch conversions: {}", err);
+            0
+        }
+    };
+
     Ok(OverviewResponse {
         visits,
         payments,
         revenue,
         trials,
+        conversions,
     })
+}
+
+fn extract_conversions_in_range(data: &serde_json::Value, from_ms: i64, to_ms: i64) -> u64 {
+    let mut total = 0u64;
+    if let Some(data_arr) = data.get("data").and_then(|d| d.as_array()) {
+        for bucket in data_arr {
+            if let Some(bucket_str) = bucket.get("bucket").and_then(|b| b.as_str()) {
+                if let Ok(bucket_ms) = parse_bucket_ms(bucket_str) {
+                    if bucket_ms >= from_ms && bucket_ms <= to_ms {
+                        total += bucket
+                            .get("conversions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+    total
 }
 
 fn count_visits(data: &serde_json::Value) -> u64 {

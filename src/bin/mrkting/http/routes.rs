@@ -5,11 +5,14 @@ use fcore::http::filters::auth;
 
 use super::{
     handlers::{
-        get_check_ref_code_handler, get_referral_stats_handler,
-        get_subscription_by_ref_code_handler, get_trials_handler,
-        get_validate_ref_code_handler, healthcheck_handler, post_account_handler, AppState,
+        get_check_ref_code_handler, get_conversions_handler, get_referral_stats_handler,
+        get_subscription_by_ref_code_handler, get_subscription_trial_handler, get_trials_handler,
+        get_validate_ref_code_handler, healthcheck_handler, post_account_handler,
+        post_subscription_extend_handler, AppState,
     },
-    request::{AccountRequest, RefCodeQuery, TrialsQuery},
+    request::{
+        AccountRequest, RefCodeQuery, SubscriptionExtendRequest, SubscriptionIdQuery, TrialsQuery,
+    },
 };
 
 pub fn routes(
@@ -77,6 +80,33 @@ pub fn routes(
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_subscription_by_ref_code_handler);
 
+    let subscription_extend = warp::post()
+        .and(warp::path("subscription"))
+        .and(warp::path("extend"))
+        .and(warp::path::end())
+        .and(auth_filter.clone())
+        .and(with_state.clone())
+        .and(warp::body::json::<SubscriptionExtendRequest>())
+        .and_then(post_subscription_extend_handler);
+
+    let subscription_trial = warp::get()
+        .and(warp::path("subscription"))
+        .and(warp::path("trial"))
+        .and(warp::path::end())
+        .and(auth_filter.clone())
+        .and(with_state.clone())
+        .and(warp::query::<SubscriptionIdQuery>())
+        .and_then(get_subscription_trial_handler);
+
+    let conversions = warp::get()
+        .and(warp::path("analytics"))
+        .and(warp::path("conversions"))
+        .and(warp::path::end())
+        .and(auth_filter.clone())
+        .and(with_state.clone())
+        .and(warp::query::<TrialsQuery>())
+        .and_then(get_conversions_handler);
+
     let trials = warp::get()
         .and(warp::path("analytics"))
         .and(warp::path("trials"))
@@ -92,6 +122,9 @@ pub fn routes(
         .or(validate)
         .or(check)
         .or(subscription_by_ref_code)
+        .or(subscription_extend)
+        .or(subscription_trial)
+        .or(conversions)
         .or(trials)
         .with(cors)
 }

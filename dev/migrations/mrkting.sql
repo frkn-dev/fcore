@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS mrkting.emails (
     referred_by VARCHAR(13),
     ref_code VARCHAR(13),
     created_at TIMESTAMPTZ DEFAULT now(),
-    expires_at TIMESTAMPTZ
+    expires_at TIMESTAMPTZ,
+    converted_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_subscription_id ON mrkting.emails(subscription_id);

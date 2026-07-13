@@ -51,6 +51,7 @@
   <div class="grid" id="overview">
     <div class="card"><h3>Visits</h3><div class="value" id="visits">-</div></div>
     <div class="card"><h3>Trials</h3><div class="value" id="trials">-</div></div>
+    <div class="card"><h3>Conversions</h3><div class="value" id="conversions">-</div></div>
     <div class="card"><h3>Payments</h3><div class="value" id="payments">-</div></div>
     <div class="card"><h3>Revenue</h3><div class="value" id="revenue">-</div></div>
   </div>
@@ -89,6 +90,7 @@
       const data = await fetch(`api/overview?period=${period}`).then(r => r.json());
       $('visits').textContent = data.visits.toLocaleString();
       $('trials').textContent = data.trials.toLocaleString();
+      $('conversions').textContent = data.conversions.toLocaleString();
       $('payments').textContent = data.payments.toLocaleString();
       $('revenue').textContent = formatCurrency(data.revenue);
     } catch (e) {

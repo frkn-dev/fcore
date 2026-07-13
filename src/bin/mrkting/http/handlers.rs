@@ -267,6 +267,13 @@ async fn validate_ref_code(
     // First try local mrkting database.
     match state.pg.emails().get_by_ref_code(code).await {
         Ok(Some(row)) => {
+            if row.trial {
+                tracing::debug!(
+                    "Ref code {} belongs to a trial subscription, rejecting",
+                    code
+                );
+                return (false, None);
+            }
             if let Some(sub_id) = row.subscription_id {
                 match state.api_client.get_subscription(sub_id).await {
                     Ok(info) => {
@@ -364,6 +371,89 @@ pub async fn get_subscription_by_ref_code_handler(
             )))
         }
     }
+}
+
+pub async fn post_subscription_extend_handler(
+    state: AppState,
+    req: crate::http::request::SubscriptionExtendRequest,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    match state
+        .pg
+        .emails()
+        .update_trial_and_expires(req.subscription_id, req.expires_at)
+        .await
+    {
+        Ok(rows) => Ok(Box::new(warp::reply::json(
+            &serde_json::json!({
+                "subscription_id": req.subscription_id,
+                "updated": rows > 0,
+            }),
+        ))),
+        Err(e) => {
+            tracing::error!("Failed to extend subscription {}: {}", req.subscription_id, e);
+            Ok(internal_error("Failed to update subscription"))
+        }
+    }
+}
+
+pub async fn get_subscription_trial_handler(
+    state: AppState,
+    query: crate::http::request::SubscriptionIdQuery,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    match state.pg.emails().is_trial(query.subscription_id).await {
+        Ok(Some(trial)) => Ok(Box::new(warp::reply::json(
+            &serde_json::json!({
+                "subscription_id": query.subscription_id,
+                "trial": trial,
+            }),
+        ))),
+        Ok(None) => Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({"status": 404, "message": "Subscription not found in mrkting"}),
+            ),
+            warp::http::StatusCode::NOT_FOUND,
+        ))),
+        Err(e) => {
+            tracing::error!("Failed to check trial status for {}: {}", query.subscription_id, e);
+            Ok(internal_error("Failed to check trial status"))
+        }
+    }
+}
+
+pub async fn get_conversions_handler(
+    state: AppState,
+    query: TrialsQuery,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    if query.period <= 0 {
+        return Ok(bad_request("period must be > 0"));
+    }
+    let granularity = match query.granularity.as_str() {
+        "daily" | "monthly" => query.granularity.as_str(),
+        _ => return Ok(bad_request("granularity must be daily or monthly")),
+    };
+
+    let buckets = match state.pg.emails().conversions_by_period(granularity, query.period).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("Failed to fetch conversions: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    let total: i64 = buckets.iter().map(|(_, c)| c).sum();
+    let data: Vec<_> = buckets
+        .into_iter()
+        .map(|(bucket, conversions)| serde_json::json!({ "bucket": bucket, "conversions": conversions }))
+        .collect();
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "granularity": granularity,
+            "period": query.period,
+            "totals": { "conversions": total },
+            "data": data,
+        }),
+    )))
 }
 
 pub async fn get_trials_handler(

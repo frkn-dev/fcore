@@ -39,3 +39,14 @@ pub struct TrialsQuery {
 fn default_trials_granularity() -> String {
     "daily".to_string()
 }
+
+#[derive(Debug, Deserialize)]
+pub struct SubscriptionExtendRequest {
+    pub subscription_id: uuid::Uuid,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubscriptionIdQuery {
+    pub subscription_id: uuid::Uuid,
+}

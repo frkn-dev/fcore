@@ -8,9 +8,12 @@ Standalone service for marketing flows: trial creation, email capture, welcome e
 - `POST /account` — no auth (public registration/trial).
 - `GET /referrals?code=XXX` — no auth.
 - `GET /check/ref_code?code=XXX` — no auth, returns `{ "valid": true|false }`.
-- `GET /validate/ref_code?code=XXX` — **requires `Authorization: Bearer {service.token}`**, returns `{ "valid": true|false, "subscription_id": "..." }`.
+- `GET /validate/ref_code?code=XXX` — **requires `Authorization: Bearer {service.token}`**, returns `{ "valid": true|false, "subscription_id": "..." }`. Trial subscriptions are rejected.
 - `GET /subscription/by_ref_code?code=XXX` — **requires `Authorization: Bearer {service.token}`**.
+- `GET /subscription/trial?subscription_id=XXX` — **requires `Authorization: Bearer {service.token}`**, returns `{ "subscription_id": "...", "trial": true|false }`.
+- `POST /subscription/extend` — **requires `Authorization: Bearer {service.token}`**, body `{ "subscription_id": "...", "expires_at": "2026-..." }`. Sets `trial = false` and updates `expires_at`.
 - `GET /analytics/trials?period=&granularity=` — **requires `Authorization: Bearer {service.token}`**.
+- `GET /analytics/conversions?period=&granularity=` — **requires `Authorization: Bearer {service.token}`**. Считает trial-подписки, у которых `converted_at` заполнен (то есть оплатили).
 - Stores emails encrypted so they can be decrypted for mailouts.
 
 ## Files

@@ -156,6 +156,42 @@ impl PgEmails {
         Ok(row.get::<_, i64>(0))
     }
 
+    pub async fn update_trial_and_expires(
+        &self,
+        subscription_id: uuid::Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<u64> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .execute(
+                "UPDATE mrkting.emails \
+                 SET trial = false, expires_at = $1, converted_at = CASE WHEN trial = true THEN now() ELSE converted_at END \
+                 WHERE subscription_id = $2",
+                &[&expires_at,
+                    &subscription_id,
+                ],
+            )
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn is_trial(
+        &self,
+        subscription_id: uuid::Uuid,
+    ) -> Result<Option<bool>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT trial FROM mrkting.emails WHERE subscription_id = $1 LIMIT 1",
+                &[&subscription_id,
+                ],
+            )
+            .await?;
+        Ok(row.map(|r| r.get("trial")))
+    }
+
     pub async fn trials_by_period(
         &self,
         granularity: &str,
@@ -190,6 +226,41 @@ impl PgEmails {
             .map(|r| (r.get::<_, String>("bucket"), r.get::<_, i64>("cnt")))
             .collect())
     }
+
+    pub async fn conversions_by_period(
+        &self,
+        granularity: &str,
+        period: i64,
+    ) -> Result<Vec<(String, i64)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let since = match granularity {
+            "monthly" => chrono::Utc::now() - chrono::Duration::days(period * 30),
+            _ => chrono::Utc::now() - chrono::Duration::days(period),
+        };
+
+        let bucket_expr = match granularity {
+            "monthly" => "TO_CHAR(DATE_TRUNC('month', converted_at), 'YYYY-MM')",
+            _ => "TO_CHAR(DATE(converted_at), 'YYYY-MM-DD')",
+        };
+
+        let sql = format!(
+            r#"
+            SELECT {bucket_expr} AS bucket, COUNT(*) AS cnt
+            FROM mrkting.emails
+            WHERE converted_at IS NOT NULL AND converted_at >= $1
+            GROUP BY bucket
+            ORDER BY bucket DESC
+            "#
+        );
+
+        let rows = client.query(&sql, &[&since]).await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<_, String>("bucket"), r.get::<_, i64>("cnt")))
+            .collect())
+    }
 }
 
 #[allow(dead_code)]
@@ -203,6 +274,7 @@ pub struct EmailRow {
     pub ref_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub converted_at: Option<DateTime<Utc>>,
 }
 
 impl From<tokio_postgres::Row> for EmailRow {
@@ -217,6 +289,7 @@ impl From<tokio_postgres::Row> for EmailRow {
             ref_code: row.get("ref_code"),
             created_at: row.get("created_at"),
             expires_at: row.get("expires_at"),
+            converted_at: row.get("converted_at"),
         }
     }
 }
