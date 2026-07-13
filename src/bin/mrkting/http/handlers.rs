@@ -238,10 +238,36 @@ pub async fn get_validate_ref_code_handler(
     state: AppState,
     query: RefCodeQuery,
 ) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    let (valid, subscription_id) = validate_ref_code(&state, &query.code,
+    ).await;
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "valid": valid,
+            "subscription_id": subscription_id,
+        }),
+    )))
+}
+
+pub async fn get_check_ref_code_handler(
+    state: AppState,
+    query: RefCodeQuery,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    let (valid, _) = validate_ref_code(&state, &query.code).await;
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({ "valid": valid }),
+    )))
+}
+
+async fn validate_ref_code(
+    state: &AppState,
+    code: &str,
+) -> (bool, Option<uuid::Uuid>) {
     let mut subscription_id: Option<uuid::Uuid> = None;
     let mut valid = false;
 
-    match state.pg.emails().get_by_ref_code(&query.code).await {
+    match state.pg.emails().get_by_ref_code(code).await {
         Ok(Some(row)) => {
             if let Some(sub_id) = row.subscription_id {
                 match state.api_client.get_subscription(sub_id).await {
@@ -263,12 +289,7 @@ pub async fn get_validate_ref_code_handler(
         }
     };
 
-    Ok(Box::new(warp::reply::json(
-        &serde_json::json!({
-            "valid": valid,
-            "subscription_id": subscription_id,
-        }),
-    )))
+    (valid, subscription_id)
 }
 
 pub async fn get_subscription_by_ref_code_handler(

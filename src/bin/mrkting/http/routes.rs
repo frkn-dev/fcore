@@ -2,8 +2,9 @@ use warp::Filter;
 
 use super::{
     handlers::{
-        get_referral_stats_handler, get_subscription_by_ref_code_handler,
-        get_trials_handler, get_validate_ref_code_handler, healthcheck_handler, post_account_handler, AppState,
+        get_check_ref_code_handler, get_referral_stats_handler,
+        get_subscription_by_ref_code_handler, get_trials_handler,
+        get_validate_ref_code_handler, healthcheck_handler, post_account_handler, AppState,
     },
     request::{AccountRequest, RefCodeQuery, TrialsQuery},
 };
@@ -42,6 +43,14 @@ pub fn routes(
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_validate_ref_code_handler);
 
+    let check = warp::get()
+        .and(warp::path("check"))
+        .and(warp::path("ref_code"))
+        .and(warp::path::end())
+        .and(with_state.clone())
+        .and(warp::query::<RefCodeQuery>())
+        .and_then(get_check_ref_code_handler);
+
     let mut cors_builder = warp::cors()
         .allow_methods(vec!["GET", "POST", "OPTIONS"])
         .allow_headers(vec!["Content-Type", "Authorization", "X-Trace-Id"])
@@ -74,6 +83,7 @@ pub fn routes(
         .or(account)
         .or(referrals)
         .or(validate)
+        .or(check)
         .or(subscription_by_ref_code)
         .or(trials)
         .with(cors)
