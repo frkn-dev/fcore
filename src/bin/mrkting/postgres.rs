@@ -261,6 +261,41 @@ impl PgEmails {
             .map(|r| (r.get::<_, String>("bucket"), r.get::<_, i64>("cnt")))
             .collect())
     }
+
+    pub async fn referrals_by_period(
+        &self,
+        granularity: &str,
+        period: i64,
+    ) -> Result<Vec<(String, i64)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let since = match granularity {
+            "monthly" => chrono::Utc::now() - chrono::Duration::days(period * 30),
+            _ => chrono::Utc::now() - chrono::Duration::days(period),
+        };
+
+        let bucket_expr = match granularity {
+            "monthly" => "TO_CHAR(DATE_TRUNC('month', created_at), 'YYYY-MM')",
+            _ => "TO_CHAR(DATE(created_at), 'YYYY-MM-DD')",
+        };
+
+        let sql = format!(
+            r#"
+            SELECT {bucket_expr} AS bucket, COUNT(*) AS cnt
+            FROM mrkting.emails
+            WHERE referred_by IS NOT NULL AND referred_by <> 'WEB' AND created_at >= $1
+            GROUP BY bucket
+            ORDER BY bucket DESC
+            "#
+        );
+
+        let rows = client.query(&sql, &[&since]).await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<_, String>("bucket"), r.get::<_, i64>("cnt")))
+            .collect())
+    }
 }
 
 #[allow(dead_code)]

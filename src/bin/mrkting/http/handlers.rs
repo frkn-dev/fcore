@@ -456,6 +456,42 @@ pub async fn get_conversions_handler(
     )))
 }
 
+pub async fn get_referrals_handler(
+    state: AppState,
+    query: TrialsQuery,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    if query.period <= 0 {
+        return Ok(bad_request("period must be > 0"));
+    }
+    let granularity = match query.granularity.as_str() {
+        "daily" | "monthly" => query.granularity.as_str(),
+        _ => return Ok(bad_request("granularity must be daily or monthly")),
+    };
+
+    let buckets = match state.pg.emails().referrals_by_period(granularity, query.period).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("Failed to fetch referrals: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    let total: i64 = buckets.iter().map(|(_, c)| c).sum();
+    let data: Vec<_> = buckets
+        .into_iter()
+        .map(|(bucket, referrals)| serde_json::json!({ "bucket": bucket, "referrals": referrals }))
+        .collect();
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "granularity": granularity,
+            "period": query.period,
+            "totals": { "referrals": total },
+            "data": data,
+        }),
+    )))
+}
+
 pub async fn get_trials_handler(
     state: AppState,
     query: TrialsQuery,

@@ -14,6 +14,7 @@ Standalone service for marketing flows: trial creation, email capture, welcome e
 - `POST /subscription/extend` — **requires `Authorization: Bearer {service.token}`**, body `{ "subscription_id": "...", "expires_at": "2026-..." }`. Sets `trial = false` and updates `expires_at`.
 - `GET /analytics/trials?period=&granularity=` — **requires `Authorization: Bearer {service.token}`**.
 - `GET /analytics/conversions?period=&granularity=` — **requires `Authorization: Bearer {service.token}`**. Считает trial-подписки, у которых `converted_at` заполнен (то есть оплатили).
+- `GET /analytics/referrals?period=&granularity=` — **requires `Authorization: Bearer {service.token}`**. Считает подписки, созданные по реферальному коду (`referred_by IS NOT NULL AND referred_by != 'WEB'`).
 - Stores emails encrypted so they can be decrypted for mailouts.
 
 ## Files

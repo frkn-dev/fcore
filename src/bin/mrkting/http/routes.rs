@@ -6,8 +6,8 @@ use fcore::http::{filters::auth, AuthError};
 use super::{
     handlers::{
         get_check_ref_code_handler, get_conversions_handler, get_referral_stats_handler,
-        get_subscription_by_ref_code_handler, get_subscription_trial_handler, get_trials_handler,
-        get_validate_ref_code_handler, healthcheck_handler, post_account_handler,
+        get_referrals_handler, get_subscription_by_ref_code_handler, get_subscription_trial_handler,
+        get_trials_handler, get_validate_ref_code_handler, healthcheck_handler, post_account_handler,
         post_subscription_extend_handler, AppState,
     },
     request::{
@@ -98,6 +98,15 @@ pub fn routes(
         .and(warp::query::<SubscriptionIdQuery>())
         .and_then(get_subscription_trial_handler);
 
+    let referrals_analytics = warp::get()
+        .and(warp::path("analytics"))
+        .and(warp::path("referrals"))
+        .and(warp::path::end())
+        .and(auth_filter.clone())
+        .and(with_state.clone())
+        .and(warp::query::<TrialsQuery>())
+        .and_then(get_referrals_handler);
+
     let conversions = warp::get()
         .and(warp::path("analytics"))
         .and(warp::path("conversions"))
@@ -125,6 +134,7 @@ pub fn routes(
         .or(subscription_extend)
         .or(subscription_trial)
         .or(conversions)
+        .or(referrals_analytics)
         .or(trials)
         .recover(handle_rejection)
         .with(cors)

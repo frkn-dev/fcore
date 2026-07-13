@@ -20,6 +20,7 @@ pub struct OverviewResponse {
     pub revenue: f64,
     pub trials: u64,
     pub conversions: u64,
+    pub referrals: u64,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -184,6 +185,7 @@ async fn overview_handler(
         revenue: 0.0,
         trials: 0,
         conversions: 0,
+        referrals: 0,
     });
     Ok(warp::reply::json(&overview))
 }
@@ -273,13 +275,52 @@ async fn build_overview(
         }
     };
 
+    let referrals_url = format!(
+        "{}/analytics/referrals?period={}&granularity=daily",
+        state.config.mrkting.endpoint, api_period
+    );
+    let mut referrals_req = state.http.get(&referrals_url);
+    if let Some(token) = &state.config.mrkting.token {
+        referrals_req = referrals_req.header("Authorization", format!("Bearer {}", token));
+    }
+    let referrals = match referrals_req.send().await {
+        Ok(resp) => {
+            let data: serde_json::Value = resp.json().await.unwrap_or_default();
+            extract_referrals_in_range(&data, from_ms, to_ms)
+        }
+        Err(err) => {
+            tracing::warn!("Failed to fetch referrals: {}", err);
+            0
+        }
+    };
+
     Ok(OverviewResponse {
         visits,
         payments,
         revenue,
         trials,
         conversions,
+        referrals,
     })
+}
+
+fn extract_referrals_in_range(data: &serde_json::Value, from_ms: i64, to_ms: i64) -> u64 {
+    let mut total = 0u64;
+    if let Some(data_arr) = data.get("data").and_then(|d| d.as_array()) {
+        for bucket in data_arr {
+            if let Some(bucket_str) = bucket.get("bucket").and_then(|b| b.as_str()) {
+                if let Ok(bucket_ms) = parse_bucket_ms(bucket_str) {
+                    if bucket_ms >= from_ms && bucket_ms <= to_ms {
+                        total += bucket
+                            .get("referrals")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+    total
 }
 
 fn extract_conversions_in_range(data: &serde_json::Value, from_ms: i64, to_ms: i64) -> u64 {
