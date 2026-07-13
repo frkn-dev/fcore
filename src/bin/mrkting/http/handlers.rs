@@ -238,32 +238,36 @@ pub async fn get_validate_ref_code_handler(
     state: AppState,
     query: RefCodeQuery,
 ) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
-    let valid = match state.pg.emails().get_by_ref_code(&query.code).await {
+    let mut subscription_id: Option<uuid::Uuid> = None;
+    let mut valid = false;
+
+    match state.pg.emails().get_by_ref_code(&query.code).await {
         Ok(Some(row)) => {
-            if row.subscription_id.is_none() {
-                false
-            } else {
-                match state.api_client.get_subscription(row.subscription_id.unwrap()).await {
-                    Ok(info) => info
-                        .expires_at
-                        .map(|e| e > Utc::now())
-                        .unwrap_or(false),
+            if let Some(sub_id) = row.subscription_id {
+                match state.api_client.get_subscription(sub_id).await {
+                    Ok(info) => {
+                        if info.expires_at.map(|e| e > Utc::now()).unwrap_or(false) {
+                            valid = true;
+                            subscription_id = Some(sub_id);
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!("Failed to verify subscription for ref code: {}", e);
-                        false
                     }
                 }
             }
         }
-        Ok(None) => false,
+        Ok(None) => {}
         Err(e) => {
             tracing::error!("Failed to lookup ref code: {}", e);
-            false
         }
     };
 
     Ok(Box::new(warp::reply::json(
-        &serde_json::json!({ "valid": valid }),
+        &serde_json::json!({
+            "valid": valid,
+            "subscription_id": subscription_id,
+        }),
     )))
 }
 
