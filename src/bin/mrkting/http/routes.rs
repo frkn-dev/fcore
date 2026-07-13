@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use warp::Filter;
 
-use fcore::http::filters::auth;
+use fcore::http::{filters::auth, AuthError};
 
 use super::{
     handlers::{
@@ -126,5 +126,31 @@ pub fn routes(
         .or(subscription_trial)
         .or(conversions)
         .or(trials)
+        .recover(handle_rejection)
         .with(cors)
+        .with(warp::log("mrkting"))
+}
+
+async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+    if err.find::<AuthError>().is_some() {
+        tracing::debug!("AuthError rejection");
+        Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"status": 401, "message": "Unauthorized"}),
+            ),
+            warp::http::StatusCode::UNAUTHORIZED,
+        ))
+    } else if err.is_not_found() {
+        Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"status": 404, "message": "Not found"}),
+            ),
+            warp::http::StatusCode::NOT_FOUND,
+        ))
+    } else {
+        tracing::warn!("Unhandled rejection: {:?}", err);
+        Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"status": 500, "message": "Internal server error"}),
+            ),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ))
+    }
 }
