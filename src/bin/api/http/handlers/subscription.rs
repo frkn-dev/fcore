@@ -513,7 +513,20 @@ where
 {
     let mem = memory.memory.read().await;
 
-    let Some(sub) = mem.subscriptions.find_by_refer_code(&query.code) else {
+    tracing::debug!(
+        "Looking up subscription by ref_code: {} (total subscriptions: {})",
+        query.code,
+        mem.subscriptions.len()
+    );
+
+    let sub = mem
+        .subscriptions
+        .iter()
+        .map(|(_, s)| s)
+        .find(|s| s.refer_code() == query.code);
+
+    let Some(sub) = sub else {
+        tracing::debug!("Ref code {} not found in memory", query.code);
         return Ok(Box::new(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({"status": 404, "message": "Subscription not found"})),
             warp::http::StatusCode::NOT_FOUND,
