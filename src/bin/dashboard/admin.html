@@ -56,11 +56,6 @@
   </div>
 
   <section>
-    <div class="toolbar">
-      <button class="active" data-period="30" data-granularity="daily">30 days</button>
-      <button data-period="90" data-granularity="daily">90 days</button>
-      <button data-period="6" data-granularity="monthly">6 months</button>
-    </div>
     <h2>Revenue over time</h2>
     <canvas id="revenue-chart"></canvas>
   </section>
@@ -101,9 +96,9 @@
     }
   }
 
-  async function loadSales(period, granularity) {
+  async function loadSales(period) {
     try {
-      const data = await fetch(`api/sales?period=${period}&granularity=${granularity}`).then(r => r.json());
+      const data = await fetch(`api/sales?period=${period}`).then(r => r.json());
       renderRevenueChart(data.data || []);
       renderSalesBreakdown(data.data || []);
     } catch (e) {
@@ -111,11 +106,9 @@
     }
   }
 
-  async function loadVisits() {
-    const to = Date.now();
-    const from = to - 30 * 24 * 60 * 60 * 1000;
+  async function loadVisits(period) {
     try {
-      const data = await fetch(`api/pixel?from_ms=${from}&to_ms=${to}`).then(r => r.json());
+      const data = await fetch(`api/pixel?period=${period}`).then(r => r.json());
       renderVisitsChart(data.series || []);
     } catch (e) {
       setStatus('visits error: ' + e.message, true);
@@ -145,17 +138,35 @@
       el.innerHTML = '<p class="small">No data</p>';
       return;
     }
-    const latest = buckets[0];
-    const sections = [];
 
-    if (latest.byType && latest.byType.length) {
-      sections.push('<h3>By type</h3>' + renderRows(latest.byType, ['type', 'count', 'revenue']));
+    function mergeRows(rows) {
+      const map = new Map();
+      (rows || []).forEach(r => {
+        const key = JSON.stringify(Object.keys(r).sort().map(k => [k, r[k]]));
+        const existing = map.get(key);
+        if (existing) {
+          existing.count += r.count || 0;
+          existing.revenue += r.revenue || 0;
+        } else {
+          map.set(key, { ...r, count: r.count || 0, revenue: r.revenue || 0 });
+        }
+      });
+      return Array.from(map.values()).sort((a, b) => b.revenue - a.revenue);
     }
-    if (latest.byDuration && latest.byDuration.length) {
-      sections.push('<h3>By duration</h3>' + renderRows(latest.byDuration, ['durationDays', 'count', 'revenue']));
+
+    const byType = mergeRows(buckets.flatMap(b => b.byType || []));
+    const byDuration = mergeRows(buckets.flatMap(b => b.byDuration || []));
+    const byPromocode = mergeRows(buckets.flatMap(b => b.byPromocode || []));
+
+    const sections = [];
+    if (byType.length) {
+      sections.push('<h3>By type</h3>' + renderRows(byType, ['type', 'count', 'revenue']));
     }
-    if (latest.byPromocode && latest.byPromocode.length) {
-      sections.push('<h3>By promocode</h3>' + renderRows(latest.byPromocode, ['promocode', 'count', 'revenue']));
+    if (byDuration.length) {
+      sections.push('<h3>By duration</h3>' + renderRows(byDuration, ['durationDays', 'count', 'revenue']));
+    }
+    if (byPromocode.length) {
+      sections.push('<h3>By promocode</h3>' + renderRows(byPromocode, ['promocode', 'count', 'revenue']));
     }
 
     el.innerHTML = sections.join('') || '<p class="small">No breakdown data</p>';
@@ -217,8 +228,6 @@
     ctx.fillText(Math.round(minY).toLocaleString(), 2, h - pad - 4);
   }
 
-  let currentPeriod = 30;
-  let currentGranularity = 'daily';
   let overviewPeriod = 'today';
 
   document.querySelectorAll('#overview-toolbar button').forEach(btn => {
@@ -227,25 +236,15 @@
       btn.classList.add('active');
       overviewPeriod = btn.dataset.period;
       $('overview-title').textContent = 'Overview (' + btn.textContent + ')';
-      loadOverview(overviewPeriod);
-    });
-  });
-
-  document.querySelectorAll('section .toolbar button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('section .toolbar button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentPeriod = btn.dataset.period;
-      currentGranularity = btn.dataset.granularity;
-      loadSales(currentPeriod, currentGranularity);
+      refresh();
     });
   });
 
   async function refresh() {
     await Promise.all([
       loadOverview(overviewPeriod),
-      loadSales(currentPeriod, currentGranularity),
-      loadVisits()
+      loadSales(overviewPeriod),
+      loadVisits(overviewPeriod)
     ]);
     setStatus('updated ' + new Date().toLocaleTimeString());
   }

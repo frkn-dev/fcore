@@ -22,13 +22,19 @@ pub struct OverviewResponse {
 }
 
 #[derive(serde::Deserialize, Debug)]
+pub struct PeriodQuery {
+    #[serde(default = "default_overview_period")]
+    pub period: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
 pub struct OverviewQuery {
     #[serde(default = "default_overview_period")]
     pub period: String,
 }
 
 fn default_overview_period() -> String {
-    "24h".to_string()
+    "today".to_string()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -122,7 +128,7 @@ pub async fn start_server(config: Config) {
         .and(warp::path("sales"))
         .and(warp::get())
         .and(warp::path::end())
-        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .and(warp::query::<PeriodQuery>())
         .and(with_state(state.clone()))
         .and_then(sales_proxy_handler);
 
@@ -130,7 +136,7 @@ pub async fn start_server(config: Config) {
         .and(warp::path("pixel"))
         .and(warp::get())
         .and(warp::path::end())
-        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .and(warp::query::<PeriodQuery>())
         .and(with_state(state.clone()))
         .and_then(pixel_proxy_handler);
 
@@ -333,18 +339,16 @@ fn parse_bucket_ms(bucket: &str) -> Result<i64, chrono::ParseError> {
 }
 
 async fn sales_proxy_handler(
-    query: std::collections::HashMap<String, String>,
+    query: PeriodQuery,
     state: Arc<AppState>,
 ) -> Result<impl warp::Reply, Infallible> {
-    let mut url = format!("{}/analytics/sales", state.config.payment.endpoint);
-    let mut first = true;
-    for (k, v) in query {
-        url.push_str(if first { "?" } else { "&" });
-        url.push_str(&k);
-        url.push('=');
-        url.push_str(&urlencoding::encode(&v));
-        first = false;
-    }
+    let period = OverviewPeriod::from_str(&query.period).unwrap_or(OverviewPeriod::Last24h);
+    let (from_ms, to_ms, api_period) = period.bounds();
+
+    let url = format!(
+        "{}/analytics/sales?period={}&granularity=daily",
+        state.config.payment.endpoint, api_period
+    );
 
     let resp = state
         .http
@@ -360,13 +364,26 @@ async fn sales_proxy_handler(
         Ok(r) => {
             let status = warp::http::StatusCode::from_u16(r.status().as_u16())
                 .unwrap_or(warp::http::StatusCode::OK);
-            let body: Vec<u8> = r.bytes().await.unwrap_or_default().to_vec();
-            Ok(warp::reply::with_status(body, status))
+            let mut body: serde_json::Value = r.json().await.unwrap_or_default();
+            if let Some(data) = body.get_mut("data").and_then(|d| d.as_array_mut()) {
+                data.retain(|bucket| {
+                    bucket
+                        .get("bucket")
+                        .and_then(|b| b.as_str())
+                        .and_then(|b| parse_bucket_ms(b).ok())
+                        .map(|ms| ms >= from_ms && ms <= to_ms)
+                        .unwrap_or(false)
+                });
+            }
+            Ok(warp::reply::with_status(
+                warp::reply::json(&body),
+                status,
+            ))
         }
         Err(err) => {
             tracing::error!("Payment sales proxy error: {}", err);
             Ok(warp::reply::with_status(
-                format!("{{\"error\":\"{}\"}}", err).into_bytes(),
+                warp::reply::json(&serde_json::json!({"error": err.to_string()})),
                 warp::http::StatusCode::BAD_GATEWAY,
             ))
         }
@@ -374,18 +391,16 @@ async fn sales_proxy_handler(
 }
 
 async fn pixel_proxy_handler(
-    query: std::collections::HashMap<String, String>,
+    query: PeriodQuery,
     state: Arc<AppState>,
 ) -> Result<impl warp::Reply, Infallible> {
-    let mut url = format!("{}/api/metrics", state.config.pixel.endpoint);
-    let mut first = true;
-    for (k, v) in query {
-        url.push_str(if first { "?" } else { "&" });
-        url.push_str(&k);
-        url.push('=');
-        url.push_str(&urlencoding::encode(&v));
-        first = false;
-    }
+    let period = OverviewPeriod::from_str(&query.period).unwrap_or(OverviewPeriod::Last24h);
+    let (from_ms, to_ms, _) = period.bounds();
+
+    let url = format!(
+        "{}/api/metrics?from_ms={}&to_ms={}",
+        state.config.pixel.endpoint, from_ms, to_ms
+    );
 
     let mut req = state.http.get(&url);
     if let Some(token) = &state.config.pixel.token {
