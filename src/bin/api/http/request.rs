@@ -246,6 +246,11 @@ impl SubscriptionInfoRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RefCodeQuery {
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ConnectionInfoRequest {
     pub id: uuid::Uuid,
     pub env: Env,

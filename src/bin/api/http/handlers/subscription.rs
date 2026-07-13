@@ -495,6 +495,40 @@ where
     Ok(Box::new(warp::reply::json(&sub_resp)))
 }
 
+/// Lookup a subscription by its referral code. Returns minimal info needed
+/// for mrkting to validate referrals for subscriptions created outside mrkting.
+pub async fn get_subscription_by_ref_code_handler<N, C, S>(
+    query: crate::http::request::RefCodeQuery,
+    memory: MemSync<N, C, S>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static,
+{
+    let mem = memory.memory.read().await;
+
+    let Some(sub) = mem.subscriptions.find_by_refer_code(&query.code) else {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"status": 404, "message": "Subscription not found"})),
+            warp::http::StatusCode::NOT_FOUND,
+        )));
+    };
+
+    let resp = serde_json::json!({
+        "id": sub.id(),
+        "refer_code": sub.refer_code(),
+        "expires_at": sub.expires_at(),
+    });
+
+    Ok(Box::new(warp::reply::json(&resp)))
+}
+
 pub async fn subscription_link_handler<N, C, S>(
     req: SubscriptionInfoRequest,
     memory: MemSync<N, C, S>,

@@ -145,6 +145,28 @@ impl ApiClient {
             .map_err(|e| anyhow::anyhow!("Failed to parse subscription info: {e}\n{text}"))?;
         Ok(info)
     }
+
+    pub async fn get_subscription_by_ref_code(
+        &self,
+        ref_code: &str,
+    ) -> anyhow::Result<SubscriptionInfo> {
+        let resp = self
+            .client
+            .get(format!("{}/subscription/by_ref_code?code={}", self.endpoint, ref_code))
+            .headers(self.auth_headers(None))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("API returned {}: {}", status, text);
+        }
+
+        let info: SubscriptionInfo = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse subscription by ref_code: {e}\n{text}"))?;
+        Ok(info)
+    }
 }
 
 #[derive(Debug, Deserialize)]

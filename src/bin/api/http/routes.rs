@@ -150,6 +150,15 @@ where
             .and(with_metrics(self.metrics.clone()))
             .and_then(get_subscription_info_json);
 
+        let get_subscription_by_ref_code_route = warp::get()
+            .and(warp::path("subscription"))
+            .and(warp::path("by_ref_code"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::query::<crate::http::request::RefCodeQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(get_subscription_by_ref_code_handler);
+
         let get_subscription_traffic_route = warp::get()
             .and(warp::path!("subscription" / Uuid / "traffic"))
             .and(warp::path::end())
@@ -562,6 +571,7 @@ where
             // Subscription
             .or(get_subscription_route)
             .or(get_subscription_info_route)
+            .or(get_subscription_by_ref_code_route)
             .or(get_subscription_traffic_route)
             .or(post_subscription_route)
             .or(put_subscription_route)
