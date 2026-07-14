@@ -159,4 +159,93 @@ impl Mailer {
             }
         });
     }
+
+    pub fn send_survey_reward_email(
+        &self,
+        to: String,
+        key_code: String,
+        subject: String,
+    ) {
+        let transport = self.transport.clone();
+        let from = self.from.clone();
+        let company_name = self.company_name.clone();
+        let support = self.support.clone();
+        let company_website = self.company_website.clone();
+
+        tokio::spawn(async move {
+            let html_body = format!(
+                r#"
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="UTF-8">
+              <title>{subject}</title>
+            </head>
+            <body style="margin:0;padding:0;background:#0b0d12;font-family:Arial,sans-serif;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#0b0d12;padding:40px 0;">
+                <tr>
+                  <td align="center">
+                    <table width="600" cellpadding="0" cellspacing="0" style="background:#121621;border-radius:16px;padding:32px;color:#e6e8ef;">
+                      <tr>
+                        <td style="text-align:center;">
+                          <h1 style="margin:0;color:#5b7cfa;">{subject}</h1>
+                          <p style="color:#9aa1b2;margin-top:8px;">Спасибо за помощь проекту.</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:20px 0;text-align:center;">
+                          <div style="font-size:12px;color:#9aa1b2;">Ваш ключ</div>
+                          <div style="font-family:monospace;font-size:18px;word-break:break-all;padding:12px;background:#1a1f2e;border-radius:8px;margin-top:8px;">{key_code}</div>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td align="center" style="padding:20px 0;">
+                          <a href="{company_website}/activate?code={key_code}"
+                             style="display:inline-block;padding:14px 24px;background:linear-gradient(90deg,#5b7cfa,#22d3ee);color:#fff;text-decoration:none;border-radius:12px;font-weight:bold;">Активировать ключ</a>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="text-align:center;padding-top:24px;font-size:11px;color:#6b7280;">
+                          {company_name} • <a href="{support}" style="color:#5b7cfa;">Поддержка</a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </body>
+            </html>
+                "#,
+                subject = subject,
+                key_code = key_code,
+                company_website = company_website,
+                company_name = company_name,
+                support = support,
+            );
+
+            let msg = match Message::builder()
+                .from(from.parse().unwrap())
+                .to(to.parse().unwrap())
+                .subject(subject)
+                .header(lettre::message::header::ContentType::TEXT_HTML)
+                .body(html_body)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("Email build error: {}", e);
+                    return;
+                }
+            };
+
+            for i in 0..3 {
+                match transport.send(msg.clone()).await {
+                    Ok(_) => return,
+                    Err(e) => {
+                        tracing::error!("SMTP attempt {} failed: {:?}", i, e);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        });
+    }
 }

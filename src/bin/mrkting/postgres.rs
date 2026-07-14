@@ -74,6 +74,338 @@ impl PgContext {
     pub fn emails(&self) -> PgEmails {
         PgEmails::new(self.manager.clone())
     }
+
+    pub fn surveys(&self) -> PgSurveys {
+        PgSurveys::new(self.manager.clone())
+    }
+
+    pub fn survey_campaigns(&self) -> PgSurveyCampaigns {
+        PgSurveyCampaigns::new(self.manager.clone())
+    }
+
+    pub fn survey_keys(&self) -> PgSurveyKeys {
+        PgSurveyKeys::new(self.manager.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct PgSurveys {
+    manager: Arc<Mutex<PgManager>>,
+}
+
+impl PgSurveys {
+    pub fn new(manager: Arc<Mutex<PgManager>>) -> Self {
+        Self { manager }
+    }
+
+    pub async fn find_by_hmac_and_campaign(
+        &self,
+        email_hmac: &str,
+        campaign_id: uuid::Uuid,
+    ) -> Result<Option<SurveyRewardRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT * FROM mrkting.survey_rewards WHERE email_hmac = $1 AND campaign_id = $2 LIMIT 1",
+                &[&email_hmac, &campaign_id],
+            )
+            .await?;
+        Ok(row.map(|r| SurveyRewardRow::from(r)))
+    }
+
+    pub async fn insert(
+        &self,
+        email: &str,
+        email_hmac: &str,
+        campaign_id: uuid::Uuid,
+        key_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO mrkting.survey_rewards
+                (email, email_hmac, campaign_id, key_id, rewarded_at)
+                VALUES ($1, $2, $3, $4, now())
+                RETURNING id
+                "#,
+                &[&email, &email_hmac, &campaign_id, &key_id],
+            )
+            .await?;
+        Ok(row.get("id"))
+    }
+}
+
+#[allow(dead_code)]
+pub struct SurveyRewardRow {
+    pub id: uuid::Uuid,
+    pub email: String,
+    pub email_hmac: String,
+    pub campaign_id: Option<uuid::Uuid>,
+    pub answers: Option<serde_json::Value>,
+    pub key_id: Option<uuid::Uuid>,
+    pub rewarded_at: DateTime<Utc>,
+}
+
+impl From<tokio_postgres::Row> for SurveyRewardRow {
+    fn from(row: tokio_postgres::Row) -> Self {
+        Self {
+            id: row.get("id"),
+            email: row.get("email"),
+            email_hmac: row.get("email_hmac"),
+            campaign_id: row.get("campaign_id"),
+            answers: row.get("answers"),
+            key_id: row.get("key_id"),
+            rewarded_at: row.get("rewarded_at"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PgSurveyCampaigns {
+    manager: Arc<Mutex<PgManager>>,
+}
+
+impl PgSurveyCampaigns {
+    pub fn new(manager: Arc<Mutex<PgManager>>) -> Self {
+        Self { manager }
+    }
+
+    pub async fn find_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SurveyCampaignRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT * FROM mrkting.survey_campaigns WHERE name = $1 LIMIT 1",
+                &[&name],
+            )
+            .await?;
+        Ok(row.map(|r| SurveyCampaignRow::from(r)))
+    }
+
+    pub async fn find_by_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<SurveyCampaignRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT * FROM mrkting.survey_campaigns WHERE token = $1 LIMIT 1",
+                &[&token],
+            )
+            .await?;
+        Ok(row.map(|r| SurveyCampaignRow::from(r)))
+    }
+
+    pub async fn insert(
+        &self,
+        name: &str,
+        token: &str,
+        distributor: &str,
+        key_days: i32,
+        campaign_days: i32,
+        limit_bytes: Option<i64>,
+        subject: Option<&str>,
+        starts_at: DateTime<Utc>,
+    ) -> Result<uuid::Uuid> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO mrkting.survey_campaigns
+                (name, token, distributor, key_days, campaign_days, limit_bytes, subject, starts_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id
+                "#,
+                &[
+                    &name,
+                    &token,
+                    &distributor,
+                    &key_days,
+                    &campaign_days,
+                    &limit_bytes,
+                    &subject,
+                    &starts_at,
+                ],
+            )
+            .await?;
+        Ok(row.get("id"))
+    }
+
+    #[allow(dead_code)]
+    pub async fn list(&self) -> Result<Vec<SurveyCampaignRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT * FROM mrkting.survey_campaigns ORDER BY created_at DESC",
+                &[],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|r| SurveyCampaignRow::from(r)).collect())
+    }
+}
+
+#[allow(dead_code)]
+pub struct SurveyCampaignRow {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub token: String,
+    pub distributor: String,
+    pub key_days: i32,
+    pub campaign_days: i32,
+    pub limit_bytes: Option<i64>,
+    pub subject: Option<String>,
+    pub starts_at: DateTime<Utc>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<tokio_postgres::Row> for SurveyCampaignRow {
+    fn from(row: tokio_postgres::Row) -> Self {
+        Self {
+            id: row.get("id"),
+            name: row.get("name"),
+            token: row.get("token"),
+            distributor: row.get("distributor"),
+            key_days: row.get("key_days"),
+            campaign_days: row.get("campaign_days"),
+            limit_bytes: row.get("limit_bytes"),
+            subject: row.get("subject"),
+            starts_at: row.get("starts_at"),
+            active: row.get("active"),
+            created_at: row.get("created_at"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PgSurveyKeys {
+    manager: Arc<Mutex<PgManager>>,
+}
+
+impl PgSurveyKeys {
+    pub fn new(manager: Arc<Mutex<PgManager>>) -> Self {
+        Self { manager }
+    }
+
+    pub async fn insert_keys(
+        &self,
+        campaign_id: uuid::Uuid,
+        keys: &[(uuid::Uuid, String)],
+    ) -> Result<u64> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let mut stmt = String::from(
+            "INSERT INTO mrkting.survey_keys (campaign_id, key_id, code) VALUES "
+        );
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+        for (i, (key_id, code)) in keys.iter().enumerate() {
+            if i > 0 {
+                stmt.push_str(", ");
+            }
+            let offset = i * 3;
+            stmt.push_str(&format!(
+                "(${}, ${}, ${})",
+                offset + 1,
+                offset + 2,
+                offset + 3
+            ));
+            params.push(&campaign_id);
+            params.push(key_id);
+            params.push(code);
+        }
+        stmt.push_str(" ON CONFLICT (campaign_id, code) DO NOTHING");
+
+        let rows = client.execute(&stmt, &params).await?;
+        Ok(rows)
+    }
+
+    pub async fn take_key(
+        &self,
+        campaign_id: uuid::Uuid,
+        email_hmac: &str,
+    ) -> Result<Option<SurveyKeyRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let tx = client.transaction().await?;
+        let row = tx
+            .query_opt(
+                r#"
+                UPDATE mrkting.survey_keys
+                SET status = 'issued', email_hmac = $2, issued_at = now()
+                WHERE id = (
+                    SELECT id FROM mrkting.survey_keys
+                    WHERE campaign_id = $1 AND status = 'available'
+                    ORDER BY created_at ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                RETURNING *
+                "#,
+                &[&campaign_id, &email_hmac],
+            )
+            .await?;
+        tx.commit().await?;
+
+        Ok(row.map(|r| SurveyKeyRow::from(r)))
+    }
+
+    #[allow(dead_code)]
+    pub async fn count_available(
+        &self,
+        campaign_id: uuid::Uuid,
+    ) -> Result<i64> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM mrkting.survey_keys WHERE campaign_id = $1 AND status = 'available'",
+                &[&campaign_id],
+            )
+            .await?;
+        let count: i64 = row.get(0);
+        Ok(count)
+    }
+}
+
+#[allow(dead_code)]
+pub struct SurveyKeyRow {
+    pub id: uuid::Uuid,
+    pub campaign_id: uuid::Uuid,
+    pub key_id: uuid::Uuid,
+    pub code: String,
+    pub status: String,
+    pub email_hmac: Option<String>,
+    pub issued_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<tokio_postgres::Row> for SurveyKeyRow {
+    fn from(row: tokio_postgres::Row) -> Self {
+        Self {
+            id: row.get("id"),
+            campaign_id: row.get("campaign_id"),
+            key_id: row.get("key_id"),
+            code: row.get("code"),
+            status: row.get("status"),
+            email_hmac: row.get("email_hmac"),
+            issued_at: row.get("issued_at"),
+            created_at: row.get("created_at"),
+        }
+    }
 }
 
 #[derive(Clone)]

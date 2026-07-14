@@ -2,7 +2,10 @@ use chrono::Utc;
 use std::sync::Arc;
 use warp::Reply;
 
-use super::request::{AccountRequest, RefCodeQuery, TrialsQuery};
+use super::request::{
+    AccountRequest, CreateCampaignRequest, RefCodeQuery, RestockRequest, SurveyRewardRequest,
+    TrialsQuery,
+};
 use crate::{
     api_client::ApiClient,
     config::{ServiceSettings, TrialConfig},
@@ -524,6 +527,189 @@ pub async fn get_trials_handler(
             "period": query.period,
             "totals": { "trials": total },
             "data": data,
+        }),
+    )))
+}
+
+pub async fn post_survey_reward_handler(
+    state: AppState,
+    auth_header: Option<String>,
+    req: SurveyRewardRequest,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    let token = match auth_header.and_then(|h| h.strip_prefix("Bearer ").map(|s| s.to_string())) {
+        Some(t) => t,
+        None => return Ok(bad_request("Authorization header is required")),
+    };
+
+    let campaign = match state.pg.survey_campaigns().find_by_token(&token).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(bad_request("Invalid campaign token")),
+        Err(e) => {
+            tracing::error!("Failed to find campaign by token: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    if !campaign.active {
+        return Ok(bad_request("Campaign is inactive"));
+    }
+
+    let now = Utc::now();
+    let campaign_ends_at = campaign.starts_at + chrono::Duration::days(campaign.campaign_days as i64);
+    if now < campaign.starts_at || now > campaign_ends_at {
+        return Ok(bad_request("Campaign is not active at this time"));
+    }
+
+    let email = req.email.trim().to_lowercase();
+    if email.is_empty() {
+        return Ok(bad_request("email is required"));
+    }
+
+    let email_hmac = state.cipher.hmac(&email);
+
+    match state.pg.surveys().find_by_hmac_and_campaign(&email_hmac, campaign.id).await {
+        Ok(Some(_)) => {
+            return Ok(Box::new(warp::reply::json(
+                &serde_json::json!({
+                    "success": true,
+                    "rewarded": false,
+                    "reason": "already_rewarded",
+                }),
+            )));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!("Failed to check survey reward: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    }
+
+    let key = match state.pg.survey_keys().take_key(campaign.id, &email_hmac).await {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            return Ok(Box::new(warp::reply::json(
+                &serde_json::json!({
+                    "success": true,
+                    "rewarded": false,
+                    "reason": "out_of_keys",
+                }),
+            )));
+        }
+        Err(e) => {
+            tracing::error!("Failed to take survey key: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    let encrypted = match state.cipher.encrypt(&email) {
+        Ok(c) => c,
+        Err(e) => return Ok(internal_error(&format!("Encryption failed: {}", e))),
+    };
+
+    if let Err(e) = state
+        .pg
+        .surveys()
+        .insert(&encrypted, &email_hmac, campaign.id, key.key_id)
+        .await
+    {
+        tracing::error!("Failed to store survey reward: {}", e);
+        return Ok(internal_error("Failed to store survey reward"));
+    }
+
+    let subject = campaign.subject.unwrap_or_else(|| "Ваша награда FRKN".to_string());
+    state
+        .mailer
+        .send_survey_reward_email(email, key.code, subject);
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "success": true,
+            "rewarded": true,
+        }),
+    )))
+}
+
+pub async fn post_create_campaign_handler(
+    state: AppState,
+    req: CreateCampaignRequest,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    let id = match state
+        .pg
+        .survey_campaigns()
+        .insert(
+            &req.name,
+            &req.token,
+            &req.distributor,
+            req.key_days,
+            req.campaign_days,
+            req.limit_bytes,
+            req.subject.as_deref(),
+            req.starts_at,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("Failed to create campaign: {}", e);
+            return Ok(internal_error("Failed to create campaign"));
+        }
+    };
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "id": id,
+            "name": req.name,
+        }),
+    )))
+}
+
+pub async fn post_restock_campaign_handler(
+    state: AppState,
+    campaign_name: String,
+    req: RestockRequest,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    if req.count == 0 {
+        return Ok(bad_request("count must be > 0"));
+    }
+
+    let campaign = match state.pg.survey_campaigns().find_by_name(&campaign_name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(bad_request("Campaign not found")),
+        Err(e) => {
+            tracing::error!("Failed to find campaign: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    let days = req
+        .key_days
+        .unwrap_or(campaign.key_days) as i16;
+    let distributor = campaign.distributor.clone();
+
+    let mut keys = Vec::with_capacity(req.count);
+    for _ in 0..req.count {
+        match state.api_client.create_key(days, &distributor).await {
+            Ok(k) => keys.push((k.id, k.code)),
+            Err(e) => {
+                tracing::error!("Failed to generate key during restock: {}", e);
+                return Ok(internal_error("Failed to generate keys"));
+            }
+        }
+    }
+
+    let inserted = match state.pg.survey_keys().insert_keys(campaign.id, &keys).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!("Failed to store generated keys: {}", e);
+            return Ok(internal_error("Failed to store keys"));
+        }
+    };
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "campaign": campaign_name,
+            "generated": keys.len(),
+            "inserted": inserted,
         }),
     )))
 }

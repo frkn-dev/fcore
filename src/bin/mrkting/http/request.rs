@@ -50,3 +50,26 @@ pub struct SubscriptionExtendRequest {
 pub struct SubscriptionIdQuery {
     pub subscription_id: uuid::Uuid,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct SurveyRewardRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateCampaignRequest {
+    pub name: String,
+    pub token: String,
+    pub distributor: String,
+    pub key_days: i32,
+    pub campaign_days: i32,
+    pub limit_bytes: Option<i64>,
+    pub subject: Option<String>,
+    pub starts_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestockRequest {
+    pub count: usize,
+    pub key_days: Option<i32>,
+}

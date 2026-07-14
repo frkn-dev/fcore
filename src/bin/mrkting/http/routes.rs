@@ -8,10 +8,12 @@ use super::{
         get_check_ref_code_handler, get_conversions_handler, get_referral_stats_handler,
         get_referrals_handler, get_subscription_by_ref_code_handler, get_subscription_trial_handler,
         get_trials_handler, get_validate_ref_code_handler, healthcheck_handler, post_account_handler,
-        post_subscription_extend_handler, AppState,
+        post_create_campaign_handler, post_restock_campaign_handler, post_subscription_extend_handler,
+        post_survey_reward_handler, AppState,
     },
     request::{
-        AccountRequest, RefCodeQuery, SubscriptionExtendRequest, SubscriptionIdQuery, TrialsQuery,
+        AccountRequest, CreateCampaignRequest, RefCodeQuery, RestockRequest,
+        SubscriptionExtendRequest, SubscriptionIdQuery, SurveyRewardRequest, TrialsQuery,
     },
 };
 
@@ -80,6 +82,37 @@ pub fn routes(
         .and(warp::query::<RefCodeQuery>())
         .and_then(get_subscription_by_ref_code_handler);
 
+    let surveys_reward = warp::post()
+        .and(warp::path("surveys"))
+        .and(warp::path("reward"))
+        .and(warp::path::end())
+        .and(with_state.clone())
+        .and(warp::header::optional::<String>("authorization"))
+        .and(warp::body::json::<SurveyRewardRequest>())
+        .and_then(post_survey_reward_handler);
+
+    let surveys_create_campaign = warp::post()
+        .and(warp::path("surveys"))
+        .and(warp::path("campaigns"))
+        .and(warp::path::end())
+        .and(auth_filter.clone())
+        .and(with_state.clone())
+        .and(warp::body::json::<CreateCampaignRequest>())
+        .and_then(post_create_campaign_handler);
+
+    let surveys_restock_campaign = warp::post()
+        .and(warp::path("surveys"))
+        .and(warp::path("campaigns"))
+        .and(warp::path::param::<String>())
+        .and(warp::path("restock"))
+        .and(warp::path::end())
+        .and(auth_filter.clone())
+        .and(with_state.clone())
+        .and(warp::body::json::<RestockRequest>())
+        .and_then(|name: String, state: AppState, req: RestockRequest| {
+            post_restock_campaign_handler(state, name, req)
+        });
+
     let subscription_extend = warp::post()
         .and(warp::path("subscription"))
         .and(warp::path("extend"))
@@ -127,6 +160,9 @@ pub fn routes(
 
     healthcheck
         .or(account)
+        .or(surveys_reward)
+        .or(surveys_create_campaign)
+        .or(surveys_restock_campaign)
         .or(referrals)
         .or(validate)
         .or(check)

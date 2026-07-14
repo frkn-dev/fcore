@@ -167,6 +167,51 @@ impl ApiClient {
             .map_err(|e| anyhow::anyhow!("Failed to parse subscription by ref_code: {e}\n{text}"))?;
         Ok(info)
     }
+
+    pub async fn create_key(
+        &self,
+        days: i16,
+        distributor: &str,
+    ) -> anyhow::Result<ApiKey> {
+        let body = serde_json::json!({
+            "days": days,
+            "distributor": distributor,
+        });
+
+        let resp = self
+            .client
+            .post(format!("{}/key", self.endpoint))
+            .headers(self.auth_headers(None))
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("API returned {}: {}", status, text);
+        }
+
+        let parsed: ApiResponse<ApiInstance> = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse key response: {e}\n{text}"))?;
+
+        match parsed.response.instance {
+            ApiInstance::Key(k) => Ok(k),
+            _ => anyhow::bail!("Unexpected API instance type"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ApiKey {
+    pub id: Uuid,
+    pub code: String,
+    pub days: i16,
+    pub activated: bool,
+    pub subscription_id: Option<Uuid>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub modified_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,8 +231,9 @@ struct InstanceWithId<T> {
 
 #[derive(Debug, Deserialize)]
 enum ApiInstance {
-    Subscription(ApiSubscription),
     Connection(ApiConnection),
+    Subscription(ApiSubscription),
+    Key(ApiKey),
 }
 
 #[derive(Debug, Deserialize)]
