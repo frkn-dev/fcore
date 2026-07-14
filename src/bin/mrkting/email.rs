@@ -165,6 +165,7 @@ impl Mailer {
         to: String,
         key_code: String,
         subject: String,
+        utm_campaign: Option<String>,
     ) {
         let transport = self.transport.clone();
         let from = self.from.clone();
@@ -173,6 +174,12 @@ impl Mailer {
         let company_website = self.company_website.clone();
 
         tokio::spawn(async move {
+            let utm = utm_campaign
+                .as_deref()
+                .map(|c| format!("utm_source=google_forms&utm_medium=email&utm_campaign={}", c))
+                .unwrap_or_else(|| "utm_source=google_forms&utm_medium=email".to_string());
+            let activation_link = format!("{}/activate?code={}&{}", company_website, key_code, utm);
+
             let html_body = format!(
                 r#"
             <!DOCTYPE html>
@@ -200,7 +207,7 @@ impl Mailer {
                       </tr>
                       <tr>
                         <td align="center" style="padding:20px 0;">
-                          <a href="{company_website}/activate?code={key_code}"
+                          <a href="{activation_link}"
                              style="display:inline-block;padding:14px 24px;background:linear-gradient(90deg,#5b7cfa,#22d3ee);color:#fff;text-decoration:none;border-radius:12px;font-weight:bold;">Активировать ключ</a>
                         </td>
                       </tr>
@@ -218,7 +225,7 @@ impl Mailer {
                 "#,
                 subject = subject,
                 key_code = key_code,
-                company_website = company_website,
+                activation_link = activation_link,
                 company_name = company_name,
                 support = support,
             );

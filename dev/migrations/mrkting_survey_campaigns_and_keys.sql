@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS mrkting.survey_campaigns (
     campaign_days INT NOT NULL,
     limit_bytes BIGINT,
     subject TEXT,
+    utm_campaign TEXT,
     starts_at TIMESTAMPTZ NOT NULL,
     active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -31,6 +32,9 @@ CREATE INDEX IF NOT EXISTS idx_survey_keys_issued ON mrkting.survey_keys(email_h
 
 ALTER TABLE mrkting.survey_rewards
     ADD COLUMN IF NOT EXISTS campaign_id UUID REFERENCES mrkting.survey_campaigns(id) ON DELETE SET NULL;
+
+ALTER TABLE mrkting.survey_rewards
+    ALTER COLUMN campaign DROP NOT NULL;
 
 ALTER TABLE mrkting.survey_rewards
     DROP CONSTRAINT IF EXISTS survey_rewards_email_hmac_campaign_key;

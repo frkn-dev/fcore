@@ -619,7 +619,7 @@ pub async fn post_survey_reward_handler(
     let subject = campaign.subject.unwrap_or_else(|| "Ваша награда FRKN".to_string());
     state
         .mailer
-        .send_survey_reward_email(email, key.code, subject);
+        .send_survey_reward_email(email, key.code, subject, campaign.utm_campaign);
 
     Ok(Box::new(warp::reply::json(
         &serde_json::json!({
@@ -644,6 +644,7 @@ pub async fn post_create_campaign_handler(
             req.campaign_days,
             req.limit_bytes,
             req.subject.as_deref(),
+            req.utm_campaign.as_deref(),
             req.starts_at,
         )
         .await

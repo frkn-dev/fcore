@@ -212,6 +212,7 @@ impl PgSurveyCampaigns {
         campaign_days: i32,
         limit_bytes: Option<i64>,
         subject: Option<&str>,
+        utm_campaign: Option<&str>,
         starts_at: DateTime<Utc>,
     ) -> Result<uuid::Uuid> {
         let mut manager = self.manager.lock().await;
@@ -220,8 +221,8 @@ impl PgSurveyCampaigns {
             .query_one(
                 r#"
                 INSERT INTO mrkting.survey_campaigns
-                (name, token, distributor, key_days, campaign_days, limit_bytes, subject, starts_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (name, token, distributor, key_days, campaign_days, limit_bytes, subject, utm_campaign, starts_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING id
                 "#,
                 &[
@@ -232,6 +233,7 @@ impl PgSurveyCampaigns {
                     &campaign_days,
                     &limit_bytes,
                     &subject,
+                    &utm_campaign,
                     &starts_at,
                 ],
             )
@@ -263,6 +265,7 @@ pub struct SurveyCampaignRow {
     pub campaign_days: i32,
     pub limit_bytes: Option<i64>,
     pub subject: Option<String>,
+    pub utm_campaign: Option<String>,
     pub starts_at: DateTime<Utc>,
     pub active: bool,
     pub created_at: DateTime<Utc>,
@@ -279,6 +282,7 @@ impl From<tokio_postgres::Row> for SurveyCampaignRow {
             campaign_days: row.get("campaign_days"),
             limit_bytes: row.get("limit_bytes"),
             subject: row.get("subject"),
+            utm_campaign: row.get("utm_campaign"),
             starts_at: row.get("starts_at"),
             active: row.get("active"),
             created_at: row.get("created_at"),

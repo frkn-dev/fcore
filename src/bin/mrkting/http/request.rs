@@ -65,6 +65,7 @@ pub struct CreateCampaignRequest {
     pub campaign_days: i32,
     pub limit_bytes: Option<i64>,
     pub subject: Option<String>,
+    pub utm_campaign: Option<String>,
     pub starts_at: chrono::DateTime<chrono::Utc>,
 }
 
