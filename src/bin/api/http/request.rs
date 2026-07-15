@@ -210,6 +210,8 @@ pub struct SubscriptionInfoRequest {
     pub format: FormatReq,
     pub env: EnvFilter,
     pub proto: TagReq,
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 impl SubscriptionInfoRequest {

@@ -542,6 +542,54 @@ where
     Ok(Box::new(warp::reply::json(&resp)))
 }
 
+/// Sanitize subscription output for clients that break on emojis, spaces or
+/// unusual symbols in profile names / node labels.
+fn sanitize_for_happ(input: &str) -> String {
+    input
+        .chars()
+        .filter_map(|c| {
+            if c == ' ' {
+                Some('_')
+            } else if c.is_alphanumeric() {
+                Some(c)
+            } else if is_url_safe_punctuation(c) {
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_url_safe_punctuation(c: char) -> bool {
+    matches!(
+        c,
+        ':' | '/'
+            | '?'
+            | '#'
+            | '['
+            | ']'
+            | '@'
+            | '!'
+            | '$'
+            | '&'
+            | '\''
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | ';'
+            | '='
+            | '%'
+            | '.'
+            | '_'
+            | '-'
+            | '~'
+            | '\n'
+    )
+}
+
 pub async fn subscription_link_handler<N, C, S>(
     req: SubscriptionInfoRequest,
     memory: MemSync<N, C, S>,
@@ -739,6 +787,12 @@ where
     // -------------------------
     // Response generation
     // -------------------------
+    let happ_mode = req
+        .app
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("happ"))
+        .unwrap_or(false);
+
     match req.format {
         FormatReq::Txt => {
             let links: Result<Vec<_>, _> = inbounds_list
@@ -749,6 +803,11 @@ where
                 .collect();
 
             let body = format!("{}{}", meta, links?.join("\n"));
+            let body = if happ_mode {
+                sanitize_for_happ(&body)
+            } else {
+                body
+            };
 
             Ok(Box::new(warp::reply::with_status(
                 warp::reply::with_header(body, "Content-Type", "text/plain"),
@@ -765,6 +824,11 @@ where
                 .collect();
 
             let body = format!("{}{}", meta, links?.join("\n"));
+            let body = if happ_mode {
+                sanitize_for_happ(&body)
+            } else {
+                body
+            };
 
             let encoded = base64::engine::general_purpose::STANDARD.encode(body);
 
@@ -786,6 +850,7 @@ where
 
             let yaml = serde_yaml::to_string(&clash_config)
                 .unwrap_or_else(|_| "---\nerror: failed to serialize\n".into());
+            let yaml = if happ_mode { sanitize_for_happ(&yaml) } else { yaml };
 
             let response = Response::builder()
                 .header("Content-Type", "application/yaml")
