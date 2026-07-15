@@ -12,6 +12,19 @@ fn default_refresh_sec() -> u64 {
     30
 }
 
+fn default_session_ttl_hours() -> i64 {
+    168
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PostgresConfig {
+    pub host: String,
+    pub port: u16,
+    pub db: String,
+    pub username: String,
+    pub password: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PixelConfig {
     pub endpoint: String,
@@ -22,6 +35,10 @@ pub struct PixelConfig {
 pub struct PaymentConfig {
     pub endpoint: String,
     pub analytics_token: String,
+    /// Token for administrative operations in payment-gateway, such as
+    /// creating or deleting partner promocodes. If omitted, promocode
+    /// sync is skipped.
+    pub admin_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -43,15 +60,25 @@ pub struct DashboardConfig {
     pub refresh_sec: u64,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PartnerConfig {
+    #[serde(default = "default_session_ttl_hours")]
+    pub session_ttl_hours: i64,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Config {
+    pub pg: PostgresConfig,
     pub pixel: PixelConfig,
     pub payment: PaymentConfig,
     pub mrkting: MrktingConfig,
 
     #[serde(default)]
     pub dashboard: DashboardConfig,
+
+    #[serde(default)]
+    pub partner: PartnerConfig,
 }
 
 impl Config {

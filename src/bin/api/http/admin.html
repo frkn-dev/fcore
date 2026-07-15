@@ -363,14 +363,19 @@
 
     const rows = data.nodes.map(n => {
       const m = n.metrics || {};
-      const load = m.cpu_percent != null ? m.cpu_percent : null;
+      const load = m.load_percent != null ? m.load_percent : null;
+      let loadClass = '';
+      if (load != null) {
+        if (load >= 90) loadClass = 'style="color:#991b1b;font-weight:600"';
+        else if (load >= 70) loadClass = 'style="color:#92400e;font-weight:600"';
+      }
       return `
       <tr class="clickable" onclick="toggleNode('${n.id}')">
         <td class="mono">${n.id}</td>
         <td><strong>${n.label}</strong></td>
         <td class="mono">${n.address}</td>
         <td><span class="badge ${n.status.toLowerCase()}">${n.status}</span></td>
-        <td class="nowrap">${load != null ? load.toFixed(1) + '%' : '-'}</td>
+        <td class="nowrap" ${loadClass}>${load != null ? load.toFixed(1) + '%' : '-'}</td>
         <td><button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteNode('${n.id}')">Delete</button></td>
       </tr>
       <tr>
@@ -573,8 +578,12 @@
     const memPct = memUsed != null && memTotal != null ? (memUsed / memTotal * 100) : null;
     const load1 = latest['sys.loadavg_1'];
     const diskRoot = latest['sys.disk.root.usage_percent'];
+    const loadPct = latest['sys.cpu.avg'] != null && memPct != null && diskRoot != null
+      ? Math.max(latest['sys.cpu.avg'], memPct, diskRoot)
+      : null;
 
     const info = [];
+    if (loadPct != null) info.push(`Load: ${loadPct.toFixed(1)}%`);
     if (cpu != null) info.push(`CPU: ${cpu.toFixed(1)}%`);
     if (memUsed != null) info.push(`Memory: ${formatBytes(memUsed)} / ${formatBytes(memTotal || 0)} (${memPct != null ? memPct.toFixed(1) : '-'}%)`);
     if (load1 != null) info.push(`Load 1m: ${load1.toFixed(2)}`);

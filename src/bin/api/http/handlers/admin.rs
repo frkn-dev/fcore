@@ -54,6 +54,9 @@ pub struct NodeMetricsSnapshot {
     pub disk_usage_percent: Option<f64>,
     pub network_rx_bps: Option<f64>,
     pub network_tx_bps: Option<f64>,
+    /// Composite load percentage derived from the maximum of CPU, memory and
+    /// disk usage. A higher value indicates the node is closer to saturation.
+    pub load_percent: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -292,19 +295,33 @@ where
         let (mem_used, mem_total) = metrics.node_memory(&node.uuid);
         let (net_rx, net_tx) = metrics.node_network_traffic(&node.uuid);
 
+        let cpu_percent = metrics.node_cpu_avg(&node.uuid);
+        let memory_percent = match (mem_used, mem_total) {
+            (Some(used), Some(total)) if total > 0 => {
+                Some(((used as f64 / total as f64) * 10000.0).round() / 100.0)
+            }
+            _ => None,
+        };
+        let disk_usage_percent = metrics.node_disk_usage(&node.uuid, "root");
+
+        let load_percent = [
+            cpu_percent,
+            memory_percent,
+            disk_usage_percent,
+        ]
+        .iter()
+        .filter_map(|v| *v)
+        .reduce(f64::max);
+
         admin_node.metrics = NodeMetricsSnapshot {
             memory_used_bytes: mem_used,
             memory_total_bytes: mem_total,
-            memory_percent: match (mem_used, mem_total) {
-                (Some(used), Some(total)) if total > 0 => {
-                    Some(((used as f64 / total as f64) * 10000.0).round() / 100.0)
-                }
-                _ => None,
-            },
-            cpu_percent: metrics.node_cpu_avg(&node.uuid),
-            disk_usage_percent: metrics.node_disk_usage(&node.uuid, "root"),
+            memory_percent,
+            cpu_percent,
+            disk_usage_percent,
             network_rx_bps: net_rx,
             network_tx_bps: net_tx,
+            load_percent,
         };
 
         nodes.push(admin_node);

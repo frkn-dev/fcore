@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FRKN Partner Dashboard</title>
+<style>
+  :root { --bg: #f5f6f8; --card: #fff; --text: #222; --muted: #666; --border: #ddd; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+  header { background: #1a1a2e; color: #fff; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { margin: 0; font-size: 1.2rem; }
+  main { padding: 1.5rem; max-width: 1400px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .card h3 { margin: 0 0 0.5rem; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; }
+  .card .value { font-size: 1.8rem; font-weight: 600; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; overflow-x: auto; }
+  section h2 { margin: 0 0 1rem; font-size: 1.1rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+  th { background: #fafafa; font-weight: 600; }
+  .small { font-size: 0.8rem; color: var(--muted); }
+  .error { color: #991b1b; }
+  .success { color: #166534; }
+  canvas { width: 100%; height: 240px; }
+  .toolbar { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .toolbar button { padding: 0.4rem 0.8rem; border: 1px solid var(--border); background: #fff; border-radius: 4px; cursor: pointer; }
+  .toolbar button.active { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
+  .login-form { max-width: 360px; margin: 5rem auto; background: var(--card); padding: 2rem; border-radius: 8px; border: 1px solid var(--border); }
+  .login-form h2 { margin-top: 0; }
+  .login-form input { width: 100%; padding: 0.7rem; margin-bottom: 1rem; border: 1px solid var(--border); border-radius: 4px; }
+  .login-form button { width: 100%; padding: 0.8rem; background: #1a1a2e; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  .hidden { display: none !important; }
+  .form-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .form-row input, .form-row select { flex: 1; min-width: 140px; padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; }
+  .btn { padding: 0.5rem 1rem; background: #1a1a2e; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  .btn-danger { background: #991b1b; }
+  #message { margin-bottom: 1rem; padding: 0.75rem; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FRKN Partner Dashboard</h1>
+  <span class="small" id="status"></span>
+  <button class="btn hidden" id="logout-btn" onclick="logout()">Выйти</button>
+</header>
+
+<main id="login-view">
+  <form class="login-form" onsubmit="return login(event)">
+    <h2>Вход для партнёров</h2>
+    <input type="email" id="login-email" placeholder="Email" required>
+    <input type="password" id="login-password" placeholder="Пароль" required>
+    <button type="submit">Войти</button>
+    <p class="small" id="login-error"></p>
+  </form>
+</main>
+
+<main id="dashboard-view" class="hidden">
+  <div id="message" class="hidden"></div>
+
+  <div class="overview-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+    <h2 id="overview-title">Overview (Today)</h2>
+    <div class="toolbar" id="overview-toolbar">
+      <button class="active" data-period="today">Today</button>
+      <button data-period="yesterday">Yesterday</button>
+      <button data-period="24h">24h</button>
+      <button data-period="7d">7 days</button>
+      <button data-period="30d">30 days</button>
+      <button data-period="90d">90 days</button>
+      <button data-period="month">Month</button>
+    </div>
+  </div>
+
+  <div class="grid" id="overview">
+    <div class="card"><h3>Visits</h3><div class="value" id="visits">-</div></div>
+    <div class="card"><h3>Payments</h3><div class="value" id="payments">-</div></div>
+    <div class="card"><h3>Revenue</h3><div class="value" id="revenue">-</div></div>
+    <div class="card hidden" id="share-card"><h3>Your share</h3><div class="value" id="share">-</div></div>
+  </div>
+
+  <section>
+    <h2>Revenue over time</h2>
+    <canvas id="revenue-chart"></canvas>
+  </section>
+
+  <section>
+    <h2>Visits over time</h2>
+    <canvas id="visits-chart"></canvas>
+  </section>
+
+  <section>
+    <h2>Create promocode</h2>
+    <form onsubmit="return createPromocode(event)">
+      <div class="form-row">
+        <input type="text" id="promo-code" placeholder="PROMO2024" required>
+        <input type="number" id="promo-discount" placeholder="Discount %" value="0" min="0" max="100">
+        <input type="number" id="promo-max-uses" placeholder="Max uses" min="1">
+        <input type="number" id="promo-duration" placeholder="Duration days" min="1">
+        <input type="datetime-local" id="promo-expires" placeholder="Expires at">
+      </div>
+      <button type="submit" class="btn">Создать</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Active promocodes</h2>
+    <div id="promocodes-list"><p class="small">Loading…</p></div>
+  </section>
+
+  <section>
+    <h2>Sales by promocode</h2>
+    <div id="promocodes-stats"><p class="small">Loading…</p></div>
+  </section>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let token = localStorage.getItem('partner_token');
+  let overviewPeriod = 'today';
+  let partner = null;
+
+  function setStatus(msg, isError) {
+    const el = $('status');
+    el.textContent = msg;
+    el.className = isError ? 'error' : 'small';
+  }
+
+  function showMessage(msg, isError) {
+    const el = $('message');
+    el.textContent = msg;
+    el.className = isError ? 'error' : 'success';
+    el.classList.remove('hidden');
+    setTimeout(() => el.classList.add('hidden'), 4000);
+  }
+
+  async function api(method, path, body) {
+    const opts = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token
+      }
+    };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch('/api/partner' + path, opts);
+    if (r.status === 401) {
+      logout();
+      throw new Error('Unauthorized');
+    }
+    return r;
+  }
+
+  async function login(e) {
+    e.preventDefault();
+    const email = $('login-email').value.trim();
+    const password = $('login-password').value;
+    const r = await fetch('/api/partner/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await r.json();
+    if (data.success) {
+      token = data.token;
+      localStorage.setItem('partner_token', token);
+      partner = data.partner;
+      showDashboard();
+    } else {
+      $('login-error').textContent = data.message || 'Login failed';
+    }
+    return false;
+  }
+
+  function logout() {
+    localStorage.removeItem('partner_token');
+    token = null;
+    location.reload();
+  }
+
+  function showDashboard() {
+    $('login-view').classList.add('hidden');
+    $('dashboard-view').classList.remove('hidden');
+    $('logout-btn').classList.remove('hidden');
+    if (partner && partner.show_share) {
+      $('share-card').classList.remove('hidden');
+      $('share').textContent = partner.share_percent + '%';
+    }
+    refresh();
+    loadPromocodes();
+  }
+
+  async function loadMe() {
+    try {
+      const r = await api('GET', '/me');
+      const data = await r.json();
+      if (data.success) {
+        partner = data.partner;
+        showDashboard();
+      } else {
+        logout();
+      }
+    } catch (e) {
+      logout();
+    }
+  }
+
+  async function loadOverview() {
+    try {
+      const r = await api('GET', '/analytics/overview?period=' + overviewPeriod);
+      const data = await r.json();
+      $('visits').textContent = (data.visits || 0).toLocaleString();
+      $('payments').textContent = (data.payments || 0).toLocaleString();
+      $('revenue').textContent = Math.round(data.revenue || 0).toLocaleString() + ' ₽';
+      if (partner && partner.show_share) {
+        const share = (data.revenue || 0) * partner.share_percent / 100;
+        $('share').textContent = Math.round(share).toLocaleString() + ' ₽';
+      }
+    } catch (e) {
+      setStatus('overview error: ' + e.message, true);
+    }
+  }
+
+  async function loadCharts() {
+    try {
+      const r = await api('GET', '/analytics/sales?period=' + overviewPeriod);
+      const data = await r.json();
+      renderRevenueChart(data.data || []);
+    } catch (e) { console.error(e); }
+
+    try {
+      const r = await api('GET', '/analytics/visits?period=' + overviewPeriod);
+      const data = await r.json();
+      renderVisitsChart(data.series || []);
+    } catch (e) { console.error(e); }
+  }
+
+  async function loadPromocodes() {
+    try {
+      const r = await api('GET', '/promocodes');
+      const data = await r.json();
+      renderPromocodes(data.promocodes || []);
+    } catch (e) { console.error(e); }
+
+    try {
+      const r = await api('GET', '/analytics/promocodes?period=' + overviewPeriod);
+      const data = await r.json();
+      renderPromocodeStats(data.promocodes || []);
+    } catch (e) { console.error(e); }
+  }
+
+  function renderPromocodes(list) {
+    const el = $('promocodes-list');
+    if (!list.length) {
+      el.innerHTML = '<p class="small">No promocodes</p>';
+      return;
+    }
+    const head = '<tr><th>Code</th><th>Discount</th><th>Max uses</th><th>Duration</th><th>Expires</th><th></th></tr>';
+    const body = list.map(p => `
+      <tr>
+        <td>${p.code}</td>
+        <td>${p.discount_percent}%</td>
+        <td>${p.max_uses || '-'}</td>
+        <td>${p.duration_days || '-'}</td>
+        <td>${p.expires_at ? new Date(p.expires_at).toLocaleString() : '-'}</td>
+        <td><button class="btn btn-danger" onclick="deletePromocode('${p.id}')">Delete</button></td>
+      </tr>`).join('');
+    el.innerHTML = '<table>' + head + body + '</table>';
+  }
+
+  function renderPromocodeStats(list) {
+    const el = $('promocodes-stats');
+    if (!list.length) {
+      el.innerHTML = '<p class="small">No data</p>';
+      return;
+    }
+    const head = '<tr><th>Code</th><th>Uses</th><th>Revenue</th></tr>';
+    const body = list.map(p => `
+      <tr>
+        <td>${p.code}</td>
+        <td>${(p.uses || 0).toLocaleString()}</td>
+        <td>${Math.round(p.revenue || 0).toLocaleString()} ₽</td>
+      </tr>`).join('');
+    el.innerHTML = '<table>' + head + body + '</table>';
+  }
+
+  async function createPromocode(e) {
+    e.preventDefault();
+    const body = {
+      code: $('promo-code').value.trim().toUpperCase(),
+      discount_percent: parseInt($('promo-discount').value) || 0,
+      max_uses: $('promo-max-uses').value ? parseInt($('promo-max-uses').value) : null,
+      duration_days: $('promo-duration').value ? parseInt($('promo-duration').value) : null,
+      expires_at: $('promo-expires').value ? new Date($('promo-expires').value).toISOString() : null
+    };
+    try {
+      const r = await api('POST', '/promocodes', body);
+      const data = await r.json();
+      if (data.success) {
+        showMessage('Promocode created');
+        e.target.reset();
+        loadPromocodes();
+      } else {
+        showMessage(data.message || 'Failed', true);
+      }
+    } catch (e) { showMessage(e.message, true); }
+    return false;
+  }
+
+  async function deletePromocode(id) {
+    if (!confirm('Delete promocode?')) return;
+    try {
+      const r = await api('DELETE', '/promocodes/' + id);
+      const data = await r.json();
+      if (data.success) {
+        showMessage('Deleted');
+        loadPromocodes();
+      } else {
+        showMessage(data.message || 'Failed', true);
+      }
+    } catch (e) { showMessage(e.message, true); }
+  }
+
+  function renderRevenueChart(buckets) {
+    const points = buckets.slice().reverse().map(b => ({ x: new Date(b.bucket).getTime(), y: b.revenue || 0 }));
+    drawChart($('revenue-chart'), points, 'Revenue');
+  }
+
+  function renderVisitsChart(series) {
+    const visits = (series || []).filter(s => s.metric === 'web.visits.total');
+    const map = new Map();
+    visits.forEach(s => {
+      s.points.forEach(p => {
+        map.set(p.x, (map.get(p.x) || 0) + (p.y || 0));
+      });
+    });
+    const points = Array.from(map.entries()).sort((a, b) => a[0] - b[0]).map(([x, y]) => ({ x, y }));
+    drawChart($('visits-chart'), points, 'Visits');
+  }
+
+  function drawChart(canvas, points, label) {
+    if (!points.length) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#999';
+      ctx.fillText('No data', 10, 60);
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(300, Math.floor(rect.width)) || 300;
+    canvas.height = 240;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height, pad = 30;
+    const minX = points[0].x, maxX = points[points.length - 1].x;
+    const values = points.map(p => p.y);
+    let minY = Math.min(...values), maxY = Math.max(...values);
+    if (minY === maxY) { minY = 0; maxY = maxY || 1; }
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad, pad); ctx.lineTo(pad, h - pad); ctx.lineTo(w - pad, h - pad); ctx.stroke();
+
+    ctx.strokeStyle = '#1a1a2e'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const x = pad + (maxX === minX ? 0 : (p.x - minX) / (maxX - minX)) * (w - 2 * pad);
+      const y = h - pad - (maxY === minY ? 0 : (p.y - minY) / (maxY - minY)) * (h - 2 * pad);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    ctx.fillStyle = '#666'; ctx.font = '11px sans-serif';
+    ctx.fillText(label, pad + 4, pad - 6);
+    ctx.fillText(Math.round(maxY).toLocaleString(), 2, pad + 8);
+    ctx.fillText(Math.round(minY).toLocaleString(), 2, h - pad - 4);
+  }
+
+  document.querySelectorAll('#overview-toolbar button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#overview-toolbar button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      overviewPeriod = btn.dataset.period;
+      $('overview-title').textContent = 'Overview (' + btn.textContent + ')';
+      refresh();
+    });
+  });
+
+  async function refresh() {
+    await Promise.all([
+      loadOverview(),
+      loadCharts(),
+      loadPromocodes()
+    ]);
+    setStatus('updated ' + new Date().toLocaleTimeString());
+  }
+
+  if (token) {
+    loadMe();
+  }
+</script>
+</body>
+</html>
