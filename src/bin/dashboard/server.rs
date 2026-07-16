@@ -226,6 +226,30 @@ struct DashboardAuthRejection;
 
 impl warp::reject::Reject for DashboardAuthRejection {}
 
+fn dashboard_admin_auth_filter(
+    state: Arc<AppState>,
+) -> impl Filter<Extract = (), Error = warp::Rejection> + Clone {
+    warp::header::optional::<String>("authorization")
+        .and(with_state(state))
+        .and_then(|auth: Option<String>, state: Arc<AppState>| async move {
+            match &state.config.dashboard.admin_token {
+                Some(expected) => {
+                    let provided = auth
+                        .as_deref()
+                        .and_then(|h| h.strip_prefix("Bearer "))
+                        .unwrap_or(auth.as_deref().unwrap_or_default());
+                    if provided == expected {
+                        Ok(())
+                    } else {
+                        Err(warp::reject::custom(DashboardAuthRejection))
+                    }
+                }
+                None => Err(warp::reject::custom(DashboardAuthRejection)),
+            }
+        })
+        .untuple_one()
+}
+
 async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
     if err.find::<DashboardAuthRejection>().is_some() {
         Ok(warp::reply::with_status(
@@ -342,6 +366,21 @@ fn partner_routes(
             partner::delete_promocode_handler(partner_state_for(state), partner, id)
         });
 
+    let admin_auth = dashboard_admin_auth_filter(state.clone());
+
+    let attach_promocode = warp::path("api")
+        .and(warp::path("partner"))
+        .and(warp::path("admin"))
+        .and(warp::path("attach-promocode"))
+        .and(warp::path::end())
+        .and(warp::post())
+        .and(admin_auth.clone())
+        .and(with_state(state.clone()))
+        .and(warp::body::json::<partner::AttachPartnerPromocodeRequest>())
+        .and_then(|state: Arc<AppState>, req: partner::AttachPartnerPromocodeRequest| {
+            partner::attach_promocode_handler(partner_state_for(state), req)
+        });
+
     let partner_overview = warp::path("api")
         .and(warp::path("partner"))
         .and(warp::path("analytics"))
@@ -408,6 +447,7 @@ fn partner_routes(
         .or(create_promocode)
         .or(list_promocodes)
         .or(delete_promocode)
+        .or(attach_promocode)
         .or(partner_overview)
         .or(partner_sales)
         .or(partner_visits)

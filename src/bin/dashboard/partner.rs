@@ -41,6 +41,18 @@ pub struct CreatePartnerPromocodeRequest {
     pub expires_at: Option<chrono::DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AttachPartnerPromocodeRequest {
+    pub partner_id: Uuid,
+    pub code: String,
+    pub payment_promocode_id: Uuid,
+    #[serde(default)]
+    pub discount_percent: i32,
+    pub max_uses: Option<i32>,
+    pub duration_days: Option<i32>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Serialize)]
 pub struct PartnerMeResponse {
     pub id: Uuid,
@@ -342,6 +354,40 @@ pub async fn delete_promocode_handler(
         Err(e) => {
             tracing::error!("Failed to delete promocode: {}", e);
             Ok(bad_request("Failed to delete promocode"))
+        }
+    }
+}
+
+pub async fn attach_promocode_handler(
+    state: PartnerState,
+    req: AttachPartnerPromocodeRequest,
+) -> Result<Box<dyn Reply + Send>, Infallible> {
+    let code = req.code.trim().to_uppercase();
+    if code.is_empty() {
+        return Ok(bad_request("code is required"));
+    }
+
+    match state
+        .pg
+        .promocodes()
+        .attach(
+            req.partner_id,
+            &code,
+            req.payment_promocode_id,
+            req.discount_percent,
+            req.max_uses,
+            req.duration_days,
+            req.expires_at,
+        )
+        .await
+    {
+        Ok(id) => Ok(json_ok(serde_json::json!({
+            "success": true,
+            "id": id,
+        }))),
+        Err(e) => {
+            tracing::error!("Failed to attach promocode: {}", e);
+            Ok(bad_request("Failed to attach promocode"))
         }
     }
 }

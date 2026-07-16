@@ -324,6 +324,40 @@ impl PgPartnerPromocodes {
         Ok(rows.into_iter().map(|r| PartnerPromocodeRow::from(r)).collect())
     }
 
+    pub async fn attach(
+        &self,
+        partner_id: Uuid,
+        code: &str,
+        payment_promocode_id: Uuid,
+        discount_percent: i32,
+        max_uses: Option<i32>,
+        duration_days: Option<i32>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Uuid> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO dashboard.partner_promocodes
+                (partner_id, code, payment_promocode_id, discount_percent, max_uses, duration_days, expires_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING id
+                "#,
+                &[
+                    &partner_id,
+                    &code,
+                    &payment_promocode_id,
+                    &discount_percent,
+                    &max_uses,
+                    &duration_days,
+                    &expires_at,
+                ],
+            )
+            .await?;
+        Ok(row.get("id"))
+    }
+
     pub async fn set_payment_id(
         &self,
         id: Uuid,

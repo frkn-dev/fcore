@@ -22,7 +22,8 @@ endpoint = "http://127.0.0.1:3007"
 listen = "127.0.0.1"
 port = 9103
 refresh_sec = 30
-# api_token = "dashboard-api-secret"  # optional, protects /api/overview, /api/sales, /api/pixel
+# api_token = "dashboard-api-secret"    # protects /api/overview, /api/sales, /api/pixel
+# admin_token = "dashboard-admin-secret"  # protects /api/partner/admin/*
 
 [partner]
 session_ttl_hours = 168

@@ -63,6 +63,10 @@ pub struct DashboardConfig {
     /// (/api/overview, /api/sales, /api/pixel). If set, requests must include
     /// `Authorization: Bearer <token>`.
     pub api_token: Option<String>,
+
+    /// Optional bearer token for administrative dashboard endpoints, such as
+    /// attaching existing payment-gateway promocodes to partners.
+    pub admin_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
