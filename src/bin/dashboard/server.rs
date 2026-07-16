@@ -129,10 +129,13 @@ pub async fn start_server(config: Config, pg: PgContext) {
         .and(warp::get())
         .map(|| warp::reply::html(PARTNER_HTML));
 
+    let api_auth = dashboard_api_auth_filter(state.clone());
+
     let api_overview = warp::path("api")
         .and(warp::path("overview"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(api_auth.clone())
         .and(warp::query::<OverviewQuery>())
         .and(with_state(state.clone()))
         .and_then(overview_handler);
@@ -141,6 +144,7 @@ pub async fn start_server(config: Config, pg: PgContext) {
         .and(warp::path("sales"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(api_auth.clone())
         .and(warp::query::<PeriodQuery>())
         .and(with_state(state.clone()))
         .and_then(sales_proxy_handler);
@@ -149,6 +153,7 @@ pub async fn start_server(config: Config, pg: PgContext) {
         .and(warp::path("pixel"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(api_auth.clone())
         .and(warp::query::<PeriodQuery>())
         .and(with_state(state.clone()))
         .and_then(pixel_proxy_handler);
@@ -173,7 +178,7 @@ pub async fn start_server(config: Config, pg: PgContext) {
         .allow_headers(vec!["Content-Type", "Authorization"])
         .allow_any_origin();
 
-    let routes = routes.with(cors);
+    let routes = routes.with(cors).recover(handle_rejection);
 
     let addr: std::net::SocketAddr = format!(
         "{}:{}",
@@ -190,6 +195,51 @@ fn with_state(
     state: Arc<AppState>,
 ) -> impl Filter<Extract = (Arc<AppState>,), Error = Infallible> + Clone {
     warp::any().map(move || state.clone())
+}
+
+fn dashboard_api_auth_filter(
+    state: Arc<AppState>,
+) -> impl Filter<Extract = (), Error = warp::Rejection> + Clone {
+    warp::header::optional::<String>("authorization")
+        .and(with_state(state))
+        .and_then(|auth: Option<String>, state: Arc<AppState>| async move {
+            match &state.config.dashboard.api_token {
+                Some(expected) => {
+                    let provided = auth
+                        .as_deref()
+                        .and_then(|h| h.strip_prefix("Bearer "))
+                        .unwrap_or(auth.as_deref().unwrap_or_default());
+                    if provided == expected {
+                        Ok(())
+                    } else {
+                        Err(warp::reject::custom(DashboardAuthRejection))
+                    }
+                }
+                None => Ok(()),
+            }
+        })
+        .untuple_one()
+}
+
+#[derive(Debug)]
+struct DashboardAuthRejection;
+
+impl warp::reject::Reject for DashboardAuthRejection {}
+
+async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+    if err.find::<DashboardAuthRejection>().is_some() {
+        Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"success": false, "message": "Unauthorized"}),
+            ),
+            warp::http::StatusCode::UNAUTHORIZED,
+        ))
+    } else {
+        Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"success": false, "message": "Internal server error"}),
+            ),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ))
+    }
 }
 
 fn partner_auth_filter(

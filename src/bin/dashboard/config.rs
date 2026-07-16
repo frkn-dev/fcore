@@ -58,6 +58,11 @@ pub struct DashboardConfig {
 
     #[serde(default = "default_refresh_sec")]
     pub refresh_sec: u64,
+
+    /// Optional bearer token for the main dashboard API endpoints
+    /// (/api/overview, /api/sales, /api/pixel). If set, requests must include
+    /// `Authorization: Bearer <token>`.
+    pub api_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

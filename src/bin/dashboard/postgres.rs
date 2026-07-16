@@ -105,6 +105,7 @@ impl PgPartners {
         show_share: bool,
     ) -> anyhow::Result<Uuid> {
         let password_hash = hash(password, DEFAULT_COST)?;
+        let share_str = share_percent.to_string();
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
         let row = client
@@ -112,10 +113,10 @@ impl PgPartners {
                 r#"
                 INSERT INTO dashboard.partners
                 (email, password_hash, name, share_percent, show_share)
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4::numeric, $5)
                 RETURNING id
                 "#,
-                &[&email,&password_hash,&name,&share_percent,&show_share,
+                &[&email,&password_hash,&name,&share_str,&show_share,
                 ],
             )
             .await?;
