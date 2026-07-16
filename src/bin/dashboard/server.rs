@@ -257,7 +257,21 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, std:
             ),
             warp::http::StatusCode::UNAUTHORIZED,
         ))
+    } else if err.is_not_found() {
+        Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"success": false, "message": "Not found"}),
+            ),
+            warp::http::StatusCode::NOT_FOUND,
+        ))
+    } else if let Some(e) = err.find::<warp::reject::MethodNotAllowed>() {
+        tracing::warn!("Method not allowed: {:?}", e);
+        Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"success": false, "message": "Method not allowed"}),
+            ),
+            warp::http::StatusCode::METHOD_NOT_ALLOWED,
+        ))
     } else {
+        tracing::error!("Unhandled rejection: {:?}", err);
         Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({"success": false, "message": "Internal server error"}),
             ),
@@ -273,18 +287,35 @@ fn partner_auth_filter(
         .and(with_state(state))
         .and_then(|auth: String, state: Arc<AppState>| async move {
             let token = auth.strip_prefix("Bearer ").unwrap_or(&auth).to_string();
+            tracing::debug!("Partner auth attempt with token: {}", token);
             match state.pg.sessions().find_by_token(&token).await {
                 Ok(Some(session)) => match state.pg.partners().find_by_id(session.partner_id).await {
                     Ok(Some(partner)) => {
                         if partner.active {
+                            tracing::debug!("Partner auth success for partner_id: {}", partner.id);
                             Ok(partner)
                         } else {
+                            tracing::warn!("Partner auth failed: account disabled for token: {}", token);
                             Err(warp::reject::not_found())
                         }
                     }
-                    _ => Err(warp::reject::not_found()),
+                    Ok(None) => {
+                        tracing::warn!("Partner auth failed: partner not found for token: {}", token);
+                        Err(warp::reject::not_found())
+                    }
+                    Err(e) => {
+                        tracing::error!("Partner auth DB error finding partner: {}", e);
+                        Err(warp::reject::not_found())
+                    }
                 },
-                _ => Err(warp::reject::not_found()),
+                Ok(None) => {
+                    tracing::warn!("Partner auth failed: session not found for token: {}", token);
+                    Err(warp::reject::not_found())
+                }
+                Err(e) => {
+                    tracing::error!("Partner auth DB error finding session: {}", e);
+                    Err(warp::reject::not_found())
+                }
             }
         })
 }

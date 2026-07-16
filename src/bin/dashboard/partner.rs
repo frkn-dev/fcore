@@ -157,6 +157,7 @@ pub async fn login_handler(
     state: PartnerState,
     req: PartnerLoginRequest,
 ) -> Result<Box<dyn Reply + Send>, Infallible> {
+    tracing::debug!("Partner login request for email: {}", req.email);
     let email = req.email.trim().to_lowercase();
     if email.is_empty() || req.password.is_empty() {
         return Ok(bad_request("email and password are required"));
@@ -195,6 +196,7 @@ pub async fn me_handler(
     _state: PartnerState,
     partner: PartnerRow,
 ) -> Result<Box<dyn Reply + Send>, Infallible> {
+    tracing::debug!("Partner me request for partner_id: {}", partner.id);
     Ok(json_ok(serde_json::json!({
         "success": true,
         "partner": PartnerMeResponse::from(partner),
@@ -206,6 +208,7 @@ pub async fn create_promocode_handler(
     partner: PartnerRow,
     req: CreatePartnerPromocodeRequest,
 ) -> Result<Box<dyn Reply + Send>, Infallible> {
+    tracing::debug!("Create promocode request for partner_id: {}", partner.id);
     let code = req.code.trim().to_uppercase();
     if code.is_empty() {
         return Ok(bad_request("code is required"));
@@ -297,6 +300,7 @@ pub async fn list_promocodes_handler(
     state: PartnerState,
     partner: PartnerRow,
 ) -> Result<Box<dyn Reply + Send>, Infallible> {
+    tracing::debug!("List promocodes request for partner_id: {}", partner.id);
     match state.pg.promocodes().list(partner.id).await {
         Ok(rows) => {
             let promos: Vec<PartnerPromocodeResponse> = rows.into_iter().map(|r| r.into()).collect();

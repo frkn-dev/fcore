@@ -13,7 +13,10 @@ async fn main() {
     let config = config::Config::from_file(&config_path);
 
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
+        )
         .init();
 
     let pg = match postgres::PgContext::init(&config.pg).await {
