@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS dashboard.partners (
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     name TEXT NOT NULL,
-    share_percent NUMERIC(5,2) DEFAULT 0,
+    share_percent DOUBLE PRECISION DEFAULT 0,
     show_share BOOLEAN NOT NULL DEFAULT false,
     active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
