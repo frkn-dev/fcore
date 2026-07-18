@@ -69,10 +69,18 @@ pub struct DashboardConfig {
     pub admin_token: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct PartnerConfig {
     #[serde(default = "default_session_ttl_hours")]
     pub session_ttl_hours: i64,
+}
+
+impl Default for PartnerConfig {
+    fn default() -> Self {
+        Self {
+            session_ttl_hours: default_session_ttl_hours(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

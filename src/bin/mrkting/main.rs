@@ -46,6 +46,10 @@ async fn main() -> Result<()> {
         cipher,
         mailer,
         api_client,
+        rate_limiter: Arc::new(crate::http::handlers::RateLimiter::new(
+            30,
+            std::time::Duration::from_secs(60),
+        )),
     };
 
     let addr = (settings.service.listen, settings.service.port);

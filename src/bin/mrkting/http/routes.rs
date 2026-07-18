@@ -5,15 +5,17 @@ use fcore::http::{filters::auth, AuthError};
 
 use super::{
     handlers::{
-        get_check_ref_code_handler, get_conversions_handler, get_referral_stats_handler,
-        get_referrals_handler, get_subscription_by_ref_code_handler, get_subscription_trial_handler,
-        get_trials_handler, get_validate_ref_code_handler, healthcheck_handler, post_account_handler,
-        post_create_campaign_handler, post_restock_campaign_handler, post_subscription_extend_handler,
-        post_survey_reward_handler, AppState,
+        get_blog_stats_handler, get_check_ref_code_handler, get_conversions_handler,
+        get_referral_stats_handler, get_referrals_handler, get_subscription_by_ref_code_handler,
+        get_subscription_trial_handler, get_trials_handler, get_validate_ref_code_handler,
+        healthcheck_handler, post_account_handler, post_blog_reaction_handler,
+        post_create_campaign_handler, post_restock_campaign_handler,
+        post_subscription_extend_handler, post_survey_reward_handler, AppState,
     },
     request::{
-        AccountRequest, CreateCampaignRequest, RefCodeQuery, RestockRequest,
-        SubscriptionExtendRequest, SubscriptionIdQuery, SurveyRewardRequest, TrialsQuery,
+        AccountRequest, BlogReactionRequest, BlogStatsQuery, CreateCampaignRequest, RefCodeQuery,
+        RestockRequest, SubscriptionExtendRequest, SubscriptionIdQuery, SurveyRewardRequest,
+        TrialsQuery,
     },
 };
 
@@ -131,6 +133,23 @@ pub fn routes(
         .and(warp::query::<SubscriptionIdQuery>())
         .and_then(get_subscription_trial_handler);
 
+    let blog_reaction = warp::post()
+        .and(warp::path("blog"))
+        .and(warp::path("reaction"))
+        .and(warp::path::end())
+        .and(with_state.clone())
+        .and(warp::addr::remote())
+        .and(warp::body::json::<BlogReactionRequest>())
+        .and_then(post_blog_reaction_handler);
+
+    let blog_stats = warp::get()
+        .and(warp::path("blog"))
+        .and(warp::path("stats"))
+        .and(warp::path::end())
+        .and(with_state.clone())
+        .and(warp::query::<BlogStatsQuery>())
+        .and_then(get_blog_stats_handler);
+
     let referrals_analytics = warp::get()
         .and(warp::path("analytics"))
         .and(warp::path("referrals"))
@@ -169,6 +188,8 @@ pub fn routes(
         .or(subscription_by_ref_code)
         .or(subscription_extend)
         .or(subscription_trial)
+        .or(blog_reaction)
+        .or(blog_stats)
         .or(conversions)
         .or(referrals_analytics)
         .or(trials)

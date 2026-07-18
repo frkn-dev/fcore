@@ -86,6 +86,10 @@ impl PgContext {
     pub fn survey_keys(&self) -> PgSurveyKeys {
         PgSurveyKeys::new(self.manager.clone())
     }
+
+    pub fn blog_reactions(&self) -> PgBlogReactions {
+        PgBlogReactions::new(self.manager.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -663,4 +667,138 @@ impl From<tokio_postgres::Row> for EmailRow {
             converted_at: row.get("converted_at"),
         }
     }
+}
+
+#[derive(Clone)]
+pub struct PgBlogReactions {
+    manager: Arc<Mutex<PgManager>>,
+}
+
+impl PgBlogReactions {
+    pub fn new(manager: Arc<Mutex<PgManager>>) -> Self {
+        Self { manager }
+    }
+
+    /// Upsert a reaction. Pass `None` to delete an existing reaction.
+    pub async fn set_reaction(
+        &self,
+        article_id: &str,
+        user_key: &str,
+        reaction: Option<i16>,
+    ) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        match reaction {
+            Some(reaction) => {
+                client
+                    .execute(
+                        r#"
+                        INSERT INTO mrkting.blog_reactions (article_id, user_key, reaction)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (article_id, user_key)
+                        DO UPDATE SET reaction = $3, updated_at = now()
+                        "#,
+                        &[&article_id, &user_key, &reaction],
+                    )
+                    .await?;
+            }
+            None => {
+                client
+                    .execute(
+                        "DELETE FROM mrkting.blog_reactions WHERE article_id = $1 AND user_key = $2",
+                        &[&article_id, &user_key],
+                    )
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get (likes, dislikes) for one article.
+    pub async fn stats(&self, article_id: &str) -> Result<(i64, i64)> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_one(
+                r#"
+                SELECT
+                    COALESCE(SUM(CASE WHEN reaction = 1 THEN 1 ELSE 0 END), 0)::bigint AS likes,
+                    COALESCE(SUM(CASE WHEN reaction = -1 THEN 1 ELSE 0 END), 0)::bigint AS dislikes
+                FROM mrkting.blog_reactions
+                WHERE article_id = $1
+                "#,
+                &[&article_id],
+            )
+            .await?;
+        Ok((row.get("likes"), row.get("dislikes")))
+    }
+
+    /// Get stats for multiple articles.
+    pub async fn stats_many(
+        &self,
+        article_ids: &[String],
+    ) -> Result<Vec<BlogStatsRow>> {
+        if article_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                r#"
+                SELECT
+                    article_id,
+                    COALESCE(SUM(CASE WHEN reaction = 1 THEN 1 ELSE 0 END), 0)::bigint AS likes,
+                    COALESCE(SUM(CASE WHEN reaction = -1 THEN 1 ELSE 0 END), 0)::bigint AS dislikes
+                FROM mrkting.blog_reactions
+                WHERE article_id = ANY($1)
+                GROUP BY article_id
+                "#,
+                &[&article_ids],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| BlogStatsRow {
+                article_id: r.get("article_id"),
+                likes: r.get("likes"),
+                dislikes: r.get("dislikes"),
+            })
+            .collect())
+    }
+
+    /// Get a user's reactions to multiple articles.
+    pub async fn my_reactions_many(
+        &self,
+        article_ids: &[String],
+        user_key: &str,
+    ) -> Result<Vec<(String, i16)>> {
+        if article_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT article_id, reaction FROM mrkting.blog_reactions WHERE article_id = ANY($1) AND user_key = $2",
+                &[&article_ids, &user_key],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<_, String>("article_id"), r.get::<_, i16>("reaction")))
+            .collect())
+    }
+}
+
+#[allow(dead_code)]
+pub struct BlogStatsRow {
+    pub article_id: String,
+    pub likes: i64,
+    pub dislikes: i64,
 }

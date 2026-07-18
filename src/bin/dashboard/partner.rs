@@ -176,7 +176,7 @@ pub async fn login_handler(
         return Ok(bad_request("Account is disabled"));
     }
 
-    let ttl = state.config.partner.session_ttl_hours;
+    let ttl = state.config.partner.session_ttl_hours.max(1);
     let token = match state.pg.sessions().create(partner.id, ttl).await {
         Ok(t) => t,
         Err(e) => {

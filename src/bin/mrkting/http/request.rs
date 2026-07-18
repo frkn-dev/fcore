@@ -74,3 +74,16 @@ pub struct RestockRequest {
     pub count: usize,
     pub key_days: Option<i32>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct BlogReactionRequest {
+    pub article_id: String,
+    pub user_key: String,
+    pub reaction: i16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BlogStatsQuery {
+    pub article_id: String,
+    pub user_key: Option<String>,
+}

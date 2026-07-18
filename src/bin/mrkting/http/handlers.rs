@@ -1,10 +1,13 @@
 use chrono::Utc;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use warp::Reply;
 
 use super::request::{
-    AccountRequest, CreateCampaignRequest, RefCodeQuery, RestockRequest, SurveyRewardRequest,
-    TrialsQuery,
+    AccountRequest, BlogReactionRequest, BlogStatsQuery, CreateCampaignRequest, RefCodeQuery,
+    RestockRequest, SurveyRewardRequest, TrialsQuery,
 };
 use crate::{
     api_client::ApiClient,
@@ -14,6 +17,34 @@ use crate::{
     postgres::PgContext,
 };
 
+pub struct RateLimiter {
+    limit: usize,
+    window: Duration,
+    requests: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+}
+
+impl RateLimiter {
+    pub fn new(limit: usize, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            requests: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn check(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut map = self.requests.lock().unwrap();
+        let entries = map.entry(ip).or_default();
+        entries.retain(|t| now.duration_since(*t) < self.window);
+        if entries.len() >= self.limit {
+            return false;
+        }
+        entries.push(now);
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub settings: ServiceSettings,
@@ -21,6 +52,7 @@ pub struct AppState {
     pub cipher: Arc<EmailCipher>,
     pub mailer: Arc<Mailer>,
     pub api_client: Arc<ApiClient>,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 pub async fn healthcheck_handler() -> Result<Box<dyn Reply + Send>, warp::Rejection> {
@@ -627,6 +659,144 @@ pub async fn post_survey_reward_handler(
             "rewarded": true,
         }),
     )))
+}
+
+pub async fn post_blog_reaction_handler(
+    state: AppState,
+    remote_addr: Option<std::net::SocketAddr>,
+    req: BlogReactionRequest,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    let ip = remote_addr
+        .map(|a| a.ip())
+        .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    if !state.rate_limiter.check(ip) {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"status": 429, "message": "Too many requests"})),
+            warp::http::StatusCode::TOO_MANY_REQUESTS,
+        )));
+    }
+
+    let article_id = req.article_id.trim();
+    let user_key = req.user_key.trim();
+
+    if article_id.is_empty() {
+        return Ok(bad_request("article_id is required"));
+    }
+    if user_key.is_empty() {
+        return Ok(bad_request("user_key is required"));
+    }
+
+    let reaction = match req.reaction {
+        -1 | 1 => Some(req.reaction),
+        0 => None,
+        _ => return Ok(bad_request("reaction must be 1, -1 or 0")),
+    };
+
+    if let Err(e) = state
+        .pg
+        .blog_reactions()
+        .set_reaction(article_id, user_key, reaction)
+        .await
+    {
+        tracing::error!("Failed to set blog reaction: {}", e);
+        return Ok(internal_error("Database error"));
+    }
+
+    let (likes, dislikes) = match state.pg.blog_reactions().stats(article_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to fetch blog stats: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    Ok(Box::new(warp::reply::json(
+        &serde_json::json!({
+            "likes": likes,
+            "dislikes": dislikes,
+            "my_reaction": reaction.unwrap_or(0),
+        }),
+    )))
+}
+
+pub async fn get_blog_stats_handler(
+    state: AppState,
+    query: BlogStatsQuery,
+) -> Result<Box<dyn Reply + Send>, warp::Rejection> {
+    let article_ids: Vec<String> = query
+        .article_id
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if article_ids.is_empty() {
+        return Ok(bad_request("article_id is required"));
+    }
+
+    let user_key = query
+        .user_key
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let stats = match state.pg.blog_reactions().stats_many(&article_ids).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to fetch blog stats: {}", e);
+            return Ok(internal_error("Database error"));
+        }
+    };
+
+    let my_reactions = match user_key {
+        Some(key) => match state.pg.blog_reactions().my_reactions_many(&article_ids, key).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to fetch user reactions: {}", e);
+                return Ok(internal_error("Database error"));
+            }
+        },
+        None => Vec::new(),
+    };
+
+    if article_ids.len() == 1 {
+        let article_id = &article_ids[0];
+        let row = stats.iter().find(|s| &s.article_id == article_id);
+        let my_reaction = my_reactions
+            .iter()
+            .find(|(id, _)| id == article_id)
+            .map(|(_, r)| *r)
+            .unwrap_or(0);
+
+        return Ok(Box::new(warp::reply::json(
+            &serde_json::json!({
+                "likes": row.map(|r| r.likes).unwrap_or(0),
+                "dislikes": row.map(|r| r.dislikes).unwrap_or(0),
+                "my_reaction": my_reaction,
+            }),
+        )));
+    }
+
+    let mut result = serde_json::Map::new();
+    for article_id in article_ids {
+        let row = stats.iter().find(|s| s.article_id == article_id);
+        let my_reaction = my_reactions
+            .iter()
+            .find(|(id, _)| id == &article_id)
+            .map(|(_, r)| *r)
+            .unwrap_or(0);
+
+        result.insert(
+            article_id,
+            serde_json::json!({
+                "likes": row.map(|r| r.likes).unwrap_or(0),
+                "dislikes": row.map(|r| r.dislikes).unwrap_or(0),
+                "my_reaction": my_reaction,
+            }),
+        );
+    }
+
+    Ok(Box::new(warp::reply::json(&serde_json::Value::Object(result))))
 }
 
 pub async fn post_create_campaign_handler(
