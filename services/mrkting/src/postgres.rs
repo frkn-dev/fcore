@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 use tokio_postgres::{Client as PgClient, NoTls};
 use tracing::{error, warn};
 
-use fcore::Result;
+use crate::common::Result;
 
 use super::config::PostgresConfig;
 

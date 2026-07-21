@@ -3,7 +3,7 @@ use rkyv::Deserialize as RkyvDeserialize;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::Path;
 
-use fcore::MetricPoint;
+use crate::common::MetricPoint;
 
 #[derive(Clone, Debug, Default)]
 pub struct WebMetricSample {
@@ -289,7 +289,7 @@ impl WebMetricStorage {
         });
     }
 
-    pub async fn save_snapshot<P: AsRef<Path>>(&self, path: P) -> fcore::Result<()> {
+    pub async fn save_snapshot<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
         self.perform_gc();
 
         let base = path.as_ref();
@@ -327,7 +327,7 @@ impl WebMetricStorage {
         path: P,
         max_points: usize,
         retention_seconds: i64,
-    ) -> fcore::Result<Self> {
+    ) -> anyhow::Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         let archived = unsafe { rkyv::archived_root::<WebMetricStorageSnapshot>(&bytes) };
         let snapshot: WebMetricStorageSnapshot = archived.deserialize(&mut rkyv::Infallible)?;

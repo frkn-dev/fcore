@@ -1,4 +1,5 @@
 mod aggregator;
+mod common;
 mod config;
 mod geoip;
 mod parser;

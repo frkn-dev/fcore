@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::Engine;
-use fcore::{Result, Settings, VERSION};
+use crate::common::{Result, Settings, VERSION};
 
 use crate::{
     api_client::ApiClient,
@@ -13,6 +13,7 @@ use crate::{
 };
 
 mod api_client;
+mod common;
 mod config;
 mod crypto;
 mod email;
@@ -61,6 +62,6 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing(level: &str) {
-    let filter = fcore::utils::level_from_settings(level);
+    let filter = crate::common::level_from_settings(level);
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }

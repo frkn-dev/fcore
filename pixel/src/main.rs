@@ -1,4 +1,5 @@
 mod aggregator;
+mod common;
 mod config;
 mod geoip;
 mod parser;
@@ -14,7 +15,7 @@ use crate::config::AgentConfig;
 use crate::geoip::GeoIpResolver;
 use crate::parser::LogParser;
 use crate::web_storage::WebMetricStorage;
-use fcore::utils::level_from_settings;
+use crate::common::level_from_settings;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

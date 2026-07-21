@@ -2,7 +2,7 @@ use base64::Engine;
 use serde::Deserialize;
 use std::net::Ipv4Addr;
 
-use fcore::{Env, Result, Settings, Tag};
+use crate::common::{Env, Result, Settings, Tag};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceSettings {
@@ -19,15 +19,15 @@ impl Settings for ServiceSettings {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&self.email_encryption.key)
             .map_err(|e| {
-                fcore::Error::Custom(format!(
+                anyhow::anyhow!(
                     "email_encryption.key is not valid base64: {e}"
-                ))
+                )
             })?;
         if decoded.len() != 32 {
-            return Err(fcore::Error::Custom(format!(
+            return Err(anyhow::anyhow!(
                 "email_encryption.key must decode to 32 bytes, got {} bytes",
                 decoded.len()
-            )));
+            ));
         }
         Ok(())
     }

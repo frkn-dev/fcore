@@ -1,6 +1,6 @@
 use crate::aggregator::Aggregator;
 use crate::web_storage::WebMetricStorage;
-use fcore::MetricPoint;
+use crate::common::MetricPoint;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
