@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use fcore::{Env, IpAddrMask, Result, Settings, Tag};
@@ -83,6 +84,8 @@ pub struct ServiceConfig {
     pub enabled_envs: Vec<Env>,
     #[serde(default = "default_enabled_tags")]
     pub enabled_tags: Vec<Tag>,
+    #[serde(default)]
+    pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     pub updates_endpoint_zmq: String,
