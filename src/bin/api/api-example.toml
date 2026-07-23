@@ -14,6 +14,7 @@ base_url = "https://frkn.org"
 admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"
+# mrkting = { endpoint = "https://api.frkn.org", token = "change-me" }
 
 
 

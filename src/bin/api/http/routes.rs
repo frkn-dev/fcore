@@ -491,6 +491,7 @@ where
 
         let enabled_envs = params.enabled_envs.clone();
         let enabled_tags = params.enabled_tags.clone();
+        let mrkting_config = params.mrkting.clone();
 
         let post_activate_key_route = warp::post()
             .and(warp::path("key"))
@@ -503,6 +504,7 @@ where
             .and(with_param_ipaddrmask(params.amnezia_wireguard_network.clone()))
             .and(warp::any().map(move || enabled_envs.clone()))
             .and(warp::any().map(move || enabled_tags.clone()))
+            .and(warp::any().map(move || mrkting_config.clone()))
             .and_then(post_activate_key_handler);
 
         // Amnezia gateway routes

@@ -12,6 +12,12 @@ pub struct ServiceSettings {
     pub subscription_audit: SubscriptionAuditConfig,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct MrktingConfig {
+    pub endpoint: String,
+    pub token: String,
+}
+
 impl Settings for ServiceSettings {
     fn validate(&self) -> Result<()> {
         let key_path = self
@@ -88,6 +94,8 @@ pub struct ServiceConfig {
     pub admin_token: Option<String>,
     #[serde(default)]
     pub agw_private_key_path: Option<String>,
+    #[serde(default)]
+    pub mrkting: Option<MrktingConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

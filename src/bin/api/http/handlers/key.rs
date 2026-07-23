@@ -117,6 +117,7 @@ pub async fn post_activate_key_handler<N, C, S>(
     awg_network: fcore::IpAddrMask,
     enabled_envs: Vec<Env>,
     enabled_tags: Vec<Tag>,
+    mrkting: Option<crate::config::MrktingConfig>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -215,6 +216,49 @@ where
                         tracing::error!(
                             "Failed to create connection for sub {} env {:?} tag {:?}: {}",
                             sub_id, env, tag, err
+                        );
+                    }
+                }
+            }
+
+            if let Some(mrkting) = &mrkting {
+                let client = reqwest::Client::new();
+                let url = format!("{}/keys/activations", mrkting.endpoint.trim_end_matches('/'));
+                let body = serde_json::json!({
+                    "subscription_id": sub_id,
+                    "key_code": req.code,
+                    "days": key.days,
+                });
+
+                match client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", mrkting.token))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            let status = resp.status();
+                            let text = resp.text().await.unwrap_or_default();
+                            tracing::warn!(
+                                "mrkting key activation call failed: {} {}",
+                                status,
+                                text
+                            );
+                        } else {
+                            tracing::info!(
+                                "mrkting key activation recorded for sub {}",
+                                sub_id
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to call mrkting key activation for sub {}: {}",
+                            sub_id,
+                            err
                         );
                     }
                 }
