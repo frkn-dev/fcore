@@ -115,8 +115,6 @@ pub async fn post_activate_key_handler<N, C, S>(
     memory: MemSync<N, C, S>,
     wg_network: fcore::IpAddrMask,
     awg_network: fcore::IpAddrMask,
-    enabled_envs: Vec<Env>,
-    enabled_tags: Vec<Tag>,
     enabled_conns: Option<std::collections::HashMap<Env, Vec<Tag>>>,
     mrkting: Option<crate::config::MrktingConfig>,
 ) -> Result<impl warp::Reply, warp::Rejection>
@@ -211,21 +209,6 @@ where
             if let Some(conns_map) = &enabled_conns {
                 for (env, tags) in conns_map {
                     for tag in tags {
-                        if let Err(err) = create_connection_inner(
-                            env, *tag, Some(sub_id), None, &memory, wg_net, awg_net,
-                        )
-                        .await
-                        {
-                            tracing::error!(
-                                "Failed to create connection for sub {} env {:?} tag {:?}: {}",
-                                sub_id, env, tag, err
-                            );
-                        }
-                    }
-                }
-            } else {
-                for env in &enabled_envs {
-                    for tag in &enabled_tags {
                         if let Err(err) = create_connection_inner(
                             env, *tag, Some(sub_id), None, &memory, wg_net, awg_net,
                         )

@@ -44,21 +44,6 @@ fn default_wg_network() -> IpAddrMask {
     "10.0.0.0/8".parse().unwrap()
 }
 
-fn default_enabled_envs() -> Vec<Env> {
-    vec![Env::Dev, Env::Wl, Env::Ru]
-}
-
-fn default_enabled_tags() -> Vec<Tag> {
-    vec![
-        Tag::VlessXhttpReality,
-        Tag::VlessXhttpCdn,
-        Tag::VlessTcpReality,
-        Tag::VlessGrpcReality,
-        Tag::Hysteria2,
-        Tag::Mtproto,
-    ]
-}
-
 fn default_listen_address() -> Ipv4Addr {
     "127.0.0.1".parse().unwrap()
 }
@@ -80,10 +65,6 @@ pub struct ServiceConfig {
     pub wireguard_network: IpAddrMask,
     #[serde(default = "default_wg_network")]
     pub amnezia_wireguard_network: IpAddrMask,
-    #[serde(default = "default_enabled_envs")]
-    pub enabled_envs: Vec<Env>,
-    #[serde(default = "default_enabled_tags")]
-    pub enabled_tags: Vec<Tag>,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     #[serde(default = "default_log_level")]

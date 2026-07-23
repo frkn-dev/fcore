@@ -15,8 +15,6 @@ admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # mrkting = { endpoint = "https://api.frkn.org", token = "change-me" }
-# enabled_envs = ["dev", "wl", "ru"]
-# enabled_tags = ["VlessXhttpReality", "VlessTcpReality", "Hysteria2"]
 # enabled_conns = { dev = ["Hysteria2", "VlessTcpReality"], wl = ["VlessXhttpCdn"], ru = ["Wireguard", "Hysteria2"] }
 
 
