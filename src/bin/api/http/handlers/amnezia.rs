@@ -902,13 +902,14 @@ where
             continue;
         }
         let conn_tag = conn.get_proto().proto();
-        if !proto_matches(conn_tag, params.service_protocol) {
-            continue;
-        }
+        // An explicitly requested connection decides its own protocol — the
+        // merged "FRKN Premium" card carries connections of both protocols.
         if let Some(requested_id) = params.connection_id {
             if conn_id != requested_id {
                 continue;
             }
+        } else if !proto_matches(conn_tag, params.service_protocol) {
+            continue;
         }
 
         if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
@@ -951,8 +952,11 @@ where
         }
     };
 
-    let server_config_json = match params.service_protocol {
-        "awg" => {
+    // Build the config for the protocol of the chosen connection, not of the
+    // service card: an explicitly requested connection may be of either type.
+    let conn_tag = conn.get_proto().proto();
+    let server_config_json = match proto_matches(conn_tag, "awg") {
+        true => {
             let inbound = node.inbounds.get(&Tag::AmneziaWg).unwrap();
             let host = node.connection_host();
             let link = inbound
@@ -973,7 +977,7 @@ where
 
             build_awg_server_config(&link, &client_priv_key, &client_pub_key, &host, port)
         }
-        "vless" => {
+        false => {
             let inbound = node
                 .inbounds
                 .values()
@@ -988,12 +992,9 @@ where
             build_vless_server_config(inbound, &conn_id, &host)
                 .map_err(|_| http::internal_error("Failed to build VLESS config").into_response())?
         }
-        _ => {
-            return Err(http::bad_request("Unsupported service_protocol").into_response())
-        }
     };
 
-    let is_awg = params.service_protocol == "awg";
+    let is_awg = proto_matches(conn_tag, "awg");
     let config_bytes = if is_awg {
         gzip_json(&server_config_json)
             .map_err(|_| http::internal_error("Failed to gzip config").into_response())?
