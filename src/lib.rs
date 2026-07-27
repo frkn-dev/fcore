@@ -28,7 +28,7 @@ pub const BANNER: &str = r#"
 //                            |_|                |___/
 "#;
 
-pub const VERSION: &str = "0.5.30-dev";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use config::{
     amnezia_wg::{
