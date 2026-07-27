@@ -252,7 +252,12 @@ mod tests {
         let code = Code::new(10, b"TEST", SECRET);
         let mut code_str = code.to_string();
 
-        code_str.replace_range(code_str.len() - 1.., "X");
+        // Flip the FIRST character to a different valid base32 char.
+        // (The last char carries unused padding bits — tampering it may
+        // decode to the same bytes, which made this test flaky.)
+        let first = code_str.chars().next().unwrap();
+        let replacement = if first == 'A' { 'B' } else { 'A' };
+        code_str.replace_range(..1, &replacement.to_string());
 
         let parsed = Code::parse(&code_str, SECRET);
 
