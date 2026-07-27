@@ -456,7 +456,7 @@ where
     // 8. VPN config in the gateway format.
     let params = GatewayConfigParams {
         service_protocol: req.service_protocol.as_deref().unwrap_or("vless"),
-        service_type: req.service_type.as_deref().unwrap_or("amnezia-free"),
+        service_type: req.service_type.as_deref().unwrap_or("amnezia-premium"),
         user_country_code: req.user_country_code.as_deref().unwrap_or(""),
         server_country_code: None,
         connection_id: None,
@@ -482,7 +482,7 @@ mod tests {
             "language": "ru",
             "installation_uuid": "3f6b2a1c-9d4e-4c5b-8a7f-2e1d0c9b8a76",
             "user_country_code": "RU",
-            "service_type": "amnezia-free",
+            "service_type": "amnezia-premium",
             "service_protocol": "vless",
             "transaction_id": "2000000123456789",
             "product_id": "frkn_premium_1_month"

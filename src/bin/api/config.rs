@@ -111,6 +111,11 @@ pub struct ServiceConfig {
     pub mrkting: Option<MrktingConfig>,
     #[serde(default)]
     pub apple: Option<AppleConfig>,
+    /// Labels shown on service cards in the client (`/v1/services`).
+    #[serde(default)]
+    pub gateway_price_label: Option<String>,
+    #[serde(default)]
+    pub gateway_speed_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

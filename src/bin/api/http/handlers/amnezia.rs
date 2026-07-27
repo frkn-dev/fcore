@@ -29,9 +29,16 @@ pub struct GatewayServicesRequest {
 
 #[derive(Debug, Serialize)]
 pub struct GatewayServicesResponse {
-    #[serde(rename = "user_country_code")]
-    pub user_country_code: String,
+    #[serde(rename = "user_country_code", skip_serializing_if = "Option::is_none")]
+    pub user_country_code: Option<String>,
     pub services: Vec<GatewayService>,
+}
+
+/// Labels shown on the client's service cards (from service config).
+#[derive(Debug, Clone)]
+pub struct GatewayLabels {
+    pub price: String,
+    pub speed: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -668,6 +675,7 @@ fn build_vless_server_config(
 pub async fn gateway_services_handler<N, C, S>(
     req: GatewayServicesRequest,
     memory: MemSync<N, C, S>,
+    labels: GatewayLabels,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -699,8 +707,8 @@ where
 
     let vless_info = GatewayServiceInfo {
         name: "VLESS".to_string(),
-        price: "free".to_string(),
-        speed: "100".to_string(),
+        price: labels.price.clone(),
+        speed: labels.speed.clone(),
         timelimit: "0".to_string(),
         region: "World".to_string(),
     };
@@ -712,8 +720,8 @@ where
 
     let awg_info = GatewayServiceInfo {
         name: "AmneziaWG".to_string(),
-        price: "free".to_string(),
-        speed: "100".to_string(),
+        price: labels.price.clone(),
+        speed: labels.speed.clone(),
         timelimit: "0".to_string(),
         region: "World".to_string(),
     };
@@ -726,7 +734,7 @@ where
     let mut services = Vec::with_capacity(2);
 
     services.push(GatewayService {
-        service_type: "amnezia-free".to_string(),
+        service_type: "amnezia-premium".to_string(),
         service_protocol: "vless".to_string(),
         service_info: vless_info,
         service_description: vless_description,
@@ -738,7 +746,7 @@ where
     });
 
     services.push(GatewayService {
-        service_type: "amnezia-free".to_string(),
+        service_type: "amnezia-premium".to_string(),
         service_protocol: "awg".to_string(),
         service_info: awg_info,
         service_description: awg_description,
@@ -750,7 +758,8 @@ where
     });
 
     Ok(warp::reply::json(&GatewayServicesResponse {
-        user_country_code: "RU".to_string(),
+        // No geoip on the gateway yet — better to omit the field than lie.
+        user_country_code: None,
         services,
     })
     .into_response())
@@ -845,7 +854,7 @@ where
         active_device_count: active_devices,
         max_device_count: 5,
         subscription_end_date,
-        subscription_description: "FRKN Free subscription".to_string(),
+        subscription_description: "FRKN Premium subscription".to_string(),
         issued_configs,
         support_info: GatewaySupportInfo {
             email: "support@frkn.org".to_string(),

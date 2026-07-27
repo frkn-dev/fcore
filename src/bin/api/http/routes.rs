@@ -506,18 +506,32 @@ where
             .and_then(post_activate_key_handler);
 
         // Amnezia gateway routes
+        let gateway_labels = GatewayLabels {
+            price: params
+                .gateway_price_label
+                .clone()
+                .unwrap_or_else(|| "500 ₽ / month".to_string()),
+            speed: params
+                .gateway_speed_label
+                .clone()
+                .unwrap_or_else(|| "1 Gbit".to_string()),
+        };
+        let with_labels = warp::any().map(move || gateway_labels.clone());
+
         let post_amnezia_services_route = warp::post()
             .and(warp::path("v1"))
             .and(warp::path("services"))
             .and(warp::path::end())
             .and(crypto::with_agw_decryption::<GatewayServicesRequest>(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
+            .and(with_labels.clone())
             .and_then(
                 |req: GatewayServicesRequest,
                  ctx: Option<AesContext>,
-                 sync: MemSync<N, C, S>|
+                 sync: MemSync<N, C, S>,
+                 labels: GatewayLabels|
                  async move {
-                    let response = gateway_services_handler(req, sync).await?;
+                    let response = gateway_services_handler(req, sync, labels).await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
