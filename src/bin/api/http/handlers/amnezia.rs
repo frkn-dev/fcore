@@ -1016,8 +1016,12 @@ where
         }),
         api_config: serde_json::json!({
             "service_type": params.service_type,
-            "service_protocol": params.service_protocol,
-            "user_country_code": params.user_country_code,
+            // Report the protocol of the config we actually built — with the
+            // merged Premium card it can differ from the request.
+            "service_protocol": if is_awg { "awg" } else { "vless" },
+            // Keep the field a string (empty when unknown) — the client
+            // parses api_config strictly.
+            "user_country_code": params.user_country_code.unwrap_or(""),
             "server_country_code": params.server_country_code
         }),
     })
