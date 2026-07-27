@@ -17,6 +17,17 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # mrkting = { endpoint = "https://api.frkn.org", token = "change-me" }
 # enabled_conns = { dev = ["Hysteria2", "VlessTcpReality"], wl = ["VlessXhttpCdn"], ru = ["Wireguard", "Hysteria2"] }
 
+# App Store IAP (POST /v1/subscriptions). Without this section the endpoint answers 503.
+# [service.apple]
+# key_id = "ABCDEF1234"
+# issuer_id = "00000000-0000-0000-0000-000000000000"
+# private_key_path = "/etc/fcore/api/SubscriptionKey_ABCDEF1234.p8"
+# bundle_id = "org.frkn.app"
+# environment = "Sandbox" # or "Production" (Production requires app_apple_id)
+# app_apple_id = 1234567890
+# root_ca_path = "/etc/fcore/api/AppleRootCA-G3.cer"
+# allowed_products = ["frkn_premium_1_month", "frkn_premium_3_month", "frkn_premium_6_month", "frkn_premium_12_month"]
+
 
 
 [metrics]

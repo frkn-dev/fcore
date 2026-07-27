@@ -19,6 +19,35 @@ pub struct MrktingConfig {
     pub token: String,
 }
 
+fn default_apple_allowed_products() -> Vec<String> {
+    vec![
+        "frkn_premium_1_month".to_string(),
+        "frkn_premium_3_month".to_string(),
+        "frkn_premium_6_month".to_string(),
+        "frkn_premium_12_month".to_string(),
+    ]
+}
+
+/// App Store IAP (App Store Server API) configuration.
+/// Without this section the service starts normally, but `POST /v1/subscriptions` answers 503.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AppleConfig {
+    pub key_id: String,
+    pub issuer_id: String,
+    /// Path to the App Store Connect .p8 private key (PKCS#8 PEM).
+    pub private_key_path: String,
+    pub bundle_id: String,
+    /// "Sandbox" or "Production".
+    pub environment: String,
+    /// Required when environment = "Production".
+    pub app_apple_id: Option<i64>,
+    /// Path to the Apple Root CA certificate (DER), e.g. AppleRootCA-G3.cer.
+    pub root_ca_path: String,
+    /// Product IDs allowed for binding. An empty list disables the restriction.
+    #[serde(default = "default_apple_allowed_products")]
+    pub allowed_products: Vec<String>,
+}
+
 impl Settings for ServiceSettings {
     fn validate(&self) -> Result<()> {
         let key_path = self
@@ -80,6 +109,8 @@ pub struct ServiceConfig {
     pub agw_private_key_path: Option<String>,
     #[serde(default)]
     pub mrkting: Option<MrktingConfig>,
+    #[serde(default)]
+    pub apple: Option<AppleConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

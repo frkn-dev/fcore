@@ -2,6 +2,7 @@ pub mod admin;
 pub mod amnezia;
 pub mod cluster;
 pub mod connection;
+pub mod iap;
 pub mod key;
 pub mod metrics;
 pub mod node;

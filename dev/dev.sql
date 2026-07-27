@@ -206,3 +206,16 @@ ALTER TABLE subscriptions
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS referred_by;
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS referral_bonus_awarded;
 
+
+-- App Store IAP binding: original_transaction_id -> subscription.
+-- Created automatically at api startup when [service.apple] is configured;
+-- kept here for schema reference.
+CREATE TABLE IF NOT EXISTS iap_transactions (
+    original_transaction_id TEXT PRIMARY KEY,
+    subscription_id UUID NOT NULL,
+    product_id TEXT,
+    environment TEXT,
+    installation_uuid UUID,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);

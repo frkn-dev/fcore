@@ -52,6 +52,11 @@ where
     pub async fn bootstrap(settings: ServiceSettings) -> Result<Arc<Service<N, C, S>>> {
         let db = PgContext::init(&settings.pg).await?;
 
+        // The IAP binding table is created lazily at startup when Apple IAP is configured.
+        if settings.service.apple.is_some() {
+            db.iap().ensure_table().await?;
+        }
+
         let mem = Arc::new(RwLock::new(Cache::new()));
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;
         let mem_sync = MemSync::new(

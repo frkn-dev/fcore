@@ -12,6 +12,7 @@ use crate::{
 mod bootstrap;
 mod config;
 mod http;
+mod iap;
 mod metrics;
 mod postgres;
 mod runtime;

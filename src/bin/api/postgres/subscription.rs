@@ -34,6 +34,20 @@ impl PgSubscription {
         Ok(subscriptions)
     }
 
+    pub async fn find(&self, id: &uuid::Uuid) -> Result<Option<Subscription>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let row = client
+            .query_opt(
+                "SELECT * FROM subscriptions WHERE id = $1 AND NOT is_deleted",
+                &[id],
+            )
+            .await?;
+
+        Ok(row.map(Subscription::from))
+    }
+
     pub async fn create(&self, new_sub: &Subscription) -> Result<Subscription> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;

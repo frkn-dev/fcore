@@ -14,6 +14,7 @@ use fcore::{
 use super::{
     super::{config::PostgresConfig, service::Cache},
     connection::{ConnRow, PgConn},
+    iap::PgIap,
     keys::PgKey,
     node::PgNode,
     subscription::PgSubscription,
@@ -103,6 +104,10 @@ impl PgContext {
 
     pub fn key(&self) -> PgKey {
         PgKey::new(self.manager.clone())
+    }
+
+    pub fn iap(&self) -> PgIap {
+        PgIap::new(self.manager.clone())
     }
 }
 

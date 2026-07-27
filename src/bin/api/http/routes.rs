@@ -11,11 +11,11 @@ use fcore::{
 
 use super::{
     crypto::{self, AesContext},
-    super::{service::Service, sync::MemSync},
+    super::{iap::AppleIapClient, service::Service, sync::MemSync},
     filters::*,
     handlers::{
-        admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, key::*, metrics::*,
-        node::*, premium::*, subscription::*,
+        admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, iap::*, key::*,
+        metrics::*, node::*, premium::*, subscription::*,
     },
     param::*,
     rejection,
@@ -554,6 +554,67 @@ where
                 },
             );
 
+        // App Store IAP: the client is optional — without [service.apple] the
+        // route stays mounted and answers 503.
+        let apple_iap = params.apple.as_ref().and_then(|cfg| {
+            match AppleIapClient::new(cfg) {
+                Ok(client) => {
+                    tracing::info!(
+                        "Apple IAP client initialized ({} environment)",
+                        cfg.environment
+                    );
+                    Some(Arc::new(client))
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "Apple IAP client init failed: {err}. /v1/subscriptions will answer 503"
+                    );
+                    None
+                }
+            }
+        });
+
+        let iap_wg_network = params.wireguard_network.clone();
+        let iap_awg_network = params.amnezia_wireguard_network.clone();
+        let iap_enabled_conns = params.enabled_conns.clone();
+        let iap_mrkting = params.mrkting.clone();
+
+        let post_amnezia_subscriptions_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("subscriptions"))
+            .and(warp::path::end())
+            .and(crypto::with_agw_decryption::<GatewaySubscriptionsRequest>(
+                agw_key.clone(),
+            ))
+            .and(with_sync(self.sync.clone()))
+            .and(warp::any().map(move || apple_iap.clone()))
+            .and(warp::any().map(move || iap_wg_network.clone()))
+            .and(warp::any().map(move || iap_awg_network.clone()))
+            .and(warp::any().map(move || iap_enabled_conns.clone()))
+            .and(warp::any().map(move || iap_mrkting.clone()))
+            .and_then(
+                |req: GatewaySubscriptionsRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 iap: Option<Arc<AppleIapClient>>,
+                 wg_network: fcore::IpAddrMask,
+                 awg_network: fcore::IpAddrMask,
+                 enabled_conns: Option<std::collections::HashMap<fcore::Env, Vec<fcore::Tag>>>,
+                 mrkting: Option<crate::config::MrktingConfig>| async move {
+                    let response = gateway_subscriptions_handler(
+                        req,
+                        sync,
+                        iap,
+                        wg_network,
+                        awg_network,
+                        enabled_conns,
+                        mrkting,
+                    )
+                    .await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
+
         //Metrics
 
         let ws_route = warp::path("ws")
@@ -599,6 +660,7 @@ where
             .or(post_amnezia_services_route)
             .or(post_amnezia_account_route)
             .or(post_amnezia_config_route)
+            .or(post_amnezia_subscriptions_route)
             // Admin
             .or(admin_routes)
             // Premium

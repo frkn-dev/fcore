@@ -867,10 +867,26 @@ fn gzip_json(value: &serde_json::Value) -> Result<Vec<u8>, fcore::Error> {
         .map_err(|e| fcore::Error::Custom(format!("gzip finish failed: {}", e)))
 }
 
-pub async fn gateway_config_handler<N, C, S>(
-    req: GatewayConfigRequest,
-    memory: MemSync<N, C, S>,
-) -> Result<warp::reply::Response, warp::Rejection>
+/// Parameters for building a gateway VPN config, shared by
+/// `gateway_config_handler` and `gateway_subscriptions_handler`.
+pub struct GatewayConfigParams<'a> {
+    pub service_protocol: &'a str,
+    pub service_type: &'a str,
+    pub user_country_code: &'a str,
+    pub server_country_code: Option<&'a str>,
+    pub connection_id: Option<uuid::Uuid>,
+    pub public_key: Option<&'a str>,
+}
+
+/// Builds the gateway config for an active subscription: picks a matching
+/// (connection, online node) pair and renders the Amnezia server config.
+///
+/// Returns `Err(response)` with a ready error response (4xx) on failure.
+pub async fn build_gateway_config_response<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    sub_id: &uuid::Uuid,
+    params: &GatewayConfigParams<'_>,
+) -> Result<GatewayConfigResponse, warp::reply::Response>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -884,37 +900,25 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
-    let sub_id = match extract_subscription_id(&req.auth_data) {
-        Some(id) => id,
-        None => {
-            return Ok(warp::reply::with_status(
-                "Missing subscription id in auth_data",
-                warp::http::StatusCode::BAD_REQUEST,
-            )
-            .into_response())
-        }
-    };
-
     let mem = memory.memory.read().await;
 
-    let sub = match mem.subscriptions.find_by_id(&sub_id) {
+    let sub = match mem.subscriptions.find_by_id(sub_id) {
         Some(s) => s,
-        None => return Ok(http::not_found("Subscription not found").into_response()),
+        None => return Err(http::not_found("Subscription not found").into_response()),
     };
 
     if !sub.is_active() {
-        return Ok(http::not_found("Subscription expired").into_response());
+        return Err(http::not_found("Subscription expired").into_response());
     }
 
-    let conns = match mem.connections.get_by_subscription_id(&sub_id) {
+    let conns = match mem.connections.get_by_subscription_id(sub_id) {
         Some(c) => c,
-        None => return Ok(http::not_found("No connections").into_response()),
+        None => return Err(http::not_found("No connections").into_response()),
     };
 
-    let target_country = req
+    let target_country = params
         .server_country_code
-        .as_deref()
-        .unwrap_or(&req.user_country_code);
+        .unwrap_or(params.user_country_code);
 
     let mut found_conn = None;
     let mut found_node = None;
@@ -925,10 +929,10 @@ where
             continue;
         }
         let conn_tag = conn.get_proto().proto();
-        if !proto_matches(conn_tag, &req.service_protocol) {
+        if !proto_matches(conn_tag, params.service_protocol) {
             continue;
         }
-        if let Some(requested_id) = req.connection_id {
+        if let Some(requested_id) = params.connection_id {
             if conn_id != requested_id {
                 continue;
             }
@@ -967,24 +971,30 @@ where
     let (conn, node, conn_id) = match (found_conn, found_node, found_conn_id) {
         (Some(c), Some(n), Some(id)) => (c, n, id),
         _ => {
-            return Ok(http::not_found(
+            return Err(http::not_found(
                 "No suitable connection/node found",
             )
             .into_response())
         }
     };
 
-    let server_config_json = match req.service_protocol.as_str() {
+    let server_config_json = match params.service_protocol {
         "awg" => {
             let inbound = node.inbounds.get(&Tag::AmneziaWg).unwrap();
             let host = node.connection_host();
             let link = inbound
                 .create_link(&conn_id, &conn, &node.hostname, &host, &node.label)
-                .map_err(|_| warp::reject::not_found())?;
+                .map_err(|_| {
+                    http::internal_error("Failed to build AWG link").into_response()
+                })?;
 
-            let awg_param = conn.get_amneziawg().ok_or_else(|| warp::reject::not_found())?;
+            let awg_param = conn.get_amneziawg().ok_or_else(|| {
+                http::internal_error("Connection has no AmneziaWG params").into_response()
+            })?;
             let client_priv_key = awg_param.keys.privkey.clone();
-            let client_pub_key = awg_param.keys.pubkey().map_err(|_| warp::reject::not_found())?;
+            let client_pub_key = awg_param.keys.pubkey().map_err(|_| {
+                http::internal_error("Failed to derive AmneziaWG public key").into_response()
+            })?;
 
             let port = inbound.port;
 
@@ -995,20 +1005,25 @@ where
                 .inbounds
                 .values()
                 .find(|i| proto_matches(i.tag, "vless"))
-                .ok_or_else(|| warp::reject::not_found())?;
+                .ok_or_else(|| {
+                    http::internal_error("Node has no VLESS inbound").into_response()
+                })?;
 
-            let xray_uuid = req.public_key.as_deref().unwrap_or("");
+            let xray_uuid = params.public_key.unwrap_or("");
             let conn_id = uuid::Uuid::parse_str(xray_uuid).unwrap_or(conn_id);
             let host = node.connection_host();
             build_vless_server_config(inbound, &conn_id, &host)
-                .map_err(|_| warp::reject::not_found())?
+                .map_err(|_| http::internal_error("Failed to build VLESS config").into_response())?
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(http::bad_request("Unsupported service_protocol").into_response())
+        }
     };
 
-    let is_awg = req.service_protocol == "awg";
+    let is_awg = params.service_protocol == "awg";
     let config_bytes = if is_awg {
-        gzip_json(&server_config_json).map_err(|_| warp::reject::not_found())?
+        gzip_json(&server_config_json)
+            .map_err(|_| http::internal_error("Failed to gzip config").into_response())?
     } else {
         server_config_json.to_string().into_bytes()
     };
@@ -1018,18 +1033,61 @@ where
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&config_bytes)
     };
 
-    Ok(warp::reply::json(&GatewayConfigResponse {
+    Ok(GatewayConfigResponse {
         config: config_b64,
         supported_protocols: vec!["vless".to_string(), "awg".to_string()],
         service_info: serde_json::json!({
             "name": node.label,
-            "type": req.service_type
+            "type": params.service_type
         }),
         api_config: serde_json::json!({
-            "service_type": req.service_type,
-            "service_protocol": req.service_protocol,
-            "user_country_code": req.user_country_code,
-            "server_country_code": req.server_country_code
+            "service_type": params.service_type,
+            "service_protocol": params.service_protocol,
+            "user_country_code": params.user_country_code,
+            "server_country_code": params.server_country_code
         }),
-    }).into_response())
+    })
+}
+
+pub async fn gateway_config_handler<N, C, S>(
+    req: GatewayConfigRequest,
+    memory: MemSync<N, C, S>,
+) -> Result<warp::reply::Response, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    Connection: From<C>,
+{
+    let sub_id = match extract_subscription_id(&req.auth_data) {
+        Some(id) => id,
+        None => {
+            return Ok(warp::reply::with_status(
+                "Missing subscription id in auth_data",
+                warp::http::StatusCode::BAD_REQUEST,
+            )
+            .into_response())
+        }
+    };
+
+    let params = GatewayConfigParams {
+        service_protocol: &req.service_protocol,
+        service_type: &req.service_type,
+        user_country_code: &req.user_country_code,
+        server_country_code: req.server_country_code.as_deref(),
+        connection_id: req.connection_id,
+        public_key: req.public_key.as_deref(),
+    };
+
+    match build_gateway_config_response(&memory, &sub_id, &params).await {
+        Ok(response) => Ok(warp::reply::json(&response).into_response()),
+        Err(response) => Ok(response),
+    }
 }
