@@ -113,7 +113,7 @@ pub struct GatewaySubscriptionMeta {
 #[allow(dead_code)]
 pub struct GatewayAccountInfoRequest {
     #[serde(rename = "user_country_code")]
-    pub user_country_code: String,
+    pub user_country_code: Option<String>,
     #[serde(rename = "service_type")]
     pub service_type: String,
     #[serde(rename = "auth_data")]
@@ -183,7 +183,7 @@ pub struct GatewayConfigRequest {
     #[serde(rename = "installation_uuid")]
     pub installation_uuid: String,
     #[serde(rename = "user_country_code")]
-    pub user_country_code: String,
+    pub user_country_code: Option<String>,
     #[serde(rename = "server_country_code")]
     pub server_country_code: Option<String>,
     #[serde(rename = "service_type")]
@@ -843,7 +843,7 @@ fn gzip_json(value: &serde_json::Value) -> Result<Vec<u8>, fcore::Error> {
 pub struct GatewayConfigParams<'a> {
     pub service_protocol: &'a str,
     pub service_type: &'a str,
-    pub user_country_code: &'a str,
+    pub user_country_code: Option<&'a str>,
     pub server_country_code: Option<&'a str>,
     pub connection_id: Option<uuid::Uuid>,
     pub public_key: Option<&'a str>,
@@ -887,9 +887,11 @@ where
         None => return Err(http::not_found("No connections").into_response()),
     };
 
+    // No geoip on the gateway yet: an absent country simply disables the filter.
     let target_country = params
         .server_country_code
-        .unwrap_or(params.user_country_code);
+        .or(params.user_country_code)
+        .unwrap_or("");
 
     let mut found_conn = None;
     let mut found_node = None;
@@ -1051,7 +1053,7 @@ where
     let params = GatewayConfigParams {
         service_protocol: &req.service_protocol,
         service_type: &req.service_type,
-        user_country_code: &req.user_country_code,
+        user_country_code: req.user_country_code.as_deref(),
         server_country_code: req.server_country_code.as_deref(),
         connection_id: req.connection_id,
         public_key: req.public_key.as_deref(),

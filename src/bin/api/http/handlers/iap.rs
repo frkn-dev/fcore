@@ -457,7 +457,7 @@ where
     let params = GatewayConfigParams {
         service_protocol: req.service_protocol.as_deref().unwrap_or("vless"),
         service_type: req.service_type.as_deref().unwrap_or("amnezia-premium"),
-        user_country_code: req.user_country_code.as_deref().unwrap_or(""),
+        user_country_code: req.user_country_code.as_deref(),
         server_country_code: None,
         connection_id: None,
         public_key: None,
