@@ -300,20 +300,12 @@ where
         }
     }
     if result.is_empty() {
-        result = vec![
-            GatewayConnection {
-                connection_uuid: uuid::Uuid::nil(),
-                country_code: "NL".to_string(),
-                country_name: "Netherlands".to_string(),
-                connection_label: format!("Netherlands · {}", inbound_label(Tag::VlessTcpReality)),
-            },
-            GatewayConnection {
-                connection_uuid: uuid::Uuid::nil(),
-                country_code: "DE".to_string(),
-                country_name: "Germany".to_string(),
-                connection_label: format!("Germany · {}", inbound_label(Tag::VlessTcpReality)),
-            },
-        ];
+        result = vec![GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            country_code: String::new(),
+            country_name: "All countries".to_string(),
+            connection_label: "All countries".to_string(),
+        }];
     }
     result
 }
@@ -702,60 +694,36 @@ where
 
     let vless_connections = connections_for_protocol(&mem.nodes, "vless", conns_slice);
     let awg_connections = connections_for_protocol(&mem.nodes, "awg", conns_slice);
-    let vless_countries = available_countries_from_connections(&vless_connections);
-    let awg_countries = available_countries_from_connections(&awg_connections);
 
-    let vless_info = GatewayServiceInfo {
-        name: "VLESS".to_string(),
+    // One merged service: the client must not offer a protocol choice at purchase.
+    let mut connections = vless_connections;
+    connections.extend(awg_connections);
+    let countries = available_countries_from_connections(&connections);
+
+    let info = GatewayServiceInfo {
+        name: "FRKN Premium".to_string(),
         price: labels.price.clone(),
         speed: labels.speed.clone(),
         timelimit: "0".to_string(),
         region: "World".to_string(),
     };
-    let vless_description = GatewayServiceDescription {
+    let description = GatewayServiceDescription {
         description: "Privacy is our Religion".to_string(),
-        card_description: "VLESS (Xray) — обход блокировок".to_string(),
-        features: "No logs, unlimited traffic, Xray VLESS protocol".to_string(),
+        card_description: "FRKN Premium — обход блокировок".to_string(),
+        features: "No logs, unlimited traffic, VLESS and AmneziaWG protocols".to_string(),
     };
 
-    let awg_info = GatewayServiceInfo {
-        name: "AmneziaWG".to_string(),
-        price: labels.price.clone(),
-        speed: labels.speed.clone(),
-        timelimit: "0".to_string(),
-        region: "World".to_string(),
-    };
-    let awg_description = GatewayServiceDescription {
-        description: "Privacy is our Religion".to_string(),
-        card_description: "AmneziaWG — маскировка под WireGuard".to_string(),
-        features: "No logs, unlimited traffic, AmneziaWG protocol".to_string(),
-    };
-
-    let mut services = Vec::with_capacity(2);
-
-    services.push(GatewayService {
+    let services = vec![GatewayService {
         service_type: "amnezia-premium".to_string(),
         service_protocol: "vless".to_string(),
-        service_info: vless_info,
-        service_description: vless_description,
-        available_countries: vless_countries,
-        connections: vless_connections,
-        store_endpoint: "https://frkn.org".to_string(),
-        is_available: true,
-        subscription: GatewaySubscriptionMeta { end_date: end_date.clone() },
-    });
-
-    services.push(GatewayService {
-        service_type: "amnezia-premium".to_string(),
-        service_protocol: "awg".to_string(),
-        service_info: awg_info,
-        service_description: awg_description,
-        available_countries: awg_countries,
-        connections: awg_connections,
+        service_info: info,
+        service_description: description,
+        available_countries: countries,
+        connections,
         store_endpoint: "https://frkn.org".to_string(),
         is_available: true,
         subscription: GatewaySubscriptionMeta { end_date },
-    });
+    }];
 
     Ok(warp::reply::json(&GatewayServicesResponse {
         // No geoip on the gateway yet — better to omit the field than lie.
@@ -839,16 +807,10 @@ where
         supported_protocols: vec!["vless".to_string(), "awg".to_string()],
         available_countries: vec![
             GatewayCountry {
-                country_code: "NL".to_string(),
-                country_name: "Netherlands".to_string(),
+                country_code: String::new(),
+                country_name: "All countries".to_string(),
                 connection_uuid: None,
-                connection_label: "Netherlands".to_string(),
-            },
-            GatewayCountry {
-                country_code: "DE".to_string(),
-                country_name: "Germany".to_string(),
-                connection_uuid: None,
-                connection_label: "Germany".to_string(),
+                connection_label: "All countries".to_string(),
             },
         ],
         active_device_count: active_devices,

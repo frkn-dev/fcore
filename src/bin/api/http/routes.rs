@@ -510,11 +510,11 @@ where
             price: params
                 .gateway_price_label
                 .clone()
-                .unwrap_or_else(|| "500 ₽ / month".to_string()),
+                .unwrap_or_else(|| "500".to_string()),
             speed: params
                 .gateway_speed_label
                 .clone()
-                .unwrap_or_else(|| "1 Gbit".to_string()),
+                .unwrap_or_else(|| "1000".to_string()),
         };
         let with_labels = warp::any().map(move || gateway_labels.clone());
 

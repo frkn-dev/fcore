@@ -16,9 +16,10 @@ admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # mrkting = { endpoint = "https://api.frkn.org", token = "change-me" }
 # enabled_conns = { dev = ["Hysteria2", "VlessTcpReality"], wl = ["VlessXhttpCdn"], ru = ["Wireguard", "Hysteria2"] }
-# Labels on the client's service cards (/v1/services). Defaults shown.
-# gateway_price_label = "500 ₽ / month"
-# gateway_speed_label = "1 Gbit"
+# Labels on the client's service cards (/v1/services). Bare numbers only —
+# the client formats them itself. Defaults shown.
+# gateway_price_label = "500"
+# gateway_speed_label = "1000"
 
 # App Store IAP (POST /v1/subscriptions). Without this section the endpoint answers 503.
 # [service.apple]
