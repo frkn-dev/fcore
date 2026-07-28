@@ -978,12 +978,19 @@ where
             build_awg_server_config(&link, &client_priv_key, &client_pub_key, &host, port)
         }
         false => {
+            // Match the inbound by the connection's exact tag (like the
+            // subscription link handler does) — a node can host several
+            // vless inbounds on different ports/transports.
             let inbound = node
                 .inbounds
-                .values()
-                .find(|i| proto_matches(i.tag, "vless"))
+                .get(&conn_tag)
+                .or_else(|| {
+                    node.inbounds
+                        .values()
+                        .find(|i| proto_matches(i.tag, "vless"))
+                })
                 .ok_or_else(|| {
-                    http::internal_error("Node has no VLESS inbound").into_response()
+                    http::internal_error("Node has no matching VLESS inbound").into_response()
                 })?;
 
             let xray_uuid = params.public_key.unwrap_or("");
