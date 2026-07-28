@@ -979,16 +979,11 @@ where
         }
         false => {
             // Match the inbound by the connection's exact tag (like the
-            // subscription link handler does) — a node can host several
-            // vless inbounds on different ports/transports.
+            // subscription link handler does). No fallback: serving a config
+            // from a different inbound means a broken host.
             let inbound = node
                 .inbounds
                 .get(&conn_tag)
-                .or_else(|| {
-                    node.inbounds
-                        .values()
-                        .find(|i| proto_matches(i.tag, "vless"))
-                })
                 .ok_or_else(|| {
                     http::internal_error("Node has no matching VLESS inbound").into_response()
                 })?;
