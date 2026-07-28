@@ -101,6 +101,8 @@ pub struct GatewayConnection {
     pub country_name: String,
     #[serde(rename = "service_protocol")]
     pub service_protocol: String,
+    #[serde(rename = "env")]
+    pub env: String,
     #[serde(rename = "connection_label")]
     pub connection_label: String,
 }
@@ -307,6 +309,7 @@ where
                     country_code: code.clone(),
                     country_name: code.clone(),
                     service_protocol: proto_label(tag).to_string(),
+                    env: conn.get_env().to_string(),
                     connection_label: label,
                 });
             }
@@ -318,6 +321,7 @@ where
             country_code: String::new(),
             country_name: "All countries".to_string(),
             service_protocol: String::new(),
+            env: String::new(),
             connection_label: "All countries".to_string(),
         }];
     }
