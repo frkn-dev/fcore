@@ -225,6 +225,7 @@ fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> 
 fn proto_matches(tag: Tag, protocol: &str) -> bool {
     match protocol {
         "awg" => tag == Tag::AmneziaWg,
+        "hysteria2" => tag == Tag::Hysteria2,
         "vless" => matches!(
             tag,
             Tag::VlessTcpReality
@@ -233,6 +234,15 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
                 | Tag::VlessXhttpCdn
         ),
         _ => false,
+    }
+}
+
+/// Protocol label reported back to the client (api_config.service_protocol).
+fn proto_label(tag: Tag) -> &'static str {
+    match tag {
+        Tag::AmneziaWg => "awg",
+        Tag::Hysteria2 => "hysteria2",
+        _ => "vless",
     }
 }
 
@@ -408,6 +418,84 @@ fn build_awg_server_config(
             }
         ]
     })
+}
+
+/// Builds the Amnezia server config for Hysteria2 (xray outbound, same
+/// container shape and delivery as VLESS).
+fn build_h2_server_config(
+    inbound: &fcore::Inbound,
+    host: &str,
+    token: &uuid::Uuid,
+) -> Result<serde_json::Value, fcore::Error> {
+    let h2 = inbound
+        .h2
+        .as_ref()
+        .ok_or(fcore::Error::Custom("Hysteria2 settings missing".into()))?;
+
+    let server_name = h2.sni.clone().unwrap_or_else(|| h2.host.clone());
+
+    let mut settings = serde_json::json!({
+        "servers": [{
+            "address": host,
+            "port": inbound.port,
+            "password": token.to_string(),
+            "serverName": server_name,
+        }],
+    });
+    if let Some(obfs) = &h2.obfs {
+        settings["obfs"] = serde_json::json!({
+            "type": obfs.r#type,
+            "password": obfs.password,
+        });
+    }
+    if let Some(up) = h2.up_mbps {
+        settings["up_mbps"] = serde_json::json!(up);
+    }
+    if let Some(down) = h2.down_mbps {
+        settings["down_mbps"] = serde_json::json!(down);
+    }
+
+    let alpn = h2
+        .alpn
+        .clone()
+        .unwrap_or_else(|| vec!["h3".to_string()]);
+
+    let outbound = serde_json::json!({
+        "outbounds": [{
+            "protocol": "hysteria2",
+            "settings": settings,
+            "streamSettings": {
+                "network": "udp",
+                "security": "tls",
+                "tlsSettings": {
+                    "serverName": server_name,
+                    "fingerprint": "chrome",
+                    "alpn": alpn,
+                    "allowInsecure": h2.insecure,
+                },
+            },
+        }],
+    });
+
+    Ok(serde_json::json!({
+        "containers": [
+            {
+                "container": "amnezia-xray",
+                "xray": {
+                    "config": outbound.to_string(),
+                    "last_config": outbound.to_string(),
+                    "isThirdPartyConfig": true
+                }
+            }
+        ],
+        "defaultContainer": "amnezia-xray",
+        "dns1": "1.1.1.1",
+        "dns2": "1.0.0.1",
+        "hostName": host,
+        "description": "FRKN Hysteria2",
+        "name": "FRKN",
+        "config_version": 2
+    }))
 }
 
 /// Builds the Amnezia server config for VLESS/XRay from the real inbound.
@@ -698,6 +786,7 @@ where
     // One merged service: the client must not offer a protocol choice at purchase.
     let mut connections = vless_connections;
     connections.extend(awg_connections);
+    connections.extend(connections_for_protocol(&mem.nodes, "hysteria2", conns_slice));
     let countries = available_countries_from_connections(&connections);
 
     let info = GatewayServiceInfo {
@@ -954,46 +1043,56 @@ where
     // Build the config for the protocol of the chosen connection, not of the
     // service card: an explicitly requested connection may be of either type.
     let conn_tag = conn.get_proto().proto();
-    let server_config_json = match proto_matches(conn_tag, "awg") {
-        true => {
-            let inbound = node.inbounds.get(&Tag::AmneziaWg).unwrap();
-            let host = node.connection_host();
-            let link = inbound
-                .create_link(&conn_id, &conn, &node.hostname, &host, &node.label)
-                .map_err(|_| {
-                    http::internal_error("Failed to build AWG link").into_response()
-                })?;
-
-            let awg_param = conn.get_amneziawg().ok_or_else(|| {
-                http::internal_error("Connection has no AmneziaWG params").into_response()
+    let server_config_json = if conn_tag == Tag::Hysteria2 {
+        let inbound = node
+            .inbounds
+            .get(&conn_tag)
+            .ok_or_else(|| {
+                http::internal_error("Node has no matching Hysteria2 inbound").into_response()
             })?;
-            let client_priv_key = awg_param.keys.privkey.clone();
-            let client_pub_key = awg_param.keys.pubkey().map_err(|_| {
-                http::internal_error("Failed to derive AmneziaWG public key").into_response()
+        let token = conn.get_token().ok_or_else(|| {
+            http::internal_error("Connection has no Hysteria2 token").into_response()
+        })?;
+        let host = node.connection_host();
+        build_h2_server_config(inbound, &host, &token)
+            .map_err(|e| http::internal_error(&format!("Failed to build Hysteria2 config: {e}")).into_response())?
+    } else if proto_matches(conn_tag, "awg") {
+        let inbound = node.inbounds.get(&Tag::AmneziaWg).unwrap();
+        let host = node.connection_host();
+        let link = inbound
+            .create_link(&conn_id, &conn, &node.hostname, &host, &node.label)
+            .map_err(|_| {
+                http::internal_error("Failed to build AWG link").into_response()
             })?;
 
-            let port = inbound.port;
+        let awg_param = conn.get_amneziawg().ok_or_else(|| {
+            http::internal_error("Connection has no AmneziaWG params").into_response()
+        })?;
+        let client_priv_key = awg_param.keys.privkey.clone();
+        let client_pub_key = awg_param.keys.pubkey().map_err(|_| {
+            http::internal_error("Failed to derive AmneziaWG public key").into_response()
+        })?;
 
-            build_awg_server_config(&link, &client_priv_key, &client_pub_key, &host, port)
-        }
-        false => {
-            // Match the inbound by the connection's exact tag (like the
-            // subscription link handler does). No fallback: serving a config
-            // from a different inbound means a broken host.
-            let inbound = node
-                .inbounds
-                .get(&conn_tag)
-                .ok_or_else(|| {
-                    http::internal_error("Node has no matching VLESS inbound").into_response()
-                })?;
+        let port = inbound.port;
 
-            // The user id is always the connection's uuid (as in the
-            // subscription link handler) — never the client's public_key,
-            // which may be a fresh random uuid per request.
-            let host = node.connection_host();
-            build_vless_server_config(inbound, &conn_id, &host)
-                .map_err(|_| http::internal_error("Failed to build VLESS config").into_response())?
-        }
+        build_awg_server_config(&link, &client_priv_key, &client_pub_key, &host, port)
+    } else {
+        // Match the inbound by the connection's exact tag (like the
+        // subscription link handler does). No fallback: serving a config
+        // from a different inbound means a broken host.
+        let inbound = node
+            .inbounds
+            .get(&conn_tag)
+            .ok_or_else(|| {
+                http::internal_error("Node has no matching VLESS inbound").into_response()
+            })?;
+
+        // The user id is always the connection's uuid (as in the
+        // subscription link handler) — never the client's public_key,
+        // which may be a fresh random uuid per request.
+        let host = node.connection_host();
+        build_vless_server_config(inbound, &conn_id, &host)
+            .map_err(|_| http::internal_error("Failed to build VLESS config").into_response())?
     };
 
     let is_awg = proto_matches(conn_tag, "awg");
@@ -1001,6 +1100,7 @@ where
         gzip_json(&server_config_json)
             .map_err(|_| http::internal_error("Failed to gzip config").into_response())?
     } else {
+        // vless and hysteria2: plain JSON, base64url (no padding)
         server_config_json.to_string().into_bytes()
     };
     let config_b64 = if is_awg {
@@ -1011,7 +1111,7 @@ where
 
     Ok(GatewayConfigResponse {
         config: config_b64,
-        supported_protocols: vec!["vless".to_string(), "awg".to_string()],
+        supported_protocols: vec!["vless".to_string(), "awg".to_string(), "hysteria2".to_string()],
         service_info: serde_json::json!({
             "name": node.label,
             "type": params.service_type
@@ -1020,7 +1120,7 @@ where
             "service_type": params.service_type,
             // Report the protocol of the config we actually built — with the
             // merged Premium card it can differ from the request.
-            "service_protocol": if is_awg { "awg" } else { "vless" },
+            "service_protocol": proto_label(conn_tag),
             // Keep the field a string (empty when unknown) — the client
             // parses api_config strictly.
             "user_country_code": params.user_country_code.unwrap_or(""),
@@ -1068,5 +1168,59 @@ where
     match build_gateway_config_response(&memory, &sub_id, &params).await {
         Ok(response) => Ok(warp::reply::json(&response).into_response()),
         Err(response) => Ok(response),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fcore::H2Settings;
+    use fcore::Tag;
+
+    fn h2_inbound() -> fcore::Inbound {
+        fcore::Inbound {
+            tag: Tag::Hysteria2,
+            port: 443,
+            stream_settings: None,
+            wg: None,
+            awg: None,
+            mtproto_secret: None,
+            h2: Some(H2Settings {
+                host: "hy2.example.com".to_string(),
+                port: 443,
+                sni: None,
+                insecure: false,
+                obfs: None,
+                alpn: None,
+                up_mbps: None,
+                down_mbps: None,
+                auth_info: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn h2_config_shape() {
+        let token = uuid::Uuid::new_v4();
+        let cfg = build_h2_server_config(&h2_inbound(), "203.0.113.7", &token).unwrap();
+
+        assert_eq!(cfg["defaultContainer"], "amnezia-xray");
+        assert_eq!(cfg["containers"][0]["container"], "amnezia-xray");
+        assert_eq!(cfg["containers"][0]["xray"]["isThirdPartyConfig"], true);
+
+        let inner = cfg["containers"][0]["xray"]["config"].as_str().unwrap();
+        let outbound: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let ob = &outbound["outbounds"][0];
+        assert_eq!(ob["protocol"], "hysteria2");
+        let server = &ob["settings"]["servers"][0];
+        assert_eq!(server["address"], "203.0.113.7");
+        assert_eq!(server["port"], 443);
+        assert_eq!(server["password"], token.to_string());
+        // SNI falls back to the inbound host when not set
+        assert_eq!(server["serverName"], "hy2.example.com");
+        let tls = &ob["streamSettings"]["tlsSettings"];
+        assert_eq!(tls["alpn"], serde_json::json!(["h3"]));
+        assert_eq!(tls["allowInsecure"], false);
+        assert_eq!(ob["streamSettings"]["network"], "udp");
     }
 }
