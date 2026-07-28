@@ -846,7 +846,6 @@ pub struct GatewayConfigParams<'a> {
     pub user_country_code: Option<&'a str>,
     pub server_country_code: Option<&'a str>,
     pub connection_id: Option<uuid::Uuid>,
-    pub public_key: Option<&'a str>,
 }
 
 /// Builds the gateway config for an active subscription: picks a matching
@@ -988,8 +987,9 @@ where
                     http::internal_error("Node has no matching VLESS inbound").into_response()
                 })?;
 
-            let xray_uuid = params.public_key.unwrap_or("");
-            let conn_id = uuid::Uuid::parse_str(xray_uuid).unwrap_or(conn_id);
+            // The user id is always the connection's uuid (as in the
+            // subscription link handler) — never the client's public_key,
+            // which may be a fresh random uuid per request.
             let host = node.connection_host();
             build_vless_server_config(inbound, &conn_id, &host)
                 .map_err(|_| http::internal_error("Failed to build VLESS config").into_response())?
@@ -1063,7 +1063,6 @@ where
         user_country_code: req.user_country_code.as_deref(),
         server_country_code: req.server_country_code.as_deref(),
         connection_id: req.connection_id,
-        public_key: req.public_key.as_deref(),
     };
 
     match build_gateway_config_response(&memory, &sub_id, &params).await {
