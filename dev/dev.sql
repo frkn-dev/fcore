@@ -224,4 +224,3 @@ CREATE TABLE IF NOT EXISTS iap_transactions (
 -- Client-generated WireGuard public key (Amnezia gateway /v1/config flow):
 -- when set, the node registers this key as the WG peer instead of the key
 -- derived from wg_privkey.
-ALTER TABLE connections ADD COLUMN wg_client_pubkey TEXT;

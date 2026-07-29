@@ -460,7 +460,6 @@ where
         user_country_code: req.user_country_code.as_deref(),
         server_country_code: None,
         connection_id: None,
-        public_key: None,
     };
 
     match build_gateway_config_response(&memory, &sub_id, &params).await {

@@ -64,7 +64,7 @@ where
             tokio::spawn(async move {
                 if let Some(wg) = conn.get_wireguard() {
                     if let Some(api) = wg_client.as_ref() {
-                        if let Ok(pubkey) = &wg.peer_pubkey() {
+                        if let Ok(pubkey) = &wg.keys.pubkey() {
                             if let Err(e) = api.create(pubkey, wg.address.clone()) {
                                 tracing::error!(
                                     "Failed to restore WireGuard connection {}: {}",

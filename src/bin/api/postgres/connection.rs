@@ -132,7 +132,6 @@ impl PgConn {
             proto,
             wg_privkey,
             wg_address,
-            wg_client_pubkey,
             is_deleted
         FROM connections
     ";
@@ -156,7 +155,6 @@ impl PgConn {
                 let proto: Tag = row.get("proto");
                 let wg_privkey: Option<String> = row.get("wg_privkey");
                 let wg_address: Option<String> = row.get("wg_address");
-                let wg_client_pubkey: Option<String> = row.get("wg_client_pubkey");
                 let is_deleted: bool = row.get("is_deleted");
 
                 let wg = match (wg_privkey, wg_address) {
@@ -164,7 +162,6 @@ impl PgConn {
                         address.parse::<IpAddrMask>().ok().map(|ip_mask| WgParam {
                             keys: WgKeys { privkey },
                             address: ip_mask,
-                            client_pub_key: wg_client_pubkey,
                         })
                     }
                     _ => None,
@@ -205,21 +202,6 @@ impl PgConn {
         let query = "UPDATE connections SET is_deleted = false WHERE id = $1";
 
         client.execute(query, &[conn_id]).await?;
-
-        Ok(())
-    }
-
-    pub async fn update_wg_client_pubkey(
-        &self,
-        conn_id: &uuid::Uuid,
-        client_pubkey: &str,
-    ) -> Result<()> {
-        let mut manager = self.manager.lock().await;
-        let client = manager.get_client().await?;
-
-        let query = "UPDATE connections SET wg_client_pubkey = $2 WHERE id = $1";
-
-        client.execute(query, &[conn_id, &client_pubkey]).await?;
 
         Ok(())
     }

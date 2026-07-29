@@ -231,7 +231,7 @@ where
                         // The peer key is the client-provided public key when
                         // present, otherwise the key derived from the
                         // server-side keypair.
-                        if let Ok(pubkey) = wg.peer_pubkey() {
+                        if let Ok(pubkey) = wg.keys.pubkey() {
                             let exist = wg_api.is_exist(pubkey.clone());
 
                             if exist {
@@ -365,7 +365,7 @@ where
                             Error::Custom("Missing WireGuard keys in message".into())
                         })?;
 
-                        wg_api.delete(&wg.peer_pubkey()?).map_err(|e| {
+                        wg_api.delete(&wg.keys.pubkey()?).map_err(|e| {
                             Error::Custom(format!("Failed to delete WireGuard peer: {}", e))
                         })?;
 

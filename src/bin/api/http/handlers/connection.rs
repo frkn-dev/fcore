@@ -164,7 +164,6 @@ where
                         address: IpAddr::V4(next),
                         cidr: 32,
                     },
-                    client_pub_key: None,
                 },
             }
         }
@@ -192,7 +191,6 @@ where
                         address: IpAddr::V4(next),
                         cidr: 32,
                     },
-                    client_pub_key: None,
                 },
             }
         }

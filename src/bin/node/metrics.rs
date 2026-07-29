@@ -158,7 +158,7 @@ where
             mem.iter()
                 .filter_map(|(id, conn)| {
                     conn.get_wireguard()
-                        .map(|wg| (*id, conn.get_subscription_id(), wg.peer_pubkey()))
+                        .map(|wg| (*id, conn.get_subscription_id(), wg.keys.pubkey()))
                 })
                 .collect::<Vec<_>>()
         };

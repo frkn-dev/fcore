@@ -41,21 +41,6 @@ impl Keys {
         Self::derive_pubkey(&self.privkey)
     }
 
-    /// Validates a base64-encoded x25519 public key received from a client.
-    pub fn validate_pubkey(public_key_b64: &str) -> Result<(), Error> {
-        let public_vec = general_purpose::STANDARD
-            .decode(public_key_b64)
-            .map_err(|e| Error::Custom(format!("invalid base64 public key: {}", e)))?;
-
-        if public_vec.len() != 32 {
-            return Err(Error::Custom(
-                "Public key must be exactly 32 bytes".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
     fn derive_pubkey(private_key_b64: &str) -> Result<String, Error> {
         let private_vec = general_purpose::STANDARD
             .decode(private_key_b64)
@@ -261,11 +246,6 @@ impl FromStr for IpAddrMask {
 pub struct Param {
     pub keys: Keys,
     pub address: IpAddrMask,
-    /// Public key of the client-generated keypair (Amnezia gateway flow).
-    /// When set, it — not the key derived from `keys.privkey` — is the peer
-    /// public key registered on the node.
-    #[serde(default)]
-    pub client_pub_key: Option<String>,
 }
 
 impl Param {
@@ -273,16 +253,6 @@ impl Param {
         Self {
             keys: Keys::default(),
             address: ip,
-            client_pub_key: None,
-        }
-    }
-
-    /// Public key the node must register as the peer: the client-provided
-    /// key when present, otherwise the key derived from `keys.privkey`.
-    pub fn peer_pubkey(&self) -> Result<String, Error> {
-        match &self.client_pub_key {
-            Some(key) => Ok(key.clone()),
-            None => self.keys.pubkey(),
         }
     }
 }
