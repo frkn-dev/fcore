@@ -387,6 +387,55 @@ where
     })))
 }
 
+fn count_subscriptions<'a, S>(subs: impl Iterator<Item = &'a S>) -> SubscriptionCounts
+where
+    S: SubscriptionOperations + 'a,
+{
+    let mut total = 0;
+    let mut active = 0;
+    for sub in subs {
+        if sub.is_deleted() {
+            continue;
+        }
+        total += 1;
+        if sub.is_active() {
+            active += 1;
+        }
+    }
+    SubscriptionCounts { total, active }
+}
+
+pub async fn admin_api_subscriptions_count_handler<N, C, S>(
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let mem = memory.memory.read().await;
+    let counts = count_subscriptions(mem.subscriptions.iter().map(|(_, sub)| sub));
+
+    Ok(Box::new(warp::reply::json(&counts)))
+}
+
 pub async fn admin_api_subscriptions_handler<N, C, S>(
     memory: MemSync<N, C, S>,
     admin_enabled: bool,
@@ -959,5 +1008,36 @@ where
                 StatusCode::INTERNAL_SERVER_ERROR,
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn sub(expires_at: Option<DateTime<Utc>>, deleted: bool) -> Subscription {
+        let id = uuid::Uuid::new_v4();
+        let mut s = Subscription::new(id, "ref".to_string(), expires_at, None);
+        if deleted {
+            s.mark_deleted();
+        }
+        s
+    }
+
+    #[test]
+    fn count_subscriptions_skips_deleted_and_counts_active() {
+        let now = Utc::now();
+        let subs = vec![
+            sub(Some(now + Duration::days(1)), false),  // active
+            sub(Some(now - Duration::days(1)), false),  // expired
+            sub(Some(now + Duration::days(1)), true),   // deleted
+            sub(None, false),                           // no expiry => active
+        ];
+
+        let counts = count_subscriptions(subs.iter());
+
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.active, 2);
     }
 }

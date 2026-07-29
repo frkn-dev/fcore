@@ -148,6 +148,7 @@ pub trait Operations {
     fn refer_code(&self) -> String;
     fn set_refer_code(&mut self, code: String);
     fn is_active(&self) -> bool;
+    fn is_deleted(&self) -> bool;
     fn days_remaining(&self) -> Option<i64>;
     fn set_expires_at(&mut self, expires_at: DateTime<Utc>) -> Result<(), String>;
     fn mark_deleted(&mut self);
@@ -213,6 +214,10 @@ impl Operations for Subscription {
 
     fn is_active(&self) -> bool {
         !self.is_deleted && self.expires_at.map(|expires_at| expires_at > Utc::now()).unwrap_or(true)
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.is_deleted
     }
 
     fn days_remaining(&self) -> Option<i64> {
