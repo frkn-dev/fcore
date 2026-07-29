@@ -479,7 +479,7 @@ PersistentKeepalive = 25
         "psk_key": "",
         "client_ip": client_ip,
         "hostName": host,
-        "port": inbound.port.to_string(),
+        "port": inbound.port,
         "mtu": "1420",
         "persistent_keep_alive": "25",
     });
@@ -1383,7 +1383,7 @@ mod tests {
         assert_eq!(last["psk_key"], "");
         assert_eq!(last["client_ip"], "10.8.1.5");
         assert_eq!(last["hostName"], "203.0.113.7");
-        assert_eq!(last["port"], "51820");
+        assert_eq!(last["port"], 51820);
         assert_eq!(last["mtu"], "1420");
         assert_eq!(last["persistent_keep_alive"], "25");
     }
