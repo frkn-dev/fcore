@@ -4,8 +4,8 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, InboundConnLink, NodeStatus, NodeStorageOperations,
-    SubscriptionOperations, SubscriptionStorageOperations, Tag,
+    ConnectionStorageApiOperations, InboundConnLink, NodeStatus, NodeStorageOperations, Proto,
+    SubscriptionOperations, SubscriptionStorageOperations, Tag, Topic, WgKeys, WgParam,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -229,6 +229,7 @@ fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> 
 fn proto_matches(tag: Tag, protocol: &str) -> bool {
     match protocol {
         "awg" => tag == Tag::AmneziaWg,
+        "wireguard" => tag == Tag::Wireguard,
         "hysteria2" => tag == Tag::Hysteria2,
         "vless" => matches!(
             tag,
@@ -245,6 +246,7 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
 fn proto_label(tag: Tag) -> &'static str {
     match tag {
         Tag::AmneziaWg => "awg",
+        Tag::Wireguard => "wireguard",
         Tag::Hysteria2 => "hysteria2",
         _ => "vless",
     }
@@ -426,6 +428,176 @@ fn build_awg_server_config(
             }
         ]
     })
+}
+
+/// Builds the Amnezia server config for plain WireGuard: a wg-quick INI
+/// without junk parameters, delivered in the `amnezia-wireguard` container.
+/// The client generates its own keypair; the INI carries the
+/// `$WIREGUARD_CLIENT_PRIVATE_KEY` placeholder substituted on the client side.
+fn build_wg_server_config(
+    inbound: &fcore::Inbound,
+    conn: &Connection,
+    client_pub_key: &str,
+    host: &str,
+) -> Result<serde_json::Value, fcore::Error> {
+    let wg = inbound
+        .wg
+        .as_ref()
+        .ok_or(fcore::Error::Custom("WireGuard settings missing".into()))?;
+    let param = conn.get_wireguard().ok_or(fcore::Error::Custom(
+        "Connection has no WireGuard params".into(),
+    ))?;
+
+    let server_pub_key = wg.keys.pubkey()?;
+    let client_ip = param.address.address.to_string();
+    let client_priv_key = "$WIREGUARD_CLIENT_PRIVATE_KEY";
+
+    let ini = format!(
+        r#"[Interface]
+PrivateKey = {client_priv_key}
+Address = {address}
+DNS = 1.1.1.1, 1.0.0.1
+MTU = 1420
+
+[Peer]
+PublicKey = {server_pub_key}
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = {host}:{port}
+PersistentKeepalive = 25
+"#,
+        address = param.address,
+        server_pub_key = server_pub_key,
+        host = host,
+        port = inbound.port,
+    );
+
+    let last_config = serde_json::json!({
+        "client_priv_key": client_priv_key,
+        "client_pub_key": client_pub_key,
+        "server_pub_key": server_pub_key,
+        "psk_key": "",
+        "client_ip": client_ip,
+        "hostName": host,
+        "port": inbound.port.to_string(),
+        "mtu": "1420",
+        "persistent_keep_alive": "25",
+    });
+
+    Ok(serde_json::json!({
+        "config_version": 2,
+        "defaultContainer": "amnezia-wireguard",
+        "description": "FRKN WireGuard",
+        "dns1": "1.1.1.1",
+        "dns2": "1.0.0.1",
+        "hostName": host,
+        "name": "FRKN",
+        "containers": [
+            {
+                "container": "amnezia-wireguard",
+                "amnezia-wireguard": {
+                    "config": ini,
+                    "isThirdPartyConfig": true,
+                    "last_config": last_config.to_string()
+                }
+            }
+        ]
+    }))
+}
+
+/// Pure decision logic for WG peer (re)registration from the client's
+/// `public_key`: validates the key and returns `Ok(Some(param))` with the
+/// updated param when the key changed, `Ok(None)` when the same key is
+/// already registered (no-op — no PG write, no ZMQ publish).
+fn plan_wg_peer_update(
+    param: &WgParam,
+    requested_pubkey: &str,
+) -> Result<Option<WgParam>, fcore::Error> {
+    WgKeys::validate_pubkey(requested_pubkey)?;
+
+    if param.client_pub_key.as_deref() == Some(requested_pubkey) {
+        return Ok(None);
+    }
+
+    let mut param = param.clone();
+    param.client_pub_key = Some(requested_pubkey.to_string());
+    Ok(Some(param))
+}
+
+/// Registers the client-provided WireGuard public key as the peer of this
+/// connection: PG first (source of truth), then memory, then a ZMQ update so
+/// the node replaces the peer key. Idempotent via `plan_wg_peer_update`.
+async fn register_wg_peer<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    conn_id: &uuid::Uuid,
+    conn: &Connection,
+    requested_pubkey: &str,
+) -> Result<(), warp::reply::Response>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    Connection: From<C>,
+{
+    let param = conn.get_wireguard().ok_or_else(|| {
+        http::internal_error("Connection has no WireGuard params").into_response()
+    })?;
+
+    let new_param = match plan_wg_peer_update(param, requested_pubkey) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            return Err(http::bad_request(&format!("Invalid public_key: {}", e)).into_response())
+        }
+    };
+
+    if let Err(e) = memory
+        .db
+        .conn()
+        .update_wg_client_pubkey(conn_id, requested_pubkey)
+        .await
+    {
+        return Err(
+            http::internal_error(&format!("Failed to persist WG peer key: {}", e)).into_response(),
+        );
+    }
+
+    let updated_conn = {
+        let mut mem = memory.memory.write().await;
+        if let Some(conn_mut) = mem.connections.get_mut(conn_id) {
+            conn_mut.set_proto(Proto::Wireguard {
+                param: new_param.clone(),
+            });
+            conn_mut.set_modified_at();
+        }
+
+        let mut c = conn.clone();
+        c.set_proto(Proto::Wireguard { param: new_param });
+        c.set_modified_at();
+        c
+    };
+
+    let msg = vec![updated_conn.as_update_message(conn_id)];
+    let topic: Topic = updated_conn.get_env().into();
+    let bytes = rkyv::to_bytes::<_, 1024>(&msg).map_err(|e| {
+        http::internal_error(&format!("Serialization error: {}", e)).into_response()
+    })?;
+    memory
+        .publisher
+        .send_binary(&topic, bytes.as_ref())
+        .await
+        .map_err(|e| {
+            http::internal_error(&format!("Failed to publish WG peer update: {:?}", e))
+                .into_response()
+        })?;
+
+    Ok(())
 }
 
 /// Builds the Amnezia server config for Hysteria2 (xray outbound, same
@@ -795,6 +967,7 @@ where
     let mut connections = vless_connections;
     connections.extend(awg_connections);
     connections.extend(connections_for_protocol(&mem.nodes, "hysteria2", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, "wireguard", conns_slice));
     let countries = available_countries_from_connections(&connections);
 
     let info = GatewayServiceInfo {
@@ -901,7 +1074,11 @@ where
         .unwrap_or_else(|| "2099-01-01T00:00:00Z".to_string());
 
     Ok(warp::reply::json(&GatewayAccountInfoResponse {
-        supported_protocols: vec!["vless".to_string(), "awg".to_string()],
+        supported_protocols: vec![
+            "vless".to_string(),
+            "awg".to_string(),
+            "wireguard".to_string(),
+        ],
         available_countries: vec![
             GatewayCountry {
                 country_code: String::new(),
@@ -943,6 +1120,8 @@ pub struct GatewayConfigParams<'a> {
     pub user_country_code: Option<&'a str>,
     pub server_country_code: Option<&'a str>,
     pub connection_id: Option<uuid::Uuid>,
+    /// Client-generated WireGuard public key (plain WG only; vless ignores it).
+    pub public_key: Option<&'a str>,
 }
 
 /// Builds the gateway config for an active subscription: picks a matching
@@ -1048,6 +1227,10 @@ where
         }
     };
 
+    // From here on only owned clones are used; release the read lock so the
+    // WireGuard branch can take a write lock for peer registration.
+    drop(mem);
+
     // Build the config for the protocol of the chosen connection, not of the
     // service card: an explicitly requested connection may be of either type.
     let conn_tag = conn.get_proto().proto();
@@ -1064,6 +1247,32 @@ where
         let host = node.connection_host();
         build_h2_server_config(inbound, &host, &token)
             .map_err(|e| http::internal_error(&format!("Failed to build Hysteria2 config: {e}")).into_response())?
+    } else if conn_tag == Tag::Wireguard {
+        let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
+            http::internal_error("Node has no matching WireGuard inbound").into_response()
+        })?;
+        let host = node.connection_host();
+
+        // The client generates its own WG keypair and sends the public key;
+        // register it as the connection's peer (idempotent). Without a key
+        // in the request, fall back to the derived key as before.
+        let client_pub_key = match params.public_key {
+            Some(pk) => {
+                register_wg_peer(memory, &conn_id, &conn, pk).await?;
+                pk.to_string()
+            }
+            None => {
+                let param = conn.get_wireguard().ok_or_else(|| {
+                    http::internal_error("Connection has no WireGuard params").into_response()
+                })?;
+                param.peer_pubkey().map_err(|_| {
+                    http::internal_error("Failed to derive WireGuard public key").into_response()
+                })?
+            }
+        };
+
+        build_wg_server_config(inbound, &conn, &client_pub_key, &host)
+            .map_err(|e| http::internal_error(&format!("Failed to build WireGuard config: {e}")).into_response())?
     } else if proto_matches(conn_tag, "awg") {
         let inbound = node.inbounds.get(&Tag::AmneziaWg).unwrap();
         let host = node.connection_host();
@@ -1103,15 +1312,16 @@ where
             .map_err(|_| http::internal_error("Failed to build VLESS config").into_response())?
     };
 
-    let is_awg = proto_matches(conn_tag, "awg");
-    let config_bytes = if is_awg {
+    // AWG and plain WireGuard are delivered gzipped (base64 STANDARD);
+    // vless and hysteria2 go as plain JSON with base64url (no padding).
+    let is_gzipped = matches!(conn_tag, Tag::AmneziaWg | Tag::Wireguard);
+    let config_bytes = if is_gzipped {
         gzip_json(&server_config_json)
             .map_err(|_| http::internal_error("Failed to gzip config").into_response())?
     } else {
-        // vless and hysteria2: plain JSON, base64url (no padding)
         server_config_json.to_string().into_bytes()
     };
-    let config_b64 = if is_awg {
+    let config_b64 = if is_gzipped {
         base64::engine::general_purpose::STANDARD.encode(&config_bytes)
     } else {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&config_bytes)
@@ -1119,7 +1329,12 @@ where
 
     Ok(GatewayConfigResponse {
         config: config_b64,
-        supported_protocols: vec!["vless".to_string(), "awg".to_string(), "hysteria2".to_string()],
+        supported_protocols: vec![
+            "vless".to_string(),
+            "awg".to_string(),
+            "hysteria2".to_string(),
+            "wireguard".to_string(),
+        ],
         service_info: serde_json::json!({
             "name": node.label,
             "type": params.service_type
@@ -1171,6 +1386,7 @@ where
         user_country_code: req.user_country_code.as_deref(),
         server_country_code: req.server_country_code.as_deref(),
         connection_id: req.connection_id,
+        public_key: req.public_key.as_deref(),
     };
 
     match build_gateway_config_response(&memory, &sub_id, &params).await {
@@ -1184,6 +1400,7 @@ mod tests {
     use super::*;
     use fcore::H2Settings;
     use fcore::Tag;
+    use fcore::{Env, IpAddrMask, WireguardSettings};
 
     fn h2_inbound() -> fcore::Inbound {
         fcore::Inbound {
@@ -1205,6 +1422,115 @@ mod tests {
                 auth_info: None,
             }),
         }
+    }
+
+    fn wg_inbound() -> fcore::Inbound {
+        fcore::Inbound {
+            tag: Tag::Wireguard,
+            port: 51820,
+            stream_settings: None,
+            wg: Some(WireguardSettings {
+                interface: "wg0".to_string(),
+                address: "10.8.1.1/24".parse::<IpAddrMask>().unwrap(),
+                port: 51820,
+                keys: WgKeys::default(),
+                dns: vec![],
+            }),
+            awg: None,
+            mtproto_secret: None,
+            h2: None,
+        }
+    }
+
+    fn wg_connection(param: WgParam) -> Connection {
+        Connection::new(&Env::Production, None, Proto::Wireguard { param }, None)
+    }
+
+    #[test]
+    fn wg_config_shape() {
+        let inbound = wg_inbound();
+        let server_pub_key = inbound.wg.as_ref().unwrap().keys.pubkey().unwrap();
+        let client_pub_key = WgKeys::default().pubkey().unwrap();
+
+        let param = WgParam {
+            keys: WgKeys::default(),
+            address: "10.8.1.5/32".parse::<IpAddrMask>().unwrap(),
+            client_pub_key: Some(client_pub_key.clone()),
+        };
+        let conn = wg_connection(param);
+
+        let cfg = build_wg_server_config(&inbound, &conn, &client_pub_key, "203.0.113.7").unwrap();
+
+        assert_eq!(cfg["defaultContainer"], "amnezia-wireguard");
+        assert_eq!(cfg["containers"][0]["container"], "amnezia-wireguard");
+
+        let inner = &cfg["containers"][0]["amnezia-wireguard"];
+        assert_eq!(inner["isThirdPartyConfig"], true);
+
+        // Plain WireGuard INI: client key placeholder, no AWG junk params.
+        let ini = inner["config"].as_str().unwrap();
+        assert!(ini.contains("PrivateKey = $WIREGUARD_CLIENT_PRIVATE_KEY"));
+        assert!(ini.contains("Address = 10.8.1.5/32"));
+        assert!(ini.contains(&format!("PublicKey = {}", server_pub_key)));
+        assert!(ini.contains("Endpoint = 203.0.113.7:51820"));
+        assert!(ini.contains("AllowedIPs = 0.0.0.0/0, ::/0"));
+        assert!(ini.contains("PersistentKeepalive = 25"));
+        for junk in ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "I1"] {
+            assert!(!ini.contains(junk), "INI must not contain {}", junk);
+        }
+
+        // last_config is a JSON string with the fields the client expects.
+        let last: serde_json::Value =
+            serde_json::from_str(inner["last_config"].as_str().unwrap()).unwrap();
+        assert_eq!(last["client_priv_key"], "$WIREGUARD_CLIENT_PRIVATE_KEY");
+        assert_eq!(last["client_pub_key"], client_pub_key);
+        assert_eq!(last["server_pub_key"], server_pub_key);
+        assert_eq!(last["psk_key"], "");
+        assert_eq!(last["client_ip"], "10.8.1.5");
+        assert_eq!(last["hostName"], "203.0.113.7");
+        assert_eq!(last["port"], "51820");
+        assert_eq!(last["mtu"], "1420");
+        assert_eq!(last["persistent_keep_alive"], "25");
+    }
+
+    #[test]
+    fn wg_peer_update_noop_for_same_key() {
+        let key = WgKeys::default().pubkey().unwrap();
+        let param = WgParam {
+            keys: WgKeys::default(),
+            address: "10.8.1.5/32".parse::<IpAddrMask>().unwrap(),
+            client_pub_key: Some(key.clone()),
+        };
+
+        // Same key again: no-op, no update planned.
+        assert!(plan_wg_peer_update(&param, &key).unwrap().is_none());
+
+        // A different valid key: update planned with the new key stored.
+        let other = WgKeys::default().pubkey().unwrap();
+        let updated = plan_wg_peer_update(&param, &other).unwrap().unwrap();
+        assert_eq!(updated.client_pub_key.as_deref(), Some(other.as_str()));
+        // Address is untouched.
+        assert_eq!(updated.address, param.address);
+
+        // A param without a client key yet: first registration is planned.
+        let mut fresh = param.clone();
+        fresh.client_pub_key = None;
+        let updated = plan_wg_peer_update(&fresh, &key).unwrap().unwrap();
+        assert_eq!(updated.client_pub_key.as_deref(), Some(key.as_str()));
+    }
+
+    #[test]
+    fn wg_peer_update_rejects_invalid_keys() {
+        let param = WgParam {
+            keys: WgKeys::default(),
+            address: "10.8.1.5/32".parse::<IpAddrMask>().unwrap(),
+            client_pub_key: None,
+        };
+
+        // Not base64.
+        assert!(plan_wg_peer_update(&param, "not-a-key!!!").is_err());
+        // Valid base64 but not 32 bytes.
+        assert!(plan_wg_peer_update(&param, "AQID").is_err());
     }
 
     #[test]
