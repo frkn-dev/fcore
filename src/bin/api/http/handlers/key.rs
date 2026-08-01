@@ -1,4 +1,3 @@
-use chrono::Utc;
 use tracing::{error, Instrument};
 
 use fcore::{
@@ -148,7 +147,10 @@ where
         None => {
             let sub_id = uuid::Uuid::new_v4();
             let ref_code = get_uuid_last_octet_simple(&sub_id);
-            let expires_at = Some(Utc::now() + chrono::Duration::days(key.days as i64));
+            // expires_at stays empty on purpose: the shared add_days call
+            // below grants the key's days exactly once. Setting it here too
+            // would double them (days in expires_at + days from add_days).
+            let expires_at = None;
             let sub = Subscription::new(sub_id, ref_code, expires_at, req.limit_bytes);
 
             subscription_audit::log_transaction_start(sub_id, Some(key.days as i64));

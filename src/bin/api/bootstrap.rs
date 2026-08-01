@@ -59,11 +59,7 @@ where
 
         let mem = Arc::new(RwLock::new(Cache::new()));
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;
-        let mem_sync = MemSync::new(
-            mem.clone(),
-            db.clone(),
-            publisher,
-        );
+        let mem_sync = MemSync::new(mem.clone(), db.clone(), publisher);
         let metric_storage = match MetricStorage::load_snapshot(
             &settings.metrics.snapshot_path,
             settings.metrics.max_points,
@@ -91,10 +87,12 @@ where
             .as_ref()
             .filter(|p| !p.is_empty())
             .map(|p| {
-                let pem = std::fs::read(p)
-                    .map_err(|e| fcore::Error::Custom(format!("Failed to read AGW private key: {e}")))?;
-                let key = PKey::private_key_from_pem(&pem)
-                    .map_err(|e| fcore::Error::Custom(format!("Failed to parse AGW private key: {e}")))?;
+                let pem = std::fs::read(p).map_err(|e| {
+                    fcore::Error::Custom(format!("Failed to read AGW private key: {e}"))
+                })?;
+                let key = PKey::private_key_from_pem(&pem).map_err(|e| {
+                    fcore::Error::Custom(format!("Failed to parse AGW private key: {e}"))
+                })?;
                 Ok::<_, fcore::Error>(Arc::new(key))
             })
             .transpose()?;
@@ -182,8 +180,8 @@ pub fn init_tracing(settings: ServiceSettings) {
         let log_directory = settings.subscription_audit.directory;
         let log_file = settings.subscription_audit.file;
         let rotation = parse_rotation(&settings.subscription_audit.rotation);
-        let audit_level = parse_level(&settings.subscription_audit.level)
-            .unwrap_or(tracing::Level::INFO);
+        let audit_level =
+            parse_level(&settings.subscription_audit.level).unwrap_or(tracing::Level::INFO);
 
         let audit_file = RollingFileAppender::new(rotation, log_directory, log_file);
 
