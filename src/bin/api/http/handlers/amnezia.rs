@@ -859,8 +859,17 @@ where
 
     // If subscription_id is provided, use the real subscription end_date and its connections.
     let sub_id = req.auth_data.as_ref().and_then(extract_subscription_id);
-    let end_date = sub_id
-        .and_then(|sub_id| mem.subscriptions.find_by_id(&sub_id))
+    let sub = sub_id.and_then(|sub_id| mem.subscriptions.find_by_id(&sub_id));
+
+    // Expired/revoked subscription: paywall signal, same as /v1/config.
+    if let Some(ref sub) = sub {
+        if !sub.is_active() {
+            return Ok(subscription_expired_response(sub.expires_at()));
+        }
+    }
+
+    let end_date = sub
+        .as_ref()
         .and_then(|sub| sub.expires_at().map(|d| d.to_rfc3339()));
     let conns = sub_id.and_then(|sub_id| mem.connections.get_by_subscription_id(&sub_id));
     let conns_slice = conns.as_deref();
@@ -1017,10 +1026,33 @@ fn gzip_json(value: &serde_json::Value) -> Result<Vec<u8>, fcore::Error> {
         .map_err(|e| fcore::Error::Custom(format!("gzip finish failed: {}", e)))
 }
 
+/// 402 Payment Required for an expired/revoked subscription — the body is
+/// encrypted by the envelope like a normal 200 response, so the client can
+/// show a paywall instead of a generic error.
+fn subscription_expired_response(
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> warp::reply::Response {
+    let end_date = expires_at.map(|d| d.to_rfc3339()).unwrap_or_default();
+    let message = if end_date.is_empty() {
+        "Subscription expired. Renew to continue.".to_string()
+    } else {
+        format!("Subscription expired on {}. Renew to continue.", end_date)
+    };
+
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "error": "subscription_expired",
+            "end_date": end_date,
+            "message": message,
+        })),
+        warp::http::StatusCode::PAYMENT_REQUIRED,
+    )
+    .into_response()
+}
+
 /// Parameters for building a gateway VPN config, shared by
 /// `gateway_config_handler` and `gateway_subscriptions_handler`.
-pub struct GatewayConfigParams<'a> {
-    pub service_protocol: &'a str,
+pub struct GatewayConfigParams<'a> {    pub service_protocol: &'a str,
     pub service_type: &'a str,
     pub user_country_code: Option<&'a str>,
     pub server_country_code: Option<&'a str>,
@@ -1057,7 +1089,7 @@ where
     };
 
     if !sub.is_active() {
-        return Err(http::not_found("Subscription expired").into_response());
+        return Err(subscription_expired_response(sub.expires_at()));
     }
 
     let conns = match mem.connections.get_by_subscription_id(sub_id) {
@@ -1411,5 +1443,32 @@ mod tests {
         assert_eq!(tls["alpn"], serde_json::json!(["h3"]));
         assert_eq!(tls["allowInsecure"], false);
         assert_eq!(ob["streamSettings"]["network"], "udp");
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::subscription_expired_response;
+
+    #[tokio::test]
+    async fn expired_response_is_402_with_structured_body() {
+        let resp = subscription_expired_response(None);
+        assert_eq!(resp.status(), warp::http::StatusCode::PAYMENT_REQUIRED);
+
+        let body = warp::hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "subscription_expired");
+        assert_eq!(json["end_date"], "");
+        assert!(json["message"].as_str().unwrap().contains("Renew"));
+    }
+
+    #[tokio::test]
+    async fn expired_response_includes_end_date() {
+        let ts = chrono::Utc::now();
+        let resp = subscription_expired_response(Some(ts));
+        let body = warp::hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["end_date"], ts.to_rfc3339());
+        assert!(json["message"].as_str().unwrap().contains(&ts.to_rfc3339()));
     }
 }

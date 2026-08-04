@@ -139,20 +139,22 @@ where
 }
 
 /// Encrypts the outgoing response if an AES context exists. Otherwise returns the response as-is.
+/// The original status code is preserved (e.g. 402 for expired subscriptions).
 pub async fn encrypt_gateway_reply(
     response: warp::reply::Response,
     aes_ctx: Option<AesContext>,
 ) -> Result<warp::reply::Response, Rejection> {
     match aes_ctx {
         Some(ctx) => {
-            let body_bytes = warp::hyper::body::to_bytes(response.into_body())
+            let (parts, body) = response.into_parts();
+            let body_bytes = warp::hyper::body::to_bytes(body)
                 .await
                 .map_err(|e| warp::reject::custom(AgwCryptoError(format!("Failed to read response body: {e}"))))?;
 
             let encrypted = encrypt_response(&ctx, &body_bytes)?;
 
             let response = warp::http::Response::builder()
-                .status(warp::http::StatusCode::OK)
+                .status(parts.status)
                 .header(
                     warp::http::header::CONTENT_TYPE,
                     warp::http::HeaderValue::from_static("application/octet-stream"),
