@@ -1,6 +1,6 @@
 [package]
 name = "fcore"
-version = "0.6.16"
+version = "0.6.17"
 edition = "2021"
 build = "build.rs"
 
@@ -58,7 +58,7 @@ warp = {version = "0.3"}
 zmq = "0.10"
 parking_lot = "0.12.5"
 sha2 = "0.10"
-netlink-packet-amnezia-wireguard = { version = "0.1.2", optional = true }
+netlink-packet-amnezia-wireguard = { git = "https://github.com/frkn-dev/netlink-packet-amnezia-wireguard", branch = "main", optional = true }
 netlink-packet-core = { version = "0.8", optional = true }
 netlink-packet-generic = { version = "0.4", optional = true }
 netlink-sys = { version = "0.8", optional = true }
@@ -93,4 +93,5 @@ path = "src/bin/api/main.rs"
 [[bin]]
 name = "auth"
 path = "src/bin/auth/main.rs"
+
 

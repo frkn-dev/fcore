@@ -3,7 +3,8 @@ use crate::error::{Error, Result as MyResult};
 use crate::AwgObfuscationParams;
 use base64::{engine::general_purpose, Engine as _};
 use netlink_packet_amnezia_wireguard::{
-    AmneziaWireguardAttribute, AmneziaWireguardCmd, AmneziaWireguardMessage, AmneziaWireguardPeer,
+    range::u32_range_from_string, AmneziaWireguardAttribute,
+    AmneziaWireguardCmd, AmneziaWireguardMessage, AmneziaWireguardPeer,
     AmneziaWireguardPeerAttribute,
 };
 use netlink_packet_core::{
@@ -31,6 +32,10 @@ impl From<NetlinkError> for Error {
 #[derive(Clone)]
 pub struct AwgInterface {
     family_id: u16,
+    /// genl family version of the loaded kernel module: 2 for AmneziaWG
+    /// v1.0 (magic headers as strings), 3 for AmneziaWG 3.0 (magic headers
+    /// as packed u64 ranges).
+    family_version: u32,
     interface: String,
 }
 #[derive(Debug, Clone)]
@@ -91,10 +96,11 @@ macro_rules! get_nla_value {
 
 impl AwgInterface {
     pub fn connect(interface: String) -> MyResult<Self> {
-        let family_id = resolve_family_id("amneziawg")?;
+        let (family_id, family_version) = resolve_family("amneziawg")?;
 
         Ok(Self {
             family_id,
+            family_version,
             interface,
         })
     }
@@ -126,17 +132,37 @@ impl AwgInterface {
         attributes.push(AmneziaWireguardAttribute::S3(params.s3));
         attributes.push(AmneziaWireguardAttribute::S4(params.s4));
 
-        if !params.h1.is_empty() {
-            attributes.push(AmneziaWireguardAttribute::H1(params.h1.clone()));
-        }
-        if !params.h2.is_empty() {
-            attributes.push(AmneziaWireguardAttribute::H2(params.h2.clone()));
-        }
-        if !params.h3.is_empty() {
-            attributes.push(AmneziaWireguardAttribute::H3(params.h3.clone()));
-        }
-        if !params.h4.is_empty() {
-            attributes.push(AmneziaWireguardAttribute::H4(params.h4.clone()));
+        if self.family_version >= 3 {
+            // AmneziaWG 3.0 expects magic headers as packed u64 ranges.
+            let headers: [(&String, fn(u64) -> AmneziaWireguardAttribute); 4] = [
+                (&params.h1, AmneziaWireguardAttribute::H1Range),
+                (&params.h2, AmneziaWireguardAttribute::H2Range),
+                (&params.h3, AmneziaWireguardAttribute::H3Range),
+                (&params.h4, AmneziaWireguardAttribute::H4Range),
+            ];
+            for (spec, make_attr) in headers {
+                if !spec.is_empty() {
+                    let range = u32_range_from_string(spec).ok_or_else(|| {
+                        Error::Custom(format!(
+                            "invalid amnezia magic header spec: {spec:?}"
+                        ))
+                    })?;
+                    attributes.push(make_attr(range));
+                }
+            }
+        } else {
+            if !params.h1.is_empty() {
+                attributes.push(AmneziaWireguardAttribute::H1(params.h1.clone()));
+            }
+            if !params.h2.is_empty() {
+                attributes.push(AmneziaWireguardAttribute::H2(params.h2.clone()));
+            }
+            if !params.h3.is_empty() {
+                attributes.push(AmneziaWireguardAttribute::H3(params.h3.clone()));
+            }
+            if !params.h4.is_empty() {
+                attributes.push(AmneziaWireguardAttribute::H4(params.h4.clone()));
+            }
         }
 
         if !params.i1.is_empty() {
@@ -294,7 +320,13 @@ impl AwgInterface {
     }
 }
 
-fn resolve_family_id(name: &str) -> MyResult<u16> {
+/// Resolves the genl family id and family version of the given family.
+///
+/// The version tells apart AmneziaWG module generations: 2 for v1.0
+/// (magic headers as strings on the wire), 3 for 3.0 (magic headers as
+/// packed u64 ranges). Defaults to 2 when the kernel does not report a
+/// version, preserving the pre-3.0 behavior.
+fn resolve_family(name: &str) -> MyResult<(u16, u32)> {
     let genlmsg = GenlMessage::from_payload(GenlCtrl {
         cmd: GenlCtrlCmd::GetFamily,
         nlas: vec![GenlCtrlAttrs::FamilyName(name.to_string())],
@@ -313,8 +345,11 @@ fn resolve_family_id(name: &str) -> MyResult<u16> {
         }) => {
             let family_id = get_nla_value!(nlas, GenlCtrlAttrs, FamilyId)
                 .ok_or_else(|| Error::Custom("family id not found".to_string()))?;
+            let family_version = get_nla_value!(nlas, GenlCtrlAttrs, Version)
+                .copied()
+                .unwrap_or(2);
 
-            Ok(*family_id)
+            Ok((*family_id, family_version))
         }
 
         _ => Err(Error::Custom("unexpected payload".to_string())),
