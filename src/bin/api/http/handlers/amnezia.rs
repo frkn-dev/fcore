@@ -230,9 +230,12 @@ fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> 
 }
 
 /// Checks whether the tag matches the protocol from the client request.
+/// "awg-mobile" is a distinct protocol for the client; "awg" matches only
+/// the classic tag so the two stay distinguishable in filters.
 fn proto_matches(tag: Tag, protocol: &str) -> bool {
     match protocol {
-        "awg" => matches!(tag, Tag::AmneziaWg | Tag::AmneziaWgMobile),
+        "awg" => tag == Tag::AmneziaWg,
+        "awg-mobile" => tag == Tag::AmneziaWgMobile,
         "wireguard" => tag == Tag::Wireguard,
         "hysteria2" => tag == Tag::Hysteria2,
         "vless" => matches!(
@@ -249,7 +252,8 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
 /// Protocol label reported back to the client (api_config.service_protocol).
 fn proto_label(tag: Tag) -> &'static str {
     match tag {
-        Tag::AmneziaWg | Tag::AmneziaWgMobile => "awg",
+        Tag::AmneziaWg => "awg",
+        Tag::AmneziaWgMobile => "awg-mobile",
         Tag::Wireguard => "wireguard",
         Tag::Hysteria2 => "hysteria2",
         _ => "vless",
@@ -887,6 +891,7 @@ where
     let mut connections = vless_connections;
     connections.extend(awg_connections);
     connections.extend(connections_for_protocol(&mem.nodes, "hysteria2", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, "awg-mobile", conns_slice));
     connections.extend(connections_for_protocol(&mem.nodes, "wireguard", conns_slice));
     let countries = available_countries_from_connections(&connections);
 
@@ -997,6 +1002,7 @@ where
         supported_protocols: vec![
             "vless".to_string(),
             "awg".to_string(),
+            "awg-mobile".to_string(),
             "wireguard".to_string(),
         ],
         available_countries: vec![
@@ -1281,6 +1287,7 @@ where
         supported_protocols: vec![
             "vless".to_string(),
             "awg".to_string(),
+            "awg-mobile".to_string(),
             "hysteria2".to_string(),
             "wireguard".to_string(),
         ],
@@ -1499,5 +1506,21 @@ mod expiry_tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["end_date"], ts.to_rfc3339());
         assert!(json["message"].as_str().unwrap().contains(&ts.to_rfc3339()));
+    }
+}
+
+#[cfg(test)]
+mod mobile_proto_tests {
+    use super::{proto_label, proto_matches};
+    use fcore::Tag;
+
+    #[test]
+    fn awg_mobile_is_a_distinct_protocol() {
+        assert!(proto_matches(Tag::AmneziaWgMobile, "awg-mobile"));
+        assert!(!proto_matches(Tag::AmneziaWgMobile, "awg"));
+        assert!(proto_matches(Tag::AmneziaWg, "awg"));
+        assert!(!proto_matches(Tag::AmneziaWg, "awg-mobile"));
+        assert_eq!(proto_label(Tag::AmneziaWgMobile), "awg-mobile");
+        assert_eq!(proto_label(Tag::AmneziaWg), "awg");
     }
 }
