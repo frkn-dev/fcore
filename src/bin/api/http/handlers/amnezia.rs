@@ -95,6 +95,8 @@ pub struct GatewayCountry {
 pub struct GatewayConnection {
     #[serde(rename = "connection_uuid")]
     pub connection_uuid: uuid::Uuid,
+    #[serde(rename = "node_id")]
+    pub node_id: uuid::Uuid,
     #[serde(rename = "country_code")]
     pub country_code: String,
     #[serde(rename = "country_name")]
@@ -200,6 +202,8 @@ pub struct GatewayConfigRequest {
     pub public_key: Option<String>,
     #[serde(rename = "connection_id")]
     pub connection_id: Option<uuid::Uuid>,
+    #[serde(rename = "node_id")]
+    pub node_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -308,6 +312,7 @@ where
                 };
                 result.push(GatewayConnection {
                     connection_uuid: *conn_id,
+                    node_id: node.uuid,
                     country_code: code.clone(),
                     country_name: code.clone(),
                     service_protocol: proto_label(tag).to_string(),
@@ -320,6 +325,7 @@ where
     if result.is_empty() {
         result = vec![GatewayConnection {
             connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
             country_code: String::new(),
             country_name: "All countries".to_string(),
             service_protocol: String::new(),
@@ -1057,6 +1063,7 @@ pub struct GatewayConfigParams<'a> {    pub service_protocol: &'a str,
     pub user_country_code: Option<&'a str>,
     pub server_country_code: Option<&'a str>,
     pub connection_id: Option<uuid::Uuid>,
+    pub node_id: Option<uuid::Uuid>,
 }
 
 /// Builds the gateway config for an active subscription: picks a matching
@@ -1124,6 +1131,13 @@ where
 
         if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
             for node in nodes {
+                // A pinned node_id selects exactly that node; a mismatch is
+                // an explicit error, not a silent fallback to another node.
+                if let Some(wanted) = params.node_id {
+                    if node.uuid != wanted {
+                        continue;
+                    }
+                }
                 if node.status != NodeStatus::Online {
                     continue;
                 }
@@ -1155,6 +1169,9 @@ where
     let (conn, node, conn_id) = match (found_conn, found_node, found_conn_id) {
         (Some(c), Some(n), Some(id)) => (c, n, id),
         _ => {
+            if params.node_id.is_some() {
+                return Err(http::not_found("node_not_found").into_response());
+            }
             return Err(http::not_found(
                 "No suitable connection/node found",
             )
@@ -1313,6 +1330,7 @@ where
         user_country_code: req.user_country_code.as_deref(),
         server_country_code: req.server_country_code.as_deref(),
         connection_id: req.connection_id,
+        node_id: req.node_id,
     };
 
     match build_gateway_config_response(&memory, &sub_id, &params).await {
