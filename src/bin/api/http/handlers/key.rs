@@ -114,6 +114,7 @@ pub async fn post_activate_key_handler<N, C, S>(
     memory: MemSync<N, C, S>,
     wg_network: fcore::IpAddrMask,
     awg_network: fcore::IpAddrMask,
+    awg_mobile_network: Option<fcore::IpAddrMask>,
     enabled_conns: Option<std::collections::HashMap<Env, Vec<Tag>>>,
     mrkting: Option<crate::config::MrktingConfig>,
 ) -> Result<impl warp::Reply, warp::Rejection>
@@ -207,12 +208,14 @@ where
 
             let wg_net = &wg_network;
             let awg_net = &awg_network;
+            let awg_mobile_net = &awg_mobile_network;
 
             if let Some(conns_map) = &enabled_conns {
                 for (env, tags) in conns_map {
                     for tag in tags {
                         if let Err(err) = create_connection_inner(
                             env, *tag, Some(sub_id), None, &memory, wg_net, awg_net,
+                            awg_mobile_net,
                         )
                         .await
                         {

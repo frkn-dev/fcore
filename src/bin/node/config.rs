@@ -23,6 +23,9 @@ pub struct ServiceSettings {
     #[cfg(feature = "amnezia-wg")]
     #[serde(default)]
     pub awg: AmneziaWgConfig,
+    #[cfg(feature = "amnezia-wg")]
+    #[serde(default)]
+    pub awg_mobile: AmneziaWgConfig,
     #[serde(default)]
     pub h2: H2Config,
     #[serde(default)]

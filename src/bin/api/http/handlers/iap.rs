@@ -278,6 +278,7 @@ pub async fn gateway_subscriptions_handler<N, C, S>(
     iap: Option<Arc<AppleIapClient>>,
     wg_network: fcore::IpAddrMask,
     awg_network: fcore::IpAddrMask,
+    awg_mobile_network: Option<fcore::IpAddrMask>,
     enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     mrkting: Option<MrktingConfig>,
 ) -> Result<warp::reply::Response, warp::Rejection>
@@ -424,6 +425,7 @@ where
                         &memory,
                         &wg_network,
                         &awg_network,
+                        &awg_mobile_network,
                     )
                     .await
                     {

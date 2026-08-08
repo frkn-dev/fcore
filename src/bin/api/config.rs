@@ -94,6 +94,11 @@ pub struct ServiceConfig {
     pub wireguard_network: IpAddrMask,
     #[serde(default = "default_wg_network")]
     pub amnezia_wireguard_network: IpAddrMask,
+    /// Dedicated pool for AmneziaWgMobile (e.g. 10.77.0.0/16) so mobile
+    /// clients avoid the CGNAT range. Without it AmneziaWgMobile
+    /// connections cannot be created.
+    #[serde(default)]
+    pub amnezia_wireguard_mobile_network: Option<IpAddrMask>,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     #[serde(default = "default_log_level")]

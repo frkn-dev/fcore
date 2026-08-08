@@ -39,6 +39,7 @@ impl Operations for Conn {
         let wg = match &self.proto {
             Proto::Wireguard { param, .. } => Some(param.clone()),
             Proto::AmneziaWg { param, .. } => Some(param.clone()),
+            Proto::AmneziaWgMobile { param, .. } => Some(param.clone()),
             _ => None,
         };
 

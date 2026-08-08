@@ -161,6 +161,7 @@ impl Node {
         #[cfg(feature = "xray")] xray_config: Option<XraySettings>,
         #[cfg(feature = "wireguard")] wg_config: Option<WireguardSettings>,
         #[cfg(feature = "amnezia-wg")] awg_config: Option<AmneziaWgSettings>,
+        #[cfg(feature = "amnezia-wg")] awg_mobile_config: Option<AmneziaWgSettings>,
         h2_config: Option<H2Settings>,
         mtproto_config: Option<MtprotoSettings>,
     ) -> Self {
@@ -204,6 +205,22 @@ impl Node {
                         tag: Tag::AmneziaWg,
                         stream_settings: None,
                         awg: awg_config,
+                        wg: None,
+                        h2: None,
+                        mtproto_secret: None,
+                    },
+                );
+            }
+
+            #[cfg(feature = "amnezia-wg")]
+            if let Some(ref config) = awg_mobile_config {
+                inbounds.insert(
+                    Tag::AmneziaWgMobile,
+                    Inbound {
+                        port: config.interface.listen_port,
+                        tag: Tag::AmneziaWgMobile,
+                        stream_settings: None,
+                        awg: awg_mobile_config,
                         wg: None,
                         h2: None,
                         mtproto_secret: None,

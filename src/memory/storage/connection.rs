@@ -18,8 +18,9 @@ where
     fn add(&mut self, conn_id: &uuid::Uuid, new_conn: C) -> Result<OperationStatus>;
     fn get_by_subscription_id(&self, subscription_id: &uuid::Uuid) -> Option<Vec<(uuid::Uuid, C)>>;
     fn get_by_proto(&self, proto: Tag) -> Option<Vec<(uuid::Uuid, C)>>;
-    fn get_last_wg_addr(&self) -> Option<IpAddrMask>;
-    fn get_last_awg_addr(&self) -> Option<IpAddrMask>;
+    /// Max allocated address among connections of the given WG-family tag
+    /// (Wireguard / AmneziaWg / AmneziaWgMobile) — each tag has its own pool.
+    fn get_last_addr(&self, tag: Tag) -> Option<IpAddrMask>;
     fn apply_update(conn: &mut Connection, patch: ConnectionPatch) -> Option<Connection>;
 }
 
@@ -181,31 +182,22 @@ where
         }
     }
 
-    fn get_last_wg_addr(&self) -> Option<IpAddrMask> {
+    fn get_last_addr(&self, tag: Tag) -> Option<IpAddrMask> {
         self.iter()
-            .filter(|(_, conn)| conn.get_proto().proto() == Tag::Wireguard)
+            .filter(|(_, conn)| conn.get_proto().proto() == tag)
             .max_by_key(|(_, conn)| {
+                let param = conn.get_wireguard().or_else(|| conn.get_amneziawg());
+                param
+                    .and_then(|wg| match wg.address.address {
+                        std::net::IpAddr::V4(ip) => Some(u32::from(ip)),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            })
+            .and_then(|(_, conn)| {
                 conn.get_wireguard()
-                    .and_then(|wg| match wg.address.address {
-                        std::net::IpAddr::V4(ip) => Some(u32::from(ip)),
-                        _ => None,
-                    })
-                    .unwrap_or(0)
+                    .or_else(|| conn.get_amneziawg())
+                    .map(|wg| wg.address.clone())
             })
-            .and_then(|(_, conn)| conn.get_wireguard().map(|wg| wg.address.clone()))
-    }
-
-    fn get_last_awg_addr(&self) -> Option<IpAddrMask> {
-        self.iter()
-            .filter(|(_, conn)| conn.get_proto().proto() == Tag::AmneziaWg)
-            .max_by_key(|(_, conn)| {
-                conn.get_amneziawg()
-                    .and_then(|wg| match wg.address.address {
-                        std::net::IpAddr::V4(ip) => Some(u32::from(ip)),
-                        _ => None,
-                    })
-                    .unwrap_or(0)
-            })
-            .and_then(|(_, conn)| conn.get_amneziawg().map(|wg| wg.address.clone()))
     }
 }

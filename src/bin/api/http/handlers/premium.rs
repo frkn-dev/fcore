@@ -352,6 +352,7 @@ pub async fn premium_create_connection_handler<N, C, S>(
     memory: MemSync<N, C, S>,
     wg_network: IpAddrMask,
     awg_network: IpAddrMask,
+    awg_mobile_network: Option<IpAddrMask>,
 ) -> Result<impl Reply, Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -381,15 +382,31 @@ where
         }
 
         match req.proto {
-            Tag::Wireguard => {
+            // WG-family protocols share the allocation logic; each tag
+            // draws from its own address pool.
+            Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile => {
+                let network = match req.proto {
+                    Tag::Wireguard => &wg_network,
+                    Tag::AmneziaWg => &awg_network,
+                    Tag::AmneziaWgMobile => match awg_mobile_network.as_ref() {
+                        Some(n) => n,
+                        None => {
+                            return Ok(http::internal_error(
+                                "amnezia_wireguard_mobile_network is not configured",
+                            ))
+                        }
+                    },
+                    _ => unreachable!(),
+                };
+
                 let last_ip: Option<Ipv4Addr> = mem
                     .connections
-                    .get_last_wg_addr()
+                    .get_last_addr(req.proto)
                     .and_then(|mask| mask.as_ipv4());
 
                 let next = match last_ip {
                     Some(ip) => IpAddrMask::increment_ipv4(ip),
-                    None => wg_network.first_peer_ip(),
+                    None => network.first_peer_ip(),
                 };
 
                 let next = match next {
@@ -397,48 +414,22 @@ where
                     None => return Ok(http::internal_error("Failed to allocate IP")),
                 };
 
-                if !wg_network.contains_ipv4(next) {
+                if !network.contains_ipv4(next) {
                     return Ok(http::internal_error("IP out of range"));
                 }
 
-                Proto::Wireguard {
-                    param: WgParam {
-                        keys: WgKeys::default(),
-                        address: IpAddrMask {
-                            address: IpAddr::V4(next),
-                            cidr: 32,
-                        },
+                let param = WgParam {
+                    keys: WgKeys::default(),
+                    address: IpAddrMask {
+                        address: IpAddr::V4(next),
+                        cidr: 32,
                     },
-                }
-            }
-            Tag::AmneziaWg => {
-                let last_ip: Option<Ipv4Addr> = mem
-                    .connections
-                    .get_last_awg_addr()
-                    .and_then(|mask| mask.as_ipv4());
-
-                let next = match last_ip {
-                    Some(ip) => IpAddrMask::increment_ipv4(ip),
-                    None => awg_network.first_peer_ip(),
                 };
 
-                let next = match next {
-                    Some(ip) => ip,
-                    None => return Ok(http::internal_error("Failed to allocate IP")),
-                };
-
-                if !awg_network.contains_ipv4(next) {
-                    return Ok(http::internal_error("IP out of range"));
-                }
-
-                Proto::AmneziaWg {
-                    param: WgParam {
-                        keys: WgKeys::default(),
-                        address: IpAddrMask {
-                            address: IpAddr::V4(next),
-                            cidr: 32,
-                        },
-                    },
+                match req.proto {
+                    Tag::Wireguard => Proto::Wireguard { param },
+                    Tag::AmneziaWg => Proto::AmneziaWg { param },
+                    _ => Proto::AmneziaWgMobile { param },
                 }
             }
             Tag::Shadowsocks => {

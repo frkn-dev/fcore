@@ -20,6 +20,12 @@ path = "/etc/wireguard/utun7.conf"
 enabled = false
 path = "/etc/amnezia-wg/awg.conf"
 
+# Second AmneziaWG interface (awg1) for AmneziaWgMobile connections with the
+# dedicated address pool. Config file has the same format as [awg].
+[awg_mobile]
+enabled = false
+path = "/etc/amnezia-wg/awg1.conf"
+
 [mtproto]
 enabled = false
 path = "/opt/teleproxy/config.toml"

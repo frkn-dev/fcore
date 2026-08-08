@@ -80,7 +80,8 @@ impl TagReq {
                 Tag::Hysteria2,
             ],
             TagReq::Wireguard => vec![Tag::Wireguard],
-            TagReq::AmneziaWg => vec![Tag::AmneziaWg],
+            // Mobile AWG connections are served as plain "amneziawg" links.
+            TagReq::AmneziaWg => vec![Tag::AmneziaWg, Tag::AmneziaWgMobile],
             TagReq::Hysteria2 => vec![Tag::Hysteria2],
             TagReq::VlessTcpReality => vec![Tag::VlessTcpReality],
             TagReq::VlessGrpcReality => vec![Tag::VlessGrpcReality],

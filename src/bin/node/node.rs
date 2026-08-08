@@ -49,6 +49,8 @@ where
     pub wg_client: Option<WgApi>,
     #[cfg(feature = "amnezia-wg")]
     pub awg_client: Option<AwgInterface>,
+    #[cfg(feature = "amnezia-wg")]
+    pub awg_mobile_client: Option<AwgInterface>,
 }
 
 impl<C> Node<C>
@@ -63,6 +65,7 @@ where
         #[cfg(feature = "xray")] handler_client: Option<Arc<Mutex<XrayHandlerClient>>>,
         #[cfg(feature = "wireguard")] wg_client: Option<WgApi>,
         #[cfg(feature = "amnezia-wg")] awg_client: Option<AwgInterface>,
+        #[cfg(feature = "amnezia-wg")] awg_mobile_client: Option<AwgInterface>,
     ) -> Self {
         let memory = Arc::new(RwLock::new(Connections::default()));
         Self {
@@ -78,6 +81,8 @@ where
             wg_client,
             #[cfg(feature = "amnezia-wg")]
             awg_client,
+            #[cfg(feature = "amnezia-wg")]
+            awg_mobile_client,
         }
     }
 }
@@ -162,6 +167,33 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         (None, None)
     };
 
+    // Second AmneziaWG interface (e.g. awg1) with the dedicated mobile pool.
+    #[cfg(feature = "amnezia-wg")]
+    let (awg_mobile_client, awg_mobile_config) = if settings.awg_mobile.enabled {
+        let raw_config = AmneziaWgServerConfig::from_file(&settings.awg_mobile.path)?;
+        let awg: AmneziaWgSettings = raw_config.try_into()?;
+
+        debug!("{:?}", awg);
+
+        let client = AwgInterface::connect(awg.interface.interface.clone())
+            .map_err(|e| Error::Custom(format!("Cannot create AWG mobile client: {}", e)))?;
+
+        // optional: validate via real netlink call
+        let _device = client
+            .get_device()
+            .map_err(|e| Error::Custom(format!("Cannot validate AWG mobile client: {}", e)))?;
+
+        if let Some(ref obf) = awg.obfuscation {
+            client.set_obfuscation_params(obf).map_err(|e| {
+                Error::Custom(format!("Cannot configure AWG mobile obfuscation: {}", e))
+            })?;
+        }
+
+        (Some(client), Some(awg))
+    } else {
+        (None, None)
+    };
+
     // Init Hysteria2
     let h2_config = if settings.h2.enabled {
         match Hysteria2Settings::from_file(&settings.h2.path) {
@@ -205,6 +237,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         wg_config,
         #[cfg(feature = "amnezia-wg")]
         awg_config,
+        #[cfg(feature = "amnezia-wg")]
+        awg_mobile_config,
         h2_config,
         mtproto_config,
     );
@@ -235,6 +269,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         wg_client.clone(),
         #[cfg(feature = "amnezia-wg")]
         awg_client.clone(),
+        #[cfg(feature = "amnezia-wg")]
+        awg_mobile_client.clone(),
     ));
 
     let metrics_endpoint = settings.metrics.endpoint.clone();
@@ -275,7 +311,7 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
 
                 #[cfg(feature = "amnezia-wg")]
                 if let Err(e) = snapshot_manager
-                    .restore_awg_connections(awg_client.clone())
+                    .restore_awg_connections(awg_client.clone(), awg_mobile_client.clone())
                     .await
                 {
                     error!("Couldn't restore AmneziaWG connections from memory, {}", e);

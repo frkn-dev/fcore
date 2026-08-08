@@ -110,6 +110,7 @@ pub async fn create_connection_inner<N, C, S>(
     memory: &MemSync<N, C, S>,
     wg_network: &IpAddrMask,
     awg_network: &IpAddrMask,
+    awg_mobile_network: &Option<IpAddrMask>,
 ) -> Result<(uuid::Uuid, Connection), String>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -140,58 +141,46 @@ where
     }
 
     let proto = match proto {
-        Tag::Wireguard => {
+        // WG-family protocols share the allocation logic; each tag draws
+        // from its own address pool.
+        Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile => {
+            let network = match proto {
+                Tag::Wireguard => wg_network,
+                Tag::AmneziaWg => awg_network,
+                Tag::AmneziaWgMobile => awg_mobile_network
+                    .as_ref()
+                    .ok_or("amnezia_wireguard_mobile_network is not configured")?,
+                _ => unreachable!(),
+            };
+
             let last_ip: Option<Ipv4Addr> = mem
                 .connections
-                .get_last_wg_addr()
+                .get_last_addr(proto)
                 .and_then(|mask| mask.as_ipv4());
 
             let next = match last_ip {
                 Some(ip) => IpAddrMask::increment_ipv4(ip),
-                None => wg_network.first_peer_ip(),
+                None => network.first_peer_ip(),
             };
 
             let next = next.ok_or("Failed to allocate IP")?;
 
-            if !wg_network.contains_ipv4(next) {
+            if !network.contains_ipv4(next) {
                 return Err("IP out of range".to_string());
             }
 
-            Proto::Wireguard {
-                param: WgParam {
-                    keys: WgKeys::default(),
-                    address: IpAddrMask {
-                        address: IpAddr::V4(next),
-                        cidr: 32,
-                    },
+            let param = WgParam {
+                keys: WgKeys::default(),
+                address: IpAddrMask {
+                    address: IpAddr::V4(next),
+                    cidr: 32,
                 },
-            }
-        }
-        Tag::AmneziaWg => {
-            let last_ip: Option<Ipv4Addr> = mem
-                .connections
-                .get_last_awg_addr()
-                .and_then(|mask| mask.as_ipv4());
-
-            let next = match last_ip {
-                Some(ip) => IpAddrMask::increment_ipv4(ip),
-                None => awg_network.first_peer_ip(),
             };
 
-            let next = next.ok_or("Failed to allocate IP")?;
-
-            if !awg_network.contains_ipv4(next) {
-                return Err("IP out of range".to_string());
-            }
-
-            Proto::AmneziaWg {
-                param: WgParam {
-                    keys: WgKeys::default(),
-                    address: IpAddrMask {
-                        address: IpAddr::V4(next),
-                        cidr: 32,
-                    },
-                },
+            match proto {
+                Tag::Wireguard => Proto::Wireguard { param },
+                Tag::AmneziaWg => Proto::AmneziaWg { param },
+                _ => Proto::AmneziaWgMobile { param },
             }
         }
         Tag::Shadowsocks => {
@@ -259,6 +248,7 @@ pub async fn create_connection_handler<N, C, S>(
     memory: MemSync<N, C, S>,
     wg_network: IpAddrMask,
     awg_network: IpAddrMask,
+    awg_mobile_network: Option<IpAddrMask>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -285,6 +275,7 @@ where
         &memory,
         &wg_network,
         &awg_network,
+        &awg_mobile_network,
     )
     .await
     {
@@ -527,7 +518,8 @@ where
                 continue;
             }
 
-            if conn.get_proto().proto() != Tag::AmneziaWg {
+            let conn_tag = conn.get_proto().proto();
+            if !matches!(conn_tag, Tag::AmneziaWg | Tag::AmneziaWgMobile) {
                 continue;
             }
 
@@ -536,7 +528,7 @@ where
                     if node.status != NodeStatus::Online {
                         continue;
                     }
-                    if let Some(inbound) = node.inbounds.get(&Tag::AmneziaWg) {
+                    if let Some(inbound) = node.inbounds.get(&conn_tag) {
                         let c: Connection = conn.clone().into();
                         let host = node.connection_host();
 

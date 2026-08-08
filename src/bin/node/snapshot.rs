@@ -27,7 +27,11 @@ pub trait SnapshotRestore {
     async fn restore_wg_connections(&self, wg_client: Option<WgApi>) -> Result<()>;
 
     #[cfg(feature = "amnezia-wg")]
-    async fn restore_awg_connections(&self, awg_client: Option<AwgInterface>) -> Result<()>;
+    async fn restore_awg_connections(
+        &self,
+        awg_client: Option<AwgInterface>,
+        awg_mobile_client: Option<AwgInterface>,
+    ) -> Result<()>;
 
     #[cfg(feature = "xray")]
     async fn restore_xray_connections(
@@ -81,7 +85,11 @@ where
     }
 
     #[cfg(feature = "amnezia-wg")]
-    async fn restore_awg_connections(&self, awg_client: Option<AwgInterface>) -> Result<()> {
+    async fn restore_awg_connections(
+        &self,
+        awg_client: Option<AwgInterface>,
+        awg_mobile_client: Option<AwgInterface>,
+    ) -> Result<()> {
         let mem = self.memory.read().await;
 
         if mem.is_empty() {
@@ -90,14 +98,25 @@ where
 
         let conns: Vec<(uuid::Uuid, C)> = mem
             .iter()
-            .filter(|(_, conn)| conn.get_proto().proto() == Tag::AmneziaWg)
+            .filter(|(_, conn)| {
+                matches!(
+                    conn.get_proto().proto(),
+                    Tag::AmneziaWg | Tag::AmneziaWgMobile
+                )
+            })
             .map(|(id, conn)| (*id, conn.clone()))
             .collect();
 
         drop(mem);
 
         for (conn_id, conn) in conns {
-            let awg_client = awg_client.clone();
+            // Each tag is served by its own interface: AmneziaWg -> awg0,
+            // AmneziaWgMobile -> the awg_mobile interface.
+            let awg_client = if conn.get_proto().proto() == Tag::AmneziaWgMobile {
+                awg_mobile_client.clone()
+            } else {
+                awg_client.clone()
+            };
 
             tokio::spawn(async move {
                 if let Some(awg) = conn.get_amneziawg() {

@@ -58,6 +58,14 @@ impl TryFrom<ConnRow> for Connection {
                 Proto::new_awg(&wg)
             }
 
+            Tag::AmneziaWgMobile => {
+                let wg = row
+                    .wg
+                    .ok_or_else(|| Error::Custom("Missing Wireguard param".into()))?;
+
+                Proto::new_awg_mobile(&wg)
+            }
+
             Tag::Wireguard => {
                 let wg = row
                     .wg

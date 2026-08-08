@@ -130,12 +130,16 @@ where
 
                 match msg.tag {
                     #[cfg(feature = "amnezia-wg")]
-                    Tag::AmneziaWg => {
+                    Tag::AmneziaWg | Tag::AmneziaWgMobile => {
                         let awg = msg.wg.clone().ok_or_else(|| {
                             Error::Custom("Missing Amnezia WireGuard keys".into())
                         })?;
 
-                        let proto = Proto::new_awg(&awg);
+                        let proto = if msg.tag == Tag::AmneziaWgMobile {
+                            Proto::new_awg_mobile(&awg)
+                        } else {
+                            Proto::new_awg(&awg)
+                        };
 
                         let conn = Connection::new(
                             proto,
@@ -153,7 +157,13 @@ where
                             })?;
                         }
 
-                        let awg_api = self.awg_client.as_ref().ok_or_else(|| {
+                        // Route peer operations to the interface matching the
+                        // connection tag: AmneziaWg -> awg0, AmneziaWgMobile -> awg1.
+                        let awg_api = match msg.tag {
+                            Tag::AmneziaWgMobile => self.awg_mobile_client.as_ref(),
+                            _ => self.awg_client.as_ref(),
+                        }
+                        .ok_or_else(|| {
                             Error::Custom("Amnezia WireGuard API is unavailable".into())
                         })?;
 
@@ -332,11 +342,12 @@ where
                 let conn_id = msg.conn_id;
                 match tag {
                     #[cfg(feature = "amnezia-wg")]
-                    Tag::AmneziaWg => {
-                        let awg_api = self
-                            .awg_client
-                            .as_ref()
-                            .ok_or_else(|| Error::Custom("AWG API is unavailable".into()))?;
+                    Tag::AmneziaWg | Tag::AmneziaWgMobile => {
+                        let awg_api = match tag {
+                            Tag::AmneziaWgMobile => self.awg_mobile_client.as_ref(),
+                            _ => self.awg_client.as_ref(),
+                        }
+                        .ok_or_else(|| Error::Custom("AWG API is unavailable".into()))?;
 
                         let wg = msg
                             .wg
@@ -439,6 +450,10 @@ where
         #[cfg(feature = "amnezia-wg")]
         if self.awg_client.is_some() {
             self.collect_awg_metrics().await;
+        }
+        #[cfg(feature = "amnezia-wg")]
+        if self.awg_mobile_client.is_some() {
+            self.collect_awg_mobile_metrics().await;
         }
     }
 }

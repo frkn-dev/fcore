@@ -224,3 +224,18 @@ CREATE TABLE IF NOT EXISTS iap_transactions (
 -- Client-generated WireGuard public key (Amnezia gateway /v1/config flow):
 -- when set, the node registers this key as the WG peer instead of the key
 -- derived from wg_privkey.
+
+-- AmneziaWgMobile: dedicated address pool (10.77.0.0/16) for mobile clients.
+ALTER TYPE proto
+ADD VALUE 'amnezia_wg_mobile';
+
+-- Backfill example: create an AmneziaWgMobile connection for every active
+-- subscription that has an AmneziaWg connection, allocating addresses from
+-- the mobile pool starting at 10.77.0.2 (first_peer_ip). Adjust envs to
+-- match enabled_conns of the api config. Keys must be generated per row
+-- (see the deploy runbook); restart api afterwards so it reloads PG state.
+-- INSERT INTO connections (id, proto, subscription_id, env, wg_privkey, wg_address)
+-- SELECT gen_random_uuid(), 'amnezia_wg_mobile', c.subscription_id, c.env,
+--        '<generated_privkey>', '10.77.0.2/32'
+-- FROM connections c
+-- WHERE c.proto = 'amnezia_wg' AND NOT c.is_deleted AND c.subscription_id IS NOT NULL;

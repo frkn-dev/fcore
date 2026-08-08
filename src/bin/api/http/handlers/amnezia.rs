@@ -232,7 +232,7 @@ fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> 
 /// Checks whether the tag matches the protocol from the client request.
 fn proto_matches(tag: Tag, protocol: &str) -> bool {
     match protocol {
-        "awg" => tag == Tag::AmneziaWg,
+        "awg" => matches!(tag, Tag::AmneziaWg | Tag::AmneziaWgMobile),
         "wireguard" => tag == Tag::Wireguard,
         "hysteria2" => tag == Tag::Hysteria2,
         "vless" => matches!(
@@ -249,7 +249,7 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
 /// Protocol label reported back to the client (api_config.service_protocol).
 fn proto_label(tag: Tag) -> &'static str {
     match tag {
-        Tag::AmneziaWg => "awg",
+        Tag::AmneziaWg | Tag::AmneziaWgMobile => "awg",
         Tag::Wireguard => "wireguard",
         Tag::Hysteria2 => "hysteria2",
         _ => "vless",
@@ -263,7 +263,7 @@ fn inbound_label(tag: Tag) -> &'static str {
         Tag::VlessGrpcReality => "VLESS gRPC Reality",
         Tag::VlessXhttpReality => "VLESS XHTTP Reality",
         Tag::VlessXhttpCdn => "VLESS XHTTP CDN",
-        Tag::AmneziaWg => "AmneziaWG",
+        Tag::AmneziaWg | Tag::AmneziaWgMobile => "AmneziaWG",
         Tag::Wireguard => "WireGuard",
         Tag::Shadowsocks => "Shadowsocks",
         Tag::Hysteria2 => "Hysteria2",
@@ -1218,7 +1218,9 @@ where
         build_wg_server_config(inbound, &conn, &client_pub_key, &host)
             .map_err(|e| http::internal_error(&format!("Failed to build WireGuard config: {e}")).into_response())?
     } else if proto_matches(conn_tag, "awg") {
-        let inbound = node.inbounds.get(&Tag::AmneziaWg).unwrap();
+        let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
+            http::internal_error("Node has no matching AmneziaWG inbound").into_response()
+        })?;
         let host = node.connection_host();
         let link = inbound
             .create_link(&conn_id, &conn, &node.hostname, &host, &node.label)
@@ -1258,7 +1260,10 @@ where
 
     // AWG and plain WireGuard are delivered gzipped (base64 STANDARD);
     // vless and hysteria2 go as plain JSON with base64url (no padding).
-    let is_gzipped = matches!(conn_tag, Tag::AmneziaWg | Tag::Wireguard);
+    let is_gzipped = matches!(
+        conn_tag,
+        Tag::AmneziaWg | Tag::AmneziaWgMobile | Tag::Wireguard
+    );
     let config_bytes = if is_gzipped {
         gzip_json(&server_config_json)
             .map_err(|_| http::internal_error("Failed to gzip config").into_response())?
@@ -1421,7 +1426,13 @@ mod tests {
         assert!(ini.contains("AllowedIPs = 0.0.0.0/0, ::/0"));
         assert!(ini.contains("PersistentKeepalive = 25"));
         for junk in ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "I1"] {
-            assert!(!ini.contains(junk), "INI must not contain {}", junk);
+            // Junk params appear as their own INI lines ("S1 = ..."), not as
+            // substrings (base64 keys may legitimately contain "S1" etc.).
+            assert!(
+                !ini.lines().any(|l| l.starts_with(&format!("{} =", junk))),
+                "INI must not contain {} as a param line",
+                junk
+            );
         }
 
         // last_config is a JSON string with the fields the client expects.

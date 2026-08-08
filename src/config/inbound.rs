@@ -242,6 +242,7 @@ impl InboundConnLink for Inbound {
             Tag::Hysteria2 => self.h2(hostname, label, conn),
             Tag::Wireguard => self.wireguard(conn_id, conn, hostname, host, label),
             Tag::AmneziaWg => self.amneziawg(conn_id, conn, hostname, host, label),
+            Tag::AmneziaWgMobile => self.amneziawg(conn_id, conn, hostname, host, label),
             Tag::Mtproto => self.mtproto(hostname, host, label),
             Tag::Vmess => self.vmess(conn_id, hostname, host, label),
             _ => Err(Error::Custom("Unsupported protocol tag".into())),

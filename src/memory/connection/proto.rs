@@ -12,6 +12,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 pub enum Proto {
     Wireguard { param: WgParam },
     AmneziaWg { param: WgParam },
+    AmneziaWgMobile { param: WgParam },
     Shadowsocks { password: String },
     Xray(Tag),
     Hysteria2 { token: uuid::Uuid },
@@ -23,6 +24,7 @@ impl Proto {
         match self {
             Proto::Wireguard { .. } => Tag::Wireguard,
             Proto::AmneziaWg { .. } => Tag::AmneziaWg,
+            Proto::AmneziaWgMobile { .. } => Tag::AmneziaWgMobile,
             Proto::Shadowsocks { .. } => Tag::Shadowsocks,
             Proto::Hysteria2 { .. } => Tag::Hysteria2,
             Proto::Xray(tag) => *tag,
@@ -49,6 +51,12 @@ impl Proto {
         }
     }
 
+    pub fn new_awg_mobile(param: &WgParam) -> Self {
+        Proto::AmneziaWgMobile {
+            param: param.clone(),
+        }
+    }
+
     pub fn new_ss(password: &str) -> Self {
         Proto::Shadowsocks {
             password: password.to_string(),
@@ -71,7 +79,7 @@ impl Proto {
     }
 
     pub fn is_amneziawg(&self) -> bool {
-        matches!(self, Proto::AmneziaWg { .. })
+        matches!(self, Proto::AmneziaWg { .. } | Proto::AmneziaWgMobile { .. })
     }
 
     pub fn is_shadowsocks(&self) -> bool {

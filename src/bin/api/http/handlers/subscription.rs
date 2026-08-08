@@ -375,8 +375,11 @@ where
 
             let awg_nodes = nodes.clone();
             let awg_node_exist = awg_nodes.is_some_and(|ns| {
-                ns.iter()
-                    .any(|n| n.inbounds.values().any(|i| i.tag == Tag::AmneziaWg))
+                ns.iter().any(|n| {
+                    n.inbounds
+                        .values()
+                        .any(|i| matches!(i.tag, Tag::AmneziaWg | Tag::AmneziaWgMobile))
+                })
             });
 
             let h2_node_exists = nodes.is_some_and(|ns| {
@@ -398,7 +401,7 @@ where
                         has_wg = true;
                     }
 
-                    if awg_node_exist && proto == Tag::AmneziaWg {
+                    if awg_node_exist && matches!(proto, Tag::AmneziaWg | Tag::AmneziaWgMobile) {
                         has_awg = true;
                     }
 

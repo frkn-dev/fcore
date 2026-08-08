@@ -84,6 +84,7 @@ impl Operations for Base {
     fn get_amneziawg(&self) -> Option<&WgParam> {
         match &self.proto {
             Proto::AmneziaWg { param, .. } => Some(param),
+            Proto::AmneziaWgMobile { param, .. } => Some(param),
             _ => None,
         }
     }
@@ -155,6 +156,7 @@ impl Operations for Conn {
     fn get_amneziawg(&self) -> Option<&WgParam> {
         match &self.proto {
             Proto::AmneziaWg { param, .. } => Some(param),
+            Proto::AmneziaWgMobile { param, .. } => Some(param),
             _ => None,
         }
     }

@@ -1,7 +1,9 @@
 use super::node::Node;
 
 #[cfg(feature = "xray")]
-use fcore::{Prefix, StatsOp, Tag};
+use fcore::{Prefix, StatsOp};
+#[cfg(any(feature = "xray", feature = "amnezia-wg"))]
+use fcore::Tag;
 
 use fcore::{ConnectionBaseOperations, HasMetrics, MetricBuffer, Node as MemNode};
 
@@ -29,6 +31,8 @@ pub trait BusinessMetrics {
     async fn collect_wg_metrics(&self);
     #[cfg(feature = "amnezia-wg")]
     async fn collect_awg_metrics(&self);
+    #[cfg(feature = "amnezia-wg")]
+    async fn collect_awg_mobile_metrics(&self);
 }
 
 #[cfg(any(feature = "wireguard", feature = "amnezia-wg"))]
@@ -202,7 +206,34 @@ where
             Some(c) => c,
             None => return,
         };
+        self.collect_awg_metrics_for(awg_client, Tag::AmneziaWg, "amneziawg")
+            .await;
+    }
 
+    #[cfg(feature = "amnezia-wg")]
+    async fn collect_awg_mobile_metrics(&self) {
+        let awg_client = match &self.awg_mobile_client {
+            Some(c) => c,
+            None => return,
+        };
+        self.collect_awg_metrics_for(awg_client, Tag::AmneziaWgMobile, "amneziawg_mobile")
+            .await;
+    }
+}
+
+#[cfg(feature = "amnezia-wg")]
+impl<C> Node<C>
+where
+    C: ConnectionBaseOperations + Send + Sync + Clone + 'static,
+{
+    /// Per-interface AmneziaWG peer stats: each tag (AmneziaWg /
+    /// AmneziaWgMobile) is served by its own interface and its own pool.
+    async fn collect_awg_metrics_for(
+        &self,
+        awg_client: &fcore::AwgInterface,
+        tag: Tag,
+        proto_label: &str,
+    ) {
         let node_uuid = self.node.uuid;
         let base_tags = self.node.get_base_tags();
 
@@ -217,6 +248,7 @@ where
         let awg_conns = {
             let mem = self.memory.read().await;
             mem.iter()
+                .filter(|(_, conn)| conn.get_proto().proto() == tag)
                 .filter_map(|(id, conn)| {
                     conn.get_amneziawg()
                         .map(|awg| (*id, conn.get_subscription_id(), awg.keys.pubkey()))
@@ -237,7 +269,7 @@ where
 
             let mut metric_tags = base_tags.clone();
             metric_tags.insert("conn_id".to_string(), conn_id.to_string());
-            metric_tags.insert("proto".to_string(), "amneziawg".to_string());
+            metric_tags.insert("proto".to_string(), proto_label.to_string());
             if let Some(subscription_id) = subscription_id {
                 metric_tags.insert("subscription_id".to_string(), subscription_id.to_string());
             }

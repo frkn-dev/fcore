@@ -40,6 +40,8 @@ pub enum ProtoTag {
     Wireguard,
     #[serde(rename = "AmneziaWg")]
     AmneziaWg,
+    #[serde(rename = "AmneziaWgMobile")]
+    AmneziaWgMobile,
     #[serde(rename = "Hysteria2")]
     Hysteria2,
     #[serde(rename = "Mtproto")]
@@ -57,6 +59,7 @@ impl fmt::Display for ProtoTag {
             ProtoTag::Shadowsocks => write!(f, "Shadowsocks"),
             ProtoTag::Wireguard => write!(f, "Wireguard"),
             ProtoTag::AmneziaWg => write!(f, "AmneziaWg"),
+            ProtoTag::AmneziaWgMobile => write!(f, "AmneziaWgMobile"),
             ProtoTag::Hysteria2 => write!(f, "Hysteria2"),
             ProtoTag::Mtproto => write!(f, "Mtproto"),
         }
@@ -70,6 +73,10 @@ impl ProtoTag {
 
     pub fn is_amneziawg(&self) -> bool {
         *self == ProtoTag::AmneziaWg
+    }
+
+    pub fn is_amneziawg_mobile(&self) -> bool {
+        *self == ProtoTag::AmneziaWgMobile
     }
 
     pub fn is_shadowsocks(&self) -> bool {
@@ -96,6 +103,7 @@ impl std::str::FromStr for ProtoTag {
             "Shadowsocks" => Ok(ProtoTag::Shadowsocks),
             "Wireguard" => Ok(ProtoTag::Wireguard),
             "AmneziaWg" => Ok(ProtoTag::AmneziaWg),
+            "AmneziaWgMobile" => Ok(ProtoTag::AmneziaWgMobile),
             "Hysteria2" => Ok(ProtoTag::Hysteria2),
             "Mtproto" => Ok(ProtoTag::Mtproto),
             _ => Err(()),

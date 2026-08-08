@@ -376,6 +376,10 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
             .and(with_param_ipaddrmask(params.amnezia_wireguard_network.clone()))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
             .and_then(premium_create_connection_handler);
 
         let premium_delete_connection_route = warp::delete()
@@ -470,6 +474,10 @@ where
             .and(with_param_ipaddrmask(
                 params.amnezia_wireguard_network.clone(),
             ))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
             .and_then(create_connection_handler);
 
         let delete_connection_route = warp::delete()
@@ -511,6 +519,10 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
             .and(with_param_ipaddrmask(params.amnezia_wireguard_network.clone()))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
             .and(warp::any().map(move || enabled_conns.clone()))
             .and(warp::any().map(move || mrkting_config.clone()))
             .and_then(post_activate_key_handler);
@@ -600,6 +612,7 @@ where
 
         let iap_wg_network = params.wireguard_network.clone();
         let iap_awg_network = params.amnezia_wireguard_network.clone();
+        let iap_awg_mobile_network = params.amnezia_wireguard_mobile_network.clone();
         let iap_enabled_conns = params.enabled_conns.clone();
         let iap_mrkting = params.mrkting.clone();
 
@@ -614,6 +627,7 @@ where
             .and(warp::any().map(move || apple_iap.clone()))
             .and(warp::any().map(move || iap_wg_network.clone()))
             .and(warp::any().map(move || iap_awg_network.clone()))
+            .and(warp::any().map(move || iap_awg_mobile_network.clone()))
             .and(warp::any().map(move || iap_enabled_conns.clone()))
             .and(warp::any().map(move || iap_mrkting.clone()))
             .and_then(
@@ -623,6 +637,7 @@ where
                  iap: Option<Arc<AppleIapClient>>,
                  wg_network: fcore::IpAddrMask,
                  awg_network: fcore::IpAddrMask,
+                 awg_mobile_network: Option<fcore::IpAddrMask>,
                  enabled_conns: Option<std::collections::HashMap<fcore::Env, Vec<fcore::Tag>>>,
                  mrkting: Option<crate::config::MrktingConfig>| async move {
                     let response = gateway_subscriptions_handler(
@@ -631,6 +646,7 @@ where
                         iap,
                         wg_network,
                         awg_network,
+                        awg_mobile_network,
                         enabled_conns,
                         mrkting,
                     )
