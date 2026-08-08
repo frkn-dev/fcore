@@ -1223,7 +1223,7 @@ where
 
         build_wg_server_config(inbound, &conn, &client_pub_key, &host)
             .map_err(|e| http::internal_error(&format!("Failed to build WireGuard config: {e}")).into_response())?
-    } else if proto_matches(conn_tag, "awg") {
+    } else if matches!(conn_tag, Tag::AmneziaWg | Tag::AmneziaWgMobile) {
         let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
             http::internal_error("Node has no matching AmneziaWG inbound").into_response()
         })?;
