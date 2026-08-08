@@ -40,12 +40,15 @@ pub enum ProtoTag {
     Wireguard,
     #[serde(rename = "AmneziaWg")]
     AmneziaWg,
-    #[serde(rename = "AmneziaWgMobile")]
-    AmneziaWgMobile,
     #[serde(rename = "Hysteria2")]
     Hysteria2,
     #[serde(rename = "Mtproto")]
     Mtproto,
+    // NOTE: keep AmneziaWgMobile LAST — rkyv discriminants follow declaration
+    // order, so appending preserves binary compatibility with older nodes/api
+    // for all pre-existing protocols.
+    #[serde(rename = "AmneziaWgMobile")]
+    AmneziaWgMobile,
 }
 
 impl fmt::Display for ProtoTag {
@@ -59,9 +62,9 @@ impl fmt::Display for ProtoTag {
             ProtoTag::Shadowsocks => write!(f, "Shadowsocks"),
             ProtoTag::Wireguard => write!(f, "Wireguard"),
             ProtoTag::AmneziaWg => write!(f, "AmneziaWg"),
-            ProtoTag::AmneziaWgMobile => write!(f, "AmneziaWgMobile"),
             ProtoTag::Hysteria2 => write!(f, "Hysteria2"),
             ProtoTag::Mtproto => write!(f, "Mtproto"),
+            ProtoTag::AmneziaWgMobile => write!(f, "AmneziaWgMobile"),
         }
     }
 }

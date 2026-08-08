@@ -12,11 +12,14 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 pub enum Proto {
     Wireguard { param: WgParam },
     AmneziaWg { param: WgParam },
-    AmneziaWgMobile { param: WgParam },
     Shadowsocks { password: String },
     Xray(Tag),
     Hysteria2 { token: uuid::Uuid },
     Mtproto { secret: String },
+    // NOTE: keep AmneziaWgMobile LAST — rkyv discriminants follow declaration
+    // order, so appending preserves binary compatibility with older nodes/api
+    // for all pre-existing protocols.
+    AmneziaWgMobile { param: WgParam },
 }
 
 impl Proto {
