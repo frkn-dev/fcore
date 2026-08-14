@@ -241,6 +241,72 @@ where
     }
 }
 
+/// Ensure the subscription has a connection for every (env, tag) pair from
+/// enabled_conns. Any existing connection of the subscription — including
+/// soft-deleted ones, which the restore flow revives on renewal — counts as
+/// present, so only genuinely missing pairs are created. Errors are logged,
+/// never propagated: this is a best-effort top-up on renewal/activation.
+pub async fn ensure_enabled_connections<N, C, S>(
+    subscription_id: uuid::Uuid,
+    enabled_conns: &Option<std::collections::HashMap<fcore::Env, Vec<Tag>>>,
+    memory: &MemSync<N, C, S>,
+    wg_network: &IpAddrMask,
+    awg_network: &IpAddrMask,
+    awg_mobile_network: &Option<IpAddrMask>,
+) where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let Some(conns_map) = enabled_conns else {
+        return;
+    };
+
+    let existing: std::collections::HashSet<(fcore::Env, Tag)> = {
+        let mem = memory.memory.read().await;
+        mem.connections
+            .get_by_subscription_id(&subscription_id)
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, conn)| (conn.get_env().clone(), conn.get_proto().proto()))
+            .collect()
+    };
+
+    for (env, tags) in conns_map {
+        for tag in tags {
+            if existing.contains(&(env.clone(), *tag)) {
+                continue;
+            }
+
+            if let Err(err) = create_connection_inner(
+                env,
+                *tag,
+                Some(subscription_id),
+                None,
+                memory,
+                wg_network,
+                awg_network,
+                awg_mobile_network,
+            )
+            .await
+            {
+                error!(
+                    "Failed to ensure connection for sub {} env {:?} tag {:?}: {}",
+                    subscription_id, env, tag, err
+                );
+            }
+        }
+    }
+}
+
 /// Handler creates connection
 // POST /connection
 pub async fn create_connection_handler<N, C, S>(

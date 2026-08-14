@@ -13,7 +13,7 @@ use super::super::{
     param::KeyQueryParams,
     request::{ActivateKeyReq, KeyReq},
 };
-use super::connection::create_connection_inner;
+use super::connection::ensure_enabled_connections;
 
 /// Get specific & validate key handler
 pub async fn get_key_validate_handler<N, C, S>(
@@ -206,27 +206,17 @@ where
                 )));
             }
 
-            let wg_net = &wg_network;
-            let awg_net = &awg_network;
-            let awg_mobile_net = &awg_mobile_network;
-
-            if let Some(conns_map) = &enabled_conns {
-                for (env, tags) in conns_map {
-                    for tag in tags {
-                        if let Err(err) = create_connection_inner(
-                            env, *tag, Some(sub_id), None, &memory, wg_net, awg_net,
-                            awg_mobile_net,
-                        )
-                        .await
-                        {
-                            tracing::error!(
-                                "Failed to create connection for sub {} env {:?} tag {:?}: {}",
-                                sub_id, env, tag, err
-                            );
-                        }
-                    }
-                }
-            }
+            // Top up connections for every enabled (env, tag): existing ones
+            // are kept, only missing protocols are created.
+            ensure_enabled_connections(
+                sub_id,
+                &enabled_conns,
+                &memory,
+                &wg_network,
+                &awg_network,
+                &awg_mobile_network,
+            )
+            .await;
 
             if let Some(mrkting) = &mrkting {
                 let client = reqwest::Client::new();

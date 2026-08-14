@@ -20,7 +20,7 @@ use super::super::super::{
     sync::{tasks::SyncOp, MemSync},
 };
 use super::amnezia::{build_gateway_config_response, GatewayConfigParams};
-use super::connection::create_connection_inner;
+use super::connection::ensure_enabled_connections;
 
 // ============================================================================
 // DTOs
@@ -402,45 +402,26 @@ where
         }
     };
 
-    let created = match ensure_subscription(&memory, &sub_id, expires_at).await {
-        Ok(created) => created,
-        Err(resp) => return Ok(resp),
-    };
+    if let Err(resp) = ensure_subscription(&memory, &sub_id, expires_at).await {
+        return Ok(resp);
+    }
 
     // 5. Extend the subscription to the exact date reported by Apple.
     if let Err(resp) = set_subscription_expiration(&memory, &sub_id, expires_at).await {
         return Ok(resp);
     }
 
-    // 6. Default connections for a freshly created subscription.
-    if created {
-        if let Some(conns_map) = &enabled_conns {
-            for (env, tags) in conns_map {
-                for tag in tags {
-                    if let Err(err) = create_connection_inner(
-                        env,
-                        *tag,
-                        Some(sub_id),
-                        None,
-                        &memory,
-                        &wg_network,
-                        &awg_network,
-                        &awg_mobile_network,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            "Failed to create connection for sub {} env {:?} tag {:?}: {}",
-                            sub_id,
-                            env,
-                            tag,
-                            err
-                        );
-                    }
-                }
-            }
-        }
-    }
+    // 6. Top up connections for every enabled (env, tag): covers freshly
+    // created subscriptions and renewals of old ones missing newer protocols.
+    ensure_enabled_connections(
+        sub_id,
+        &enabled_conns,
+        &memory,
+        &wg_network,
+        &awg_network,
+        &awg_mobile_network,
+    )
+    .await;
 
     // 7. Report to mrkting (fire-and-forget).
     if let Some(mrkting) = mrkting {

@@ -245,6 +245,10 @@ pub async fn put_subscription_handler<N, C, S>(
     req: SubReq,
     trace_id_header: Option<String>,
     memory: MemSync<N, C, S>,
+    wg_network: fcore::IpAddrMask,
+    awg_network: fcore::IpAddrMask,
+    awg_mobile_network: Option<fcore::IpAddrMask>,
+    enabled_conns: Option<std::collections::HashMap<fcore::Env, Vec<fcore::Tag>>>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -276,11 +280,26 @@ where
     ))
     .await
     {
-        Ok(Status::Updated(id)) => Ok(http::success_response(
-            format!("Subscription {} has been updated", id),
-            Some(sub_id),
-            Instance::None,
-        )),
+        Ok(Status::Updated(id)) => {
+            // Renewal (incl. reactivation of an expired sub): make sure the
+            // subscription has connections for all currently enabled
+            // protocols. Existing ones are kept, only missing are created.
+            super::connection::ensure_enabled_connections(
+                sub_id,
+                &enabled_conns,
+                &memory,
+                &wg_network,
+                &awg_network,
+                &awg_mobile_network,
+            )
+            .await;
+
+            Ok(http::success_response(
+                format!("Subscription {} has been updated", id),
+                Some(sub_id),
+                Instance::None,
+            ))
+        }
         Ok(Status::NotFound(id)) => Ok(http::not_found(&format!(
             "Subscription {} is not found",
             id

@@ -420,6 +420,8 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(post_subscription_handler);
 
+        let put_enabled_conns = params.enabled_conns.clone();
+
         let put_subscription_route = warp::put()
             .and(warp::path("subscription"))
             .and(warp::path::end())
@@ -428,6 +430,15 @@ where
             .and(warp::body::json())
             .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
+            .and(warp::any().map(move || put_enabled_conns.clone()))
             .and_then(put_subscription_handler);
 
         // Connections Routes
