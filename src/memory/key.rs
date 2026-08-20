@@ -77,6 +77,30 @@ pub enum CodeError {
     InvalidChecksum,
 }
 
+/// Decoded payload length of a v1 ("days") code.
+const CODE_V1_LEN: usize = 16;
+/// Decoded payload length of a v2 ("lite") code.
+const CODE_V2_LEN: usize = 19;
+/// Version byte marking a v2 ("lite") code payload.
+const CODE_VERSION_LITE: u8 = 0x02;
+
+/// What is cryptographically bound into a key code.
+///
+/// v1 ("days") codes carry only days; v2 ("lite") codes carry only traffic.
+/// The format is detected by the decoded payload length, the version byte
+/// inside v2 guards against future length collisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodePayload {
+    Days {
+        days: i16,
+        distributor: [u8; 4],
+    },
+    Lite {
+        traffic_gib: u32,
+        distributor: [u8; 4],
+    },
+}
+
 impl FromStr for Code {
     type Err = CodeError;
 
@@ -89,7 +113,7 @@ impl FromStr for Code {
         )
         .ok_or(CodeError::InvalidFormat)?;
 
-        if bytes.len() != 16 {
+        if bytes.len() != CODE_V1_LEN && bytes.len() != CODE_V2_LEN {
             return Err(CodeError::InvalidFormat);
         }
 
@@ -126,7 +150,41 @@ impl Code {
         Code(formatted)
     }
 
+    /// Creates a v2 ("lite") code: version byte, random, distributor and
+    /// traffic in GiB are bound into the signed payload. No days — a lite
+    /// subscription lives while it has traffic left.
+    pub fn new_lite(traffic_gib: u32, distributor: &[u8; 4], secret: &[u8]) -> Self {
+        let mut payload = Vec::with_capacity(CODE_V2_LEN - 1);
+
+        payload.push(CODE_VERSION_LITE);
+        let random: [u8; 6] = rand::random();
+        payload.extend_from_slice(&random);
+        payload.extend_from_slice(distributor);
+        payload.extend_from_slice(&traffic_gib.to_be_bytes());
+
+        let sig = Self::sign(&payload, secret);
+        payload.extend_from_slice(&sig[..3]);
+
+        let check = Self::checksum(&payload);
+        payload.push(check);
+
+        let encoded =
+            base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &payload).to_uppercase();
+
+        let formatted = Self::format(&encoded);
+
+        Code(formatted)
+    }
+
     pub fn parse(s: &str, secret: &[u8]) -> Option<(i16, [u8; 4])> {
+        match Self::parse_payload(s, secret)? {
+            CodePayload::Days { days, distributor } => Some((days, distributor)),
+            CodePayload::Lite { .. } => None,
+        }
+    }
+
+    /// Parses any supported code format, detecting it by payload length.
+    pub fn parse_payload(s: &str, secret: &[u8]) -> Option<CodePayload> {
         let raw = s.replace("-", "");
 
         let bytes = base32::decode(
@@ -134,27 +192,54 @@ impl Code {
             &raw.to_uppercase(),
         )?;
 
-        if bytes.len() != 16 {
-            return None;
+        match bytes.len() {
+            CODE_V1_LEN => {
+                let (data_with_sig, check_byte) = bytes.split_at(15);
+
+                if Self::checksum(data_with_sig) != check_byte[0] {
+                    return None;
+                }
+
+                let (data, sig) = data_with_sig.split_at(12);
+
+                // HMAC
+                if Self::sign(data, secret)[..3] != sig[..3] {
+                    return None;
+                }
+
+                let days = i16::from_be_bytes(data[6..8].try_into().ok()?);
+                let distributor = data[8..12].try_into().ok()?;
+
+                Some(CodePayload::Days { days, distributor })
+            }
+            CODE_V2_LEN => {
+                let (data_with_sig, check_byte) = bytes.split_at(18);
+
+                if Self::checksum(data_with_sig) != check_byte[0] {
+                    return None;
+                }
+
+                let (data, sig) = data_with_sig.split_at(15);
+
+                if data[0] != CODE_VERSION_LITE {
+                    return None;
+                }
+
+                // HMAC
+                if Self::sign(data, secret)[..3] != sig[..3] {
+                    return None;
+                }
+
+                let distributor = data[7..11].try_into().ok()?;
+                let traffic_gib = u32::from_be_bytes(data[11..15].try_into().ok()?);
+
+                Some(CodePayload::Lite {
+                    traffic_gib,
+                    distributor,
+                })
+            }
+            _ => None,
         }
-
-        let (data_with_sig, check_byte) = bytes.split_at(15);
-
-        if Self::checksum(data_with_sig) != check_byte[0] {
-            return None;
-        }
-
-        let (data, sig) = data_with_sig.split_at(12);
-
-        // HMAC
-        if Self::sign(data, secret)[..3] != sig[..3] {
-            return None;
-        }
-
-        let days = i16::from_be_bytes(data[6..8].try_into().ok()?);
-        let distributor = data[8..12].try_into().ok()?;
-
-        Some((days, distributor))
     }
 
     fn sign(data: &[u8], secret: &[u8]) -> Vec<u8> {
@@ -182,6 +267,13 @@ impl Code {
 
     pub fn validate(&self, secret: &[u8]) -> Result<(i16, [u8; 4]), CodeError> {
         match Self::parse(&self.0, secret) {
+            Some(data) => Ok(data),
+            None => Err(CodeError::InvalidChecksum),
+        }
+    }
+
+    pub fn validate_payload(&self, secret: &[u8]) -> Result<CodePayload, CodeError> {
+        match Self::parse_payload(&self.0, secret) {
             Some(data) => Ok(data),
             None => Err(CodeError::InvalidChecksum),
         }
@@ -355,5 +447,105 @@ mod tests {
         let code2 = Code::new(10, b"TEST", SECRET).to_string();
 
         assert_ne!(code1, code2);
+    }
+
+    #[test]
+    fn test_lite_code_generate_and_parse() {
+        let code = Code::new_lite(5, b"TEST", SECRET);
+        let parsed = Code::parse_payload(&code.to_string(), SECRET)
+            .expect("lite code should parse");
+
+        assert_eq!(
+            parsed,
+            CodePayload::Lite {
+                traffic_gib: 5,
+                distributor: *b"TEST",
+            }
+        );
+    }
+
+    #[test]
+    fn test_lite_code_is_not_v1() {
+        let code = Code::new_lite(5, b"TEST", SECRET);
+
+        // v1-only entry points must reject lite codes, not misparse them.
+        assert!(Code::parse(&code.to_string(), SECRET).is_none());
+        assert!(code.validate(SECRET).is_err());
+    }
+
+    #[test]
+    fn test_v1_code_parses_as_days_payload() {
+        let code = Code::new(30, b"TEST", SECRET);
+        let parsed = Code::parse_payload(&code.to_string(), SECRET).unwrap();
+
+        assert_eq!(
+            parsed,
+            CodePayload::Days {
+                days: 30,
+                distributor: *b"TEST",
+            }
+        );
+    }
+
+    #[test]
+    fn test_lite_code_tampered_fails() {
+        let code = Code::new_lite(5, b"TEST", SECRET);
+        let mut code_str = code.to_string();
+
+        let first = code_str.chars().next().unwrap();
+        let replacement = if first == 'A' { 'B' } else { 'A' };
+        code_str.replace_range(..1, &replacement.to_string());
+
+        assert!(Code::parse_payload(&code_str, SECRET).is_none());
+    }
+
+    #[test]
+    fn test_lite_code_bad_version_fails() {
+        // Hand-build a v2-shaped payload with a wrong version byte; HMAC is
+        // valid for this data, so only the version check can reject it.
+        let mut payload = Vec::with_capacity(CODE_V2_LEN - 1);
+        payload.push(0x03);
+        payload.extend_from_slice(&[0u8; 6]);
+        payload.extend_from_slice(b"TEST");
+        payload.extend_from_slice(&5u32.to_be_bytes());
+        let sig = {
+            let mut mac = HmacSha256::new_from_slice(SECRET).unwrap();
+            mac.update(&payload);
+            mac.finalize().into_bytes().to_vec()
+        };
+        payload.extend_from_slice(&sig[..3]);
+        let check = payload.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
+        payload.push(check);
+
+        let encoded =
+            base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &payload).to_uppercase();
+
+        assert!(Code::parse_payload(&encoded, SECRET).is_none());
+    }
+
+    #[test]
+    fn test_lite_code_traffic_bounds() {
+        let code = Code::new_lite(u32::MAX, b"TEST", SECRET);
+        let parsed = Code::parse_payload(&code.to_string(), SECRET).unwrap();
+
+        assert_eq!(
+            parsed,
+            CodePayload::Lite {
+                traffic_gib: u32::MAX,
+                distributor: *b"TEST",
+            }
+        );
+    }
+
+    #[test]
+    fn test_lite_code_accepts_formatted_and_raw() {
+        let code = Code::new_lite(5, b"TEST", SECRET);
+        let formatted = code.to_string();
+        let raw = formatted.replace("-", "").to_lowercase();
+
+        assert_eq!(
+            Code::parse_payload(&raw, SECRET),
+            Code::parse_payload(&formatted, SECRET),
+        );
     }
 }
