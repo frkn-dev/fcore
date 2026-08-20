@@ -107,6 +107,7 @@ pub async fn create_connection_inner<N, C, S>(
     proto: fcore::Tag,
     subscription_id: Option<uuid::Uuid>,
     days: Option<u16>,
+    label: Option<String>,
     memory: &MemSync<N, C, S>,
     wg_network: &IpAddrMask,
     awg_network: &IpAddrMask,
@@ -210,7 +211,7 @@ where
 
     let messages = vec![msg];
 
-    match SyncOp::add_conn(memory, &conn_id, conn.clone()).await {
+    match SyncOp::add_conn(memory, &conn_id, conn.clone(), label).await {
         Ok(Status::Ok(id)) => {
             let bytes = match rkyv::to_bytes::<_, 1024>(&messages) {
                 Ok(b) => b,
@@ -241,10 +242,27 @@ where
     }
 }
 
+/// (env, tag) pairs already covered by the subscription's *default*
+/// (unlabeled) connections. Labeled connections are user-named devices:
+/// a named "Мама Wireguard" must not count as "a default WG connection
+/// already exists" when the renewal/activation top-up runs.
+pub(crate) fn existing_default_pairs(
+    conns: &[(uuid::Uuid, fcore::Env, Tag)],
+    labels: &std::collections::HashMap<uuid::Uuid, String>,
+) -> std::collections::HashSet<(fcore::Env, Tag)> {
+    conns
+        .iter()
+        .filter(|(conn_id, _, _)| !labels.contains_key(conn_id))
+        .map(|(_, env, tag)| (env.clone(), *tag))
+        .collect()
+}
+
 /// Ensure the subscription has a connection for every (env, tag) pair from
-/// enabled_conns. Any existing connection of the subscription — including
-/// soft-deleted ones, which the restore flow revives on renewal — counts as
-/// present, so only genuinely missing pairs are created. Errors are logged,
+/// enabled_conns. Any existing *default* (unlabeled) connection of the
+/// subscription — including soft-deleted ones, which the restore flow
+/// revives on renewal — counts as present, so only genuinely missing pairs
+/// are created. Labeled (named-device) connections are ignored: they are
+/// extras on top of the defaults, not replacements. Errors are logged,
 /// never propagated: this is a best-effort top-up on renewal/activation.
 pub async fn ensure_enabled_connections<N, C, S>(
     subscription_id: uuid::Uuid,
@@ -272,12 +290,14 @@ pub async fn ensure_enabled_connections<N, C, S>(
 
     let existing: std::collections::HashSet<(fcore::Env, Tag)> = {
         let mem = memory.memory.read().await;
-        mem.connections
+        let conns: Vec<(uuid::Uuid, fcore::Env, Tag)> = mem
+            .connections
             .get_by_subscription_id(&subscription_id)
             .unwrap_or_default()
             .iter()
-            .map(|(_, conn)| (conn.get_env().clone(), conn.get_proto().proto()))
-            .collect()
+            .map(|(conn_id, conn)| (*conn_id, conn.get_env(), conn.get_proto().proto()))
+            .collect();
+        existing_default_pairs(&conns, &mem.conn_labels)
     };
 
     for (env, tags) in conns_map {
@@ -290,6 +310,7 @@ pub async fn ensure_enabled_connections<N, C, S>(
                 env,
                 *tag,
                 Some(subscription_id),
+                None,
                 None,
                 memory,
                 wg_network,
@@ -338,6 +359,7 @@ where
         conn_req.proto,
         conn_req.subscription_id,
         conn_req.days,
+        conn_req.normalized_label(),
         &memory,
         &wg_network,
         &awg_network,
@@ -521,6 +543,7 @@ where
                             result.push(serde_json::json!({
                                 "conn_id": conn_id,
                                 "label": node.label,
+                                "conn_label": mem.conn_labels.get(&conn_id),
                                 "env": node.env,
                                 "config": link
                             }));
@@ -604,6 +627,7 @@ where
                             result.push(serde_json::json!({
                                 "conn_id": conn_id,
                                 "label": node.label,
+                                "conn_label": mem.conn_labels.get(&conn_id),
                                 "env": node.env,
                                 "config": link
                             }));
@@ -662,7 +686,7 @@ where
     let mut result = vec![];
 
     if let Some(conns) = conns {
-        for (_, conn) in conns {
+        for (conn_id, conn) in conns {
             if conn.get_deleted() || conn.get_env() != req.env {
                 continue;
             }
@@ -683,6 +707,7 @@ where
                         if let Ok(url) = link {
                             result.push(serde_json::json!({
                                 "label": node.label,
+                                "conn_label": mem.conn_labels.get(&conn_id),
                                 "url": url
                             }));
                         }
@@ -695,4 +720,53 @@ where
     Ok(Box::new(warp::reply::json(&serde_json::json!({
         "connections": result
     }))))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::existing_default_pairs;
+    use fcore::{Env, Tag};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_existing_default_pairs_ignores_labeled() {
+        let default_wg = uuid::Uuid::new_v4();
+        let labeled_awg = uuid::Uuid::new_v4();
+        let labeled_h2 = uuid::Uuid::new_v4();
+
+        let conns = vec![
+            (default_wg, Env::Ru, Tag::Wireguard),
+            (labeled_awg, Env::Ru, Tag::AmneziaWg),
+            (labeled_h2, Env::Ru, Tag::Hysteria2),
+        ];
+
+        let labels: HashMap<uuid::Uuid, String> = [
+            (labeled_awg, "Мама Андроид".to_string()),
+            (labeled_h2, "Мама H2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let pairs = existing_default_pairs(&conns, &labels);
+
+        // Only the unlabeled default counts: the labeled AWG/H2 devices do
+        // not cover their (env, tag) pairs, so the top-up would still
+        // create default connections for them.
+        assert!(pairs.contains(&(Env::Ru, Tag::Wireguard)));
+        assert!(!pairs.contains(&(Env::Ru, Tag::AmneziaWg)));
+        assert!(!pairs.contains(&(Env::Ru, Tag::Hysteria2)));
+        assert_eq!(pairs.len(), 1);
+    }
+
+    #[test]
+    fn test_existing_default_pairs_no_labels() {
+        let id = uuid::Uuid::new_v4();
+        let conns = vec![(id, Env::Dev, Tag::Mtproto)];
+
+        let pairs = existing_default_pairs(&conns, &HashMap::new());
+
+        assert!(pairs.contains(&(Env::Dev, Tag::Mtproto)));
+        assert_eq!(pairs.len(), 1);
+    }
 }

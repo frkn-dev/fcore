@@ -138,7 +138,13 @@ where
 {
     async fn add_conn(&mut self, db_conn: ConnRow) -> Result<Status> {
         let conn_id = db_conn.conn_id;
+        let label = db_conn.label.clone();
         let conn: Connection = db_conn.try_into()?;
+
+        // Rebuild the conn_id -> label side map from the PG-only column.
+        if let Some(label) = label {
+            self.conn_labels.insert(conn_id, label);
+        }
 
         self.connections.add(&conn_id, conn.into()).map_err(|e| {
             format!(

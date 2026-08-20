@@ -49,6 +49,20 @@ pub struct SubscriptionResponse {
     pub monthly_uplink: i64,
     pub limit_bytes: i64,
     pub env_traffic: Vec<EnvTrafficInfo>,
+    pub connections: Vec<ConnectionInfo>,
+}
+
+/// Safe projection of a connection for the subscription-info endpoint:
+/// identity, routing metadata and the user-facing label only — never
+/// key material, addresses or tokens. Soft-deleted connections are
+/// included with `is_deleted: true` (the front hides them).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ConnectionInfo {
+    pub id: uuid::Uuid,
+    pub env: Env,
+    pub proto: Tag,
+    pub label: Option<String>,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -92,4 +106,51 @@ pub struct EnvInfo {
     pub has_mtproto: bool,
     pub has_wg: bool,
     pub has_awg: bool,
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_info_is_safe_projection() {
+        let info = ConnectionInfo {
+            id: uuid::Uuid::nil(),
+            env: Env::Ru,
+            proto: Tag::Wireguard,
+            label: Some("Мама Андроид".to_string()),
+            is_deleted: false,
+        };
+
+        let value = serde_json::to_value(&info).unwrap();
+        let obj = value.as_object().unwrap();
+
+        // Exactly these fields — the projection must never grow key
+        // material (wg_privkey), addresses or tokens.
+        let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, ["env", "id", "is_deleted", "label", "proto"]);
+
+        assert_eq!(obj["proto"], serde_json::json!("Wireguard"));
+        assert_eq!(obj["env"], serde_json::json!("ru"));
+        assert_eq!(obj["label"], serde_json::json!("Мама Андроид"));
+        assert_eq!(obj["is_deleted"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_connection_info_label_nullable() {
+        let info = ConnectionInfo {
+            id: uuid::Uuid::nil(),
+            env: Env::Ru,
+            proto: Tag::AmneziaWgMobile,
+            label: None,
+            is_deleted: true,
+        };
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["label"], serde_json::Value::Null);
+        assert_eq!(value["proto"], serde_json::json!("AmneziaWgMobile"));
+        assert_eq!(value["is_deleted"], serde_json::json!(true));
+    }
 }

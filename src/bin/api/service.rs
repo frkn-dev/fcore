@@ -81,6 +81,11 @@ where
     pub connections: Connections<C>,
     pub subscriptions: Subscriptions<S>,
     pub nodes: T,
+    /// User-facing labels of named connections ("devices"), keyed by
+    /// conn_id. Loaded from the PG-only `connections.label` column (never
+    /// part of the rkyv payload) and maintained on create/delete/full
+    /// reload. Absent entry = system/default connection.
+    pub conn_labels: std::collections::HashMap<uuid::Uuid, String>,
 }
 
 impl<T: Default, C, S: Default + PartialEq> Default for Cache<T, C, S>
@@ -117,6 +122,7 @@ where
             nodes: T::default(),
             connections: Connections::default(),
             subscriptions: Subscriptions::default(),
+            conn_labels: std::collections::HashMap::new(),
         }
     }
 }

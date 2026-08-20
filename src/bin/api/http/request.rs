@@ -161,10 +161,33 @@ pub struct ConnCreateRequest {
     pub subscription_id: Option<uuid::Uuid>,
     pub proto: Tag,
     pub days: Option<u16>,
+    /// Optional user-facing name for a "named device" connection
+    /// (e.g. "Мама Андроид"). None = system/default connection.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 impl ConnCreateRequest {
+    /// Trimmed label, or None when it is absent or blank. Used both for
+    /// validation and for persistence so the two never disagree.
+    pub fn normalized_label(&self) -> Option<String> {
+        self.label
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
+        if let Some(label) = self.normalized_label() {
+            // A non-empty trimmed label is at least 1 char, so only the
+            // upper bound can fail here. Counted in chars, not bytes:
+            // labels are user-facing names and may be Cyrillic.
+            if label.chars().count() > 64 {
+                return Err(Error::Custom("label must be 1..=64 characters".into()));
+            }
+        }
+
         Ok(())
     }
 }
@@ -262,5 +285,60 @@ pub struct ConnectionInfoRequest {
 impl ConnectionInfoRequest {
     pub fn validate(&self) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_label(label: Option<&str>) -> ConnCreateRequest {
+        ConnCreateRequest {
+            env: Env::Ru,
+            subscription_id: None,
+            proto: Tag::Wireguard,
+            days: None,
+            label: label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_label_absent_is_valid() {
+        let req = req_with_label(None);
+        assert!(req.validate().is_ok());
+        assert_eq!(req.normalized_label(), None);
+    }
+
+    #[test]
+    fn test_label_blank_becomes_none() {
+        for blank in ["", "   ", "\t \n"] {
+            let req = req_with_label(Some(blank));
+            assert!(req.validate().is_ok());
+            assert_eq!(req.normalized_label(), None);
+        }
+    }
+
+    #[test]
+    fn test_label_is_trimmed() {
+        let req = req_with_label(Some("  Мама Андроид  "));
+        assert!(req.validate().is_ok());
+        assert_eq!(req.normalized_label().as_deref(), Some("Мама Андроид"));
+    }
+
+    #[test]
+    fn test_label_max_length_ok() {
+        let label = "я".repeat(64);
+        let req = req_with_label(Some(&label));
+        assert!(req.validate().is_ok());
+        assert_eq!(req.normalized_label().as_deref(), Some(label.as_str()));
+    }
+
+    #[test]
+    fn test_label_too_long_rejected() {
+        // 65 Cyrillic chars = 130 bytes: the limit counts characters.
+        let label = "я".repeat(65);
+        let req = req_with_label(Some(&label));
+        assert!(req.validate().is_err());
     }
 }

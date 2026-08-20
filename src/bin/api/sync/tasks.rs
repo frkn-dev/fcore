@@ -50,7 +50,12 @@ where
 {
     async fn add_node(&self, node_id: &uuid::Uuid, node: Node) -> SyncResult<Status>;
     async fn delete_node(&self, uuid: &uuid::Uuid) -> SyncResult<Status>;
-    async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status>;
+    async fn add_conn(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: Connection,
+        label: Option<String>,
+    ) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
     async fn delete_connection(&self, conn_id: &uuid::Uuid, conn: &C) -> SyncResult<Status>;
     async fn restore_connection(&self, conn_id: &uuid::Uuid) -> SyncResult<Status>;
@@ -224,14 +229,22 @@ where
         }
     }
 
-    async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status> {
+    async fn add_conn(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: Connection,
+        label: Option<String>,
+    ) -> SyncResult<Status> {
         info!("Adding connection: {}", conn_id);
 
         // Validate input
         conn.validate()?;
 
-        // Create database row
-        let conn_row: ConnRow = (*conn_id, conn.clone()).into();
+        // Create database row. The label is PG-only (connections.label):
+        // it is persisted here and mirrored into the api-side conn_labels
+        // side map, but never becomes part of the rkyv payload to nodes.
+        let mut conn_row: ConnRow = (*conn_id, conn.clone()).into();
+        conn_row.label = label.clone();
 
         // Insert into database first
         if let Err(e) = self.db.conn().insert(conn_row).await {
@@ -245,6 +258,9 @@ where
         // Insert into memory
         let result = {
             let mut memory = self.memory.write().await;
+            if let Some(label) = label {
+                memory.conn_labels.insert(*conn_id, label);
+            }
             ConnectionStorageApiOperations::add(
                 &mut memory.connections,
                 conn_id,
@@ -338,6 +354,10 @@ where
                     conn_id
                 );
             }
+            // The label is per-device; a deleted device drops it from the
+            // side map (PG keeps the column, so a full reload or a restore
+            // followed by a periodic sync re-populates it).
+            memory.conn_labels.remove(conn_id);
         }
 
         info!("Successfully completed deletion flow for: {}", conn_id);

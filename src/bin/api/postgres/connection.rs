@@ -24,6 +24,10 @@ pub struct ConnRow {
     pub proto: Tag,
     pub token: Option<uuid::Uuid>,
     is_deleted: bool,
+    /// User-facing name of a "named device" connection. PG-only: never put
+    /// into `Connection`/`Conn` so it cannot cross the rkyv wire to nodes
+    /// (same precedent as `deleted_reason`).
+    pub label: Option<String>,
 }
 
 impl From<(uuid::Uuid, Connection)> for ConnRow {
@@ -41,6 +45,9 @@ impl From<(uuid::Uuid, Connection)> for ConnRow {
             proto: conn.get_proto().proto(),
             token: conn.get_token(),
             is_deleted: conn.is_deleted,
+            // The label never lives on `Connection`; callers that have one
+            // set it on the row explicitly (see SyncOp::add_conn).
+            label: None,
         }
     }
 }
@@ -140,7 +147,8 @@ impl PgConn {
             proto,
             wg_privkey,
             wg_address,
-            is_deleted
+            is_deleted,
+            label
         FROM connections
     ";
 
@@ -164,6 +172,7 @@ impl PgConn {
                 let wg_privkey: Option<String> = row.get("wg_privkey");
                 let wg_address: Option<String> = row.get("wg_address");
                 let is_deleted: bool = row.get("is_deleted");
+                let label: Option<String> = row.get("label");
 
                 let wg = match (wg_privkey, wg_address) {
                     (Some(privkey), Some(address)) => {
@@ -187,6 +196,7 @@ impl PgConn {
                     proto,
                     wg,
                     is_deleted,
+                    label,
                 }
             })
             .collect()
@@ -231,11 +241,12 @@ impl PgConn {
             is_deleted,
             wg_privkey,
             wg_address,
-            token
+            token,
+            label
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12
+            $11, $12, $13
         )
     ";
 
@@ -255,6 +266,7 @@ impl PgConn {
                     &conn.wg.as_ref().map(|w| &w.keys.privkey),
                     &conn.wg.as_ref().map(|w| w.address.to_string()),
                     &conn.token,
+                    &conn.label,
                 ],
             )
             .await;

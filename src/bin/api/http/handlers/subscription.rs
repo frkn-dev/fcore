@@ -9,8 +9,8 @@ use warp::http::{Response, StatusCode};
 use fcore::http::{
     helpers as http,
     response::{
-        EnvInfo, EnvTrafficHistoryBucket, EnvTrafficInfo, Instance, SubscriptionResponse,
-        SubscriptionTrafficHistoryResponse, TrafficHistoryBucket,
+        ConnectionInfo, EnvInfo, EnvTrafficHistoryBucket, EnvTrafficInfo, Instance,
+        SubscriptionResponse, SubscriptionTrafficHistoryResponse, TrafficHistoryBucket,
     },
     ResponseMessage,
 };
@@ -447,6 +447,21 @@ where
     let expires = sub.expires_at().unwrap_or_default();
     let days = sub.days_remaining().unwrap_or(0);
     let ref_code = sub.refer_code();
+
+    // Safe projection of every connection of the subscription (soft-deleted
+    // included, the front hides them) with the user-facing device label
+    // from the side map — no key material, addresses or tokens.
+    let connections: Vec<ConnectionInfo> = connections
+        .unwrap_or_default()
+        .iter()
+        .map(|(conn_id, conn)| ConnectionInfo {
+            id: *conn_id,
+            env: conn.get_env(),
+            proto: conn.get_proto().proto(),
+            label: mem.conn_labels.get(conn_id).cloned(),
+            is_deleted: conn.get_deleted(),
+        })
+        .collect();
     drop(mem);
 
     let traffic =
@@ -512,6 +527,7 @@ where
         monthly_uplink: traffic.monthly.uplink as i64,
         limit_bytes,
         env_traffic,
+        connections,
     };
 
     Ok(Box::new(warp::reply::json(&sub_resp)))
@@ -610,6 +626,20 @@ fn is_url_safe_punctuation(c: char) -> bool {
             | '~'
             | '\n'
     )
+}
+
+/// Share-link fragment label for a connection: a named device prefixes the
+/// node/cluster label ("Мама Андроид | NL-1"), a default connection keeps
+/// the plain node/cluster label.
+fn conn_link_label(
+    labels: &HashMap<uuid::Uuid, String>,
+    conn_id: &uuid::Uuid,
+    node_label: String,
+) -> String {
+    match labels.get(conn_id) {
+        Some(label) => format!("{} | {}", label, node_label),
+        None => node_label,
+    }
 }
 
 pub async fn subscription_link_handler<N, C, S>(
@@ -714,7 +744,11 @@ where
                             conn.clone(),
                             node.hostname.clone(),
                             node.connection_host(),
-                            node.cluster.clone().unwrap_or(node.label.clone()),
+                            conn_link_label(
+                                &mem.conn_labels,
+                                conn_id,
+                                node.cluster.clone().unwrap_or(node.label.clone()),
+                            ),
                         ));
                     }
                 }
@@ -739,7 +773,11 @@ where
                             conn.clone(),
                             node.hostname.clone(),
                             node.connection_host(),
-                            node.cluster.clone().unwrap_or(node.label.clone()),
+                            conn_link_label(
+                                &mem.conn_labels,
+                                conn_id,
+                                node.cluster.clone().unwrap_or(node.label.clone()),
+                            ),
                         ));
                     }
                 }
@@ -1000,4 +1038,34 @@ where
     };
 
     Ok(Box::new(warp::reply::json(&response)))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::conn_link_label;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_conn_link_label_named_device_prefixes_node_label() {
+        let conn_id = uuid::Uuid::new_v4();
+        let labels: HashMap<uuid::Uuid, String> = [(conn_id, "Мама Андроид".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            conn_link_label(&labels, &conn_id, "NL-1".to_string()),
+            "Мама Андроид | NL-1"
+        );
+    }
+
+    #[test]
+    fn test_conn_link_label_default_keeps_node_label() {
+        let labels = HashMap::new();
+
+        assert_eq!(
+            conn_link_label(&labels, &uuid::Uuid::new_v4(), "NL-1".to_string()),
+            "NL-1"
+        );
+    }
 }

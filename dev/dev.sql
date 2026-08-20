@@ -239,3 +239,13 @@ ADD VALUE 'amnezia_wg_mobile';
 --        '<generated_privkey>', '10.77.0.2/32'
 -- FROM connections c
 -- WHERE c.proto = 'amnezia_wg' AND NOT c.is_deleted AND c.subscription_id IS NOT NULL;
+
+
+-- Named devices: user-facing label for extra named connections a user
+-- creates on their subscription (e.g. "Мама Андроид"). NULL means a
+-- system/default connection created by the backend. PG-only on purpose:
+-- the label never crosses the rkyv wire to the nodes (same precedent as
+-- deleted_reason); the api keeps it in an in-memory conn_id -> label side
+-- map rebuilt from this column.
+ALTER TABLE connections
+    ADD COLUMN IF NOT EXISTS label TEXT;
