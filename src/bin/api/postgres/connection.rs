@@ -192,13 +192,14 @@ impl PgConn {
             .collect()
     }
 
-    pub async fn delete(&self, conn_id: &uuid::Uuid) -> Result<()> {
+    pub async fn delete(&self, conn_id: &uuid::Uuid, reason: Option<&str>) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
-        let query = "UPDATE connections SET is_deleted = true WHERE id = $1";
+        let query =
+            "UPDATE connections SET is_deleted = true, deleted_reason = $2 WHERE id = $1";
 
-        client.execute(query, &[conn_id]).await?;
+        client.execute(query, &[conn_id, &reason]).await?;
 
         Ok(())
     }
@@ -207,11 +208,36 @@ impl PgConn {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
-        let query = "UPDATE connections SET is_deleted = false WHERE id = $1";
+        // The reason only matters while the connection is deleted; a revived
+        // connection starts clean so a later delete records a fresh reason.
+        let query =
+            "UPDATE connections SET is_deleted = false, deleted_reason = NULL WHERE id = $1";
 
         client.execute(query, &[conn_id]).await?;
 
         Ok(())
+    }
+
+    /// Soft-deletion reasons of all currently deleted connections of a
+    /// subscription. The restore flow gates revivals on this.
+    pub async fn deleted_reasons_for_subscription(
+        &self,
+        subscription_id: &uuid::Uuid,
+    ) -> Result<Vec<(uuid::Uuid, Option<String>)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                "SELECT id, deleted_reason FROM connections WHERE subscription_id = $1 AND is_deleted",
+                &[subscription_id],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("id"), row.get("deleted_reason")))
+            .collect())
     }
 
     pub async fn insert(&self, conn: ConnRow) -> Result<()> {

@@ -61,6 +61,9 @@ db_sync_interval_sec = 1000
 subscription_restore_interval = 600
 subscription_expire_interval = 600
 traffic_persist_interval_sec = 3600
+# Lite tariff: how often lite subscriptions are checked against their
+# traffic limit (default 300).
+# traffic_limit_interval_sec = 300
 connection_expire_interval = 600
 monitor_nodes_interval = 60
 heartbeat_node_offline_threshold_sec = 120

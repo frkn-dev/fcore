@@ -257,3 +257,9 @@ CREATE TABLE IF NOT EXISTS traffic_topups (
 --        '<generated_privkey>', '10.77.0.2/32'
 -- FROM connections c
 -- WHERE c.proto = 'amnezia_wg' AND NOT c.is_deleted AND c.subscription_id IS NOT NULL;
+
+-- Lite enforcement: why a connection was soft-deleted. NULL means a legacy
+-- row (pre-column) and is treated like 'expired' by the restore flow.
+-- Known reasons: 'expired', 'manual', 'traffic_exhausted', 'device_kick'.
+ALTER TABLE connections
+    ADD COLUMN IF NOT EXISTS deleted_reason TEXT;

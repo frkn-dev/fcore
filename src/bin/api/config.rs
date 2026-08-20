@@ -147,6 +147,9 @@ pub struct TasksConfig {
     pub heartbeat_node_offline_threshold_sec: u64,
     #[serde(default = "default_traffic_persist_interval_sec")]
     pub traffic_persist_interval_sec: u64,
+    /// How often lite subscriptions are checked against their traffic limit.
+    #[serde(default = "default_traffic_limit_interval_sec")]
+    pub traffic_limit_interval_sec: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -205,4 +208,8 @@ pub struct MetricsRxConfig {
 
 fn default_traffic_persist_interval_sec() -> u64 {
     3600
+}
+
+fn default_traffic_limit_interval_sec() -> u64 {
+    300
 }

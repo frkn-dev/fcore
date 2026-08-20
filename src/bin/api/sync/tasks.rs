@@ -1,5 +1,6 @@
 use chrono::{Duration, Utc};
 use futures::future::join_all;
+use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
 use fcore::{
@@ -16,6 +17,33 @@ use super::super::{
 use super::MemSync;
 
 type SyncResult<T> = std::result::Result<T, SyncError>;
+
+/// Why a connection was soft-deleted (`connections.deleted_reason`). NULL
+/// means a legacy row (pre-column) and is treated like `DELETE_REASON_EXPIRED`
+/// by the restore flow.
+pub const DELETE_REASON_EXPIRED: &str = "expired";
+pub const DELETE_REASON_MANUAL: &str = "manual";
+pub const DELETE_REASON_TRAFFIC_EXHAUSTED: &str = "traffic_exhausted";
+pub const DELETE_REASON_DEVICE_KICK: &str = "device_kick";
+
+/// Whether a soft-deleted connection may be revived by the restore flow.
+/// Legacy (NULL) and expired connections revive as before; a lite connection
+/// killed for traffic exhaustion revives only once the subscription is back
+/// under its limit (top-up); a device-kicked connection never revives — the
+/// device worker issues a replacement instead.
+pub(crate) fn connection_restorable(
+    deleted_reason: Option<&str>,
+    used_bytes: i64,
+    limit_bytes: Option<i64>,
+) -> bool {
+    match deleted_reason {
+        None | Some(DELETE_REASON_EXPIRED) => true,
+        Some(DELETE_REASON_TRAFFIC_EXHAUSTED) => {
+            limit_bytes.map(|limit| used_bytes < limit).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
 
 // Input validation traits
 trait Validate {
@@ -52,7 +80,12 @@ where
     async fn delete_node(&self, uuid: &uuid::Uuid) -> SyncResult<Status>;
     async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
-    async fn delete_connection(&self, conn_id: &uuid::Uuid, conn: &C) -> SyncResult<Status>;
+    async fn delete_connection(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: &C,
+        reason: Option<&str>,
+    ) -> SyncResult<Status>;
     async fn restore_connection(&self, conn_id: &uuid::Uuid) -> SyncResult<Status>;
     async fn update_node_status(
         &self,
@@ -284,8 +317,16 @@ where
         }
     }
 
-    async fn delete_connection(&self, conn_id: &uuid::Uuid, conn: &C) -> SyncResult<Status> {
-        info!("Starting deletion process for connection: {}", conn_id);
+    async fn delete_connection(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: &C,
+        reason: Option<&str>,
+    ) -> SyncResult<Status> {
+        info!(
+            "Starting deletion process for connection: {} (reason: {:?})",
+            conn_id, reason
+        );
 
         {
             let memory = self.memory.read().await;
@@ -300,7 +341,7 @@ where
             }
         }
 
-        if let Err(e) = self.db.conn().delete(conn_id).await {
+        if let Err(e) = self.db.conn().delete(conn_id, reason).await {
             error!(
                 "CRITICAL: Failed to delete connection {} from DB: {}",
                 conn_id, e
@@ -378,6 +419,71 @@ where
                 None => Vec::new(),
             }
         };
+
+        if conns_to_restore.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Gate revivals on the soft-deletion reason persisted in PG: expired
+        // (and legacy NULL) connections revive as before, traffic-exhausted
+        // lite connections revive only when the subscription is back under
+        // its limit, device-kicked ones never do.
+        let reasons: HashMap<uuid::Uuid, Option<String>> = match self
+            .db
+            .conn()
+            .deleted_reasons_for_subscription(sub_id)
+            .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                error!(
+                    "Failed to load deletion reasons for subscription {}: {}",
+                    sub_id, e
+                );
+                return Err(SyncError::Database(e));
+            }
+        };
+
+        let limit_bytes = {
+            let mem = self.memory.read().await;
+            mem.subscriptions
+                .find_by_id(sub_id)
+                .and_then(|s| s.limit_bytes())
+        };
+
+        let needs_used_bytes = conns_to_restore.iter().any(|(id, _)| {
+            reasons.get(id).and_then(|r| r.as_deref()) == Some(DELETE_REASON_TRAFFIC_EXHAUSTED)
+        });
+
+        let used_bytes = if needs_used_bytes {
+            match self.db.traffic().total_for_subscription(*sub_id).await {
+                Ok((uplink, downlink)) => uplink + downlink,
+                Err(e) => {
+                    error!(
+                        "Failed to load traffic total for subscription {}: {}",
+                        sub_id, e
+                    );
+                    return Err(SyncError::Database(e));
+                }
+            }
+        } else {
+            0
+        };
+
+        let conns_to_restore: Vec<(uuid::Uuid, Connection)> = conns_to_restore
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                let reason = reasons.get(conn_id).and_then(|r| r.as_deref());
+                let restorable = connection_restorable(reason, used_bytes, limit_bytes);
+                if !restorable {
+                    debug!(
+                        "Connection {} not restored (reason: {:?})",
+                        conn_id, reason
+                    );
+                }
+                restorable
+            })
+            .collect();
 
         if conns_to_restore.is_empty() {
             return Ok(vec![]);
@@ -712,4 +818,64 @@ where
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_restorable_legacy_and_expired() {
+        // Legacy rows (NULL) and expired connections revive regardless of
+        // traffic — this preserves the pre-reason restore semantics.
+        assert!(connection_restorable(None, 0, None));
+        assert!(connection_restorable(None, 100, Some(10)));
+        assert!(connection_restorable(Some(DELETE_REASON_EXPIRED), 0, None));
+        assert!(connection_restorable(
+            Some(DELETE_REASON_EXPIRED),
+            100,
+            Some(10)
+        ));
+    }
+
+    #[test]
+    fn test_connection_restorable_traffic_exhausted() {
+        let limit = Some(100);
+        // Over or at the limit: stays deleted.
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            100,
+            limit
+        ));
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            150,
+            limit
+        ));
+        // Topped up back under the limit: revives.
+        assert!(connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            99,
+            limit
+        ));
+        // No limit recorded: cannot prove it is under the limit, stay deleted.
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            0,
+            None
+        ));
+    }
+
+    #[test]
+    fn test_connection_restorable_device_kick_and_unknown() {
+        // Device-kicked connections never revive; unknown reasons are
+        // treated conservatively the same way.
+        assert!(!connection_restorable(Some(DELETE_REASON_DEVICE_KICK), 0, None));
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_DEVICE_KICK),
+            0,
+            Some(100)
+        ));
+        assert!(!connection_restorable(Some("something_else"), 0, None));
+    }
 }

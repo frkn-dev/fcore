@@ -147,6 +147,15 @@ where
             }
         });
 
+        spawn_task("enforce_traffic_limits", {
+            let interval = self.settings.tasks.traffic_limit_interval_sec;
+            let service = Arc::clone(&self);
+
+            async move {
+                service.enforce_traffic_limits(interval).await;
+            }
+        });
+
         spawn_task("metric_worker", {
             let metrics = Arc::clone(&self.metrics);
             let receiver = self.settings.metrics.reciever.clone();

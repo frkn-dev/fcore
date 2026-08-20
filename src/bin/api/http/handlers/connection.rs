@@ -16,7 +16,10 @@ use fcore::{
 };
 
 use super::super::{
-    super::sync::{tasks::SyncOp, MemSync},
+    super::sync::{
+        tasks::{SyncOp, DELETE_REASON_MANUAL},
+        MemSync,
+    },
     param::ConnQueryParam,
     request::{ConnCreateRequest, ConnectionInfoRequest},
 };
@@ -400,7 +403,7 @@ where
         )));
     }
 
-    match SyncOp::delete_connection(&memory, &conn_id, &conn).await {
+    match SyncOp::delete_connection(&memory, &conn_id, &conn, Some(DELETE_REASON_MANUAL)).await {
         Ok(Status::Ok(id)) => Ok(http::success_response(
             format!("Connection {} has been deleted", id),
             Some(id),

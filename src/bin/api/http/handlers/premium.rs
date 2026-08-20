@@ -8,7 +8,10 @@ use warp::{http::StatusCode, Rejection, Reply};
 
 use super::super::super::{
     subscription_audit,
-    sync::{tasks::SyncOp, MemSync},
+    sync::{
+        tasks::{SyncOp, DELETE_REASON_MANUAL},
+        MemSync,
+    },
 };
 use super::admin::AdminSubscriptionTraffic;
 use super::subscription::build_subscription_traffic;
@@ -534,7 +537,7 @@ where
         conn.clone()
     };
 
-    match SyncOp::delete_connection(&memory, &conn_id, &conn).await {
+    match SyncOp::delete_connection(&memory, &conn_id, &conn, Some(DELETE_REASON_MANUAL)).await {
         Ok(_) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({})),
             StatusCode::NO_CONTENT,

@@ -14,6 +14,7 @@ mod config;
 mod http;
 mod iap;
 mod metrics;
+mod mrkting;
 mod postgres;
 mod runtime;
 mod service;

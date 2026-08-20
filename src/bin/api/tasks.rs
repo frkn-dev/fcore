@@ -7,15 +7,16 @@ use tracing::{debug, error, info, warn};
 
 use fcore::{
     measure_time, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, Env, NodeStatus, NodeStorageOperations, Result, Status,
-    Subscription, SubscriptionOperations, SubscriptionStorageOperations,
+    ConnectionStorageApiOperations, Env, NodeStatus, NodeStorageOperations, PlanKind, Result,
+    Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use super::{
+    mrkting,
     postgres::{connection::ConnWatermark, pg::Tasks as MemoryCacheTasks},
     service::{Cache, Service},
     subscription_audit,
-    sync::tasks::SyncOp,
+    sync::tasks::{SyncOp, DELETE_REASON_EXPIRED, DELETE_REASON_TRAFFIC_EXHAUSTED},
     traffic,
 };
 
@@ -28,6 +29,7 @@ pub trait Tasks {
     async fn restore_subscriptions(&self, interval_sec: u64);
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
     async fn persist_connection_traffic(&self, interval_sec: u64);
+    async fn enforce_traffic_limits(&self, interval_sec: u64);
 }
 
 #[async_trait::async_trait]
@@ -94,7 +96,11 @@ where
                 let expires_at = conn.get_expires_at();
                 let subscription_id = conn.get_subscription_id();
 
-                match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into(),
+                match SyncOp::delete_connection(
+                    &self.sync,
+                    &conn_id,
+                    &conn.into(),
+                    Some(DELETE_REASON_EXPIRED),
                 )
                 .await
                 {
@@ -159,7 +165,11 @@ where
                 let connections_count = conns_to_delete.len();
 
                 for (conn_id, conn) in conns_to_delete {
-                    match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into(),
+                    match SyncOp::delete_connection(
+                        &self.sync,
+                        &conn_id,
+                        &conn.into(),
+                        Some(DELETE_REASON_EXPIRED),
                     )
                     .await
                     {
@@ -216,6 +226,115 @@ where
                     Err(e) => {
                         error!("Failed to restore expired connection {}: {:?}", sub_id, e);
                     }
+                }
+            }
+        }
+    }
+
+    async fn enforce_traffic_limits(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            debug!("Run enforce traffic limits task");
+
+            // Lite subscriptions with a traffic limit that still have at
+            // least one live connection. The live-connection guard doubles
+            // as the notification guard: an already-exhausted sub has all
+            // connections deleted and must not re-notify every tick.
+            let lite_subs: Vec<(uuid::Uuid, i64, Vec<(uuid::Uuid, Connection)>)> = {
+                let mem = self.sync.memory.read().await;
+                mem.subscriptions
+                    .iter()
+                    .filter(|(_, sub)| {
+                        sub.plan_kind() == PlanKind::Lite && sub.limit_bytes().is_some()
+                    })
+                    .filter_map(|(sub_id, sub)| {
+                        let conns: Vec<(uuid::Uuid, Connection)> = mem
+                            .connections
+                            .get_by_subscription_id(sub_id)
+                            .map(|conns| {
+                                conns
+                                    .iter()
+                                    .filter(|(_, c)| !c.get_deleted())
+                                    .map(|(id, c)| (*id, c.clone().into()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        if conns.is_empty() {
+                            None
+                        } else {
+                            Some((*sub_id, sub.limit_bytes().unwrap_or_default(), conns))
+                        }
+                    })
+                    .collect()
+            };
+
+            for (sub_id, limit_bytes, conns) in lite_subs {
+                let (uplink, downlink) =
+                    match self.sync.db.traffic().total_for_subscription(sub_id).await {
+                        Ok(total) => total,
+                        Err(e) => {
+                            error!(
+                                "Failed to load traffic total for subscription {}: {}",
+                                sub_id, e
+                            );
+                            continue;
+                        }
+                    };
+                let used_bytes = uplink + downlink;
+
+                if used_bytes < limit_bytes {
+                    continue;
+                }
+
+                info!(
+                    "Lite subscription {} exhausted its traffic limit ({} >= {} bytes), deleting {} connections",
+                    sub_id,
+                    used_bytes,
+                    limit_bytes,
+                    conns.len()
+                );
+
+                for (conn_id, conn) in conns {
+                    match SyncOp::delete_connection(
+                        &self.sync,
+                        &conn_id,
+                        &conn.into(),
+                        Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+                    )
+                    .await
+                    {
+                        Ok(Status::Ok(_)) => {
+                            info!("Traffic-exhausted connection {} deleted", conn_id);
+                        }
+                        Ok(status) => {
+                            warn!(
+                                "Connection {} could not be deleted: {:?}",
+                                conn_id, status
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to delete traffic-exhausted connection {}: {:?}",
+                                conn_id, e
+                            );
+                        }
+                    }
+                }
+
+                if let Some(mrkting_config) = &self.settings.service.mrkting {
+                    mrkting::send_lite_event(
+                        mrkting_config,
+                        serde_json::json!({
+                            "type": "traffic_exhausted",
+                            "subscription_id": sub_id,
+                            "used_bytes": used_bytes,
+                            "limit_bytes": limit_bytes,
+                        }),
+                    )
+                    .await;
                 }
             }
         }
