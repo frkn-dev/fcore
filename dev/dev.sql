@@ -229,6 +229,15 @@ CREATE TABLE IF NOT EXISTS iap_transactions (
 ALTER TYPE proto
 ADD VALUE 'amnezia_wg_mobile';
 
+-- Lite tariff: traffic-only keys (v2 codes, no days) and subscriptions that
+-- live while they have traffic left (expires_at stays NULL).
+ALTER TABLE keys
+    ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'standard',
+    ADD COLUMN IF NOT EXISTS traffic_bytes BIGINT;
+
+ALTER TABLE subscriptions
+    ADD COLUMN IF NOT EXISTS plan_kind TEXT NOT NULL DEFAULT 'standard';
+
 -- Backfill example: create an AmneziaWgMobile connection for every active
 -- subscription that has an AmneziaWg connection, allocating addresses from
 -- the mobile pool starting at 10.77.0.2 (first_peer_ip). Adjust envs to

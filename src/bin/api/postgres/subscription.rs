@@ -55,12 +55,13 @@ impl PgSubscription {
         let ref_code = new_sub.refer_code.clone();
 
         let scope_env: Option<String> = new_sub.scope_env.as_ref().map(|e| e.to_string());
+        let plan_kind = new_sub.plan_kind.to_string();
         let row = client
             .query_one(
                 r#"
             INSERT INTO subscriptions
-            (id, expires_at, refer_code, parent_id, scope_env, premium_token)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (id, expires_at, refer_code, parent_id, scope_env, premium_token, plan_kind, limit_bytes)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             "#,
                 &[
@@ -70,6 +71,8 @@ impl PgSubscription {
                     &new_sub.parent_id,
                     &scope_env,
                     &new_sub.premium_token,
+                    &plan_kind,
+                    &new_sub.limit_bytes,
                 ],
             )
             .await?;

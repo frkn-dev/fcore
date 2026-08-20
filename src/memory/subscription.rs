@@ -9,6 +9,42 @@ use crate::utils::get_uuid_last_octet_simple;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
+
+/// Billing plan of a subscription. Standard plans expire by time; a lite
+/// subscription has no time expiry (expires_at IS NULL) and lives while it
+/// has traffic left. Premium is reserved, not used yet.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanKind {
+    #[default]
+    Standard,
+    Lite,
+    Premium,
+}
+
+impl fmt::Display for PlanKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PlanKind::Standard => write!(f, "standard"),
+            PlanKind::Lite => write!(f, "lite"),
+            PlanKind::Premium => write!(f, "premium"),
+        }
+    }
+}
+
+impl FromStr for PlanKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "standard" => Ok(PlanKind::Standard),
+            "lite" => Ok(PlanKind::Lite),
+            "premium" => Ok(PlanKind::Premium),
+            _ => Err(format!("Wrong PlanKind string: {}", s)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Subscription {
@@ -21,6 +57,7 @@ pub struct Subscription {
     pub parent_id: Option<uuid::Uuid>,
     pub scope_env: Option<Env>,
     pub premium_token: Option<String>,
+    pub plan_kind: PlanKind,
 
     pub limit_bytes: Option<i64>,
 }
@@ -43,6 +80,7 @@ impl Subscription {
             parent_id: None,
             scope_env: None,
             premium_token: None,
+            plan_kind: PlanKind::Standard,
 
             limit_bytes,
         }
@@ -66,6 +104,7 @@ impl Default for Subscription {
             parent_id: None,
             scope_env: None,
             premium_token: None,
+            plan_kind: PlanKind::Standard,
             limit_bytes: None,
         }
     }
@@ -92,6 +131,11 @@ impl From<tokio_postgres::Row> for Subscription {
                 .ok()
                 .and_then(|s| if s.is_empty() { None } else { Some(Env::from(s.as_str())) }),
             premium_token: row.get("premium_token"),
+            plan_kind: row
+                .try_get::<_, String>("plan_kind")
+                .ok()
+                .and_then(|s| PlanKind::from_str(&s).ok())
+                .unwrap_or_default(),
             limit_bytes,
         }
     }
@@ -156,6 +200,8 @@ pub trait Operations {
 
     fn limit_bytes(&self) -> Option<i64>;
     fn set_limit_bytes(&mut self, bytes: i64);
+
+    fn plan_kind(&self) -> PlanKind;
 
     fn parent_id(&self) -> Option<uuid::Uuid>;
     fn set_parent_id(&mut self, parent_id: uuid::Uuid);
@@ -248,6 +294,10 @@ impl Operations for Subscription {
         self.limit_bytes = Some(bytes)
     }
 
+    fn plan_kind(&self) -> PlanKind {
+        self.plan_kind
+    }
+
     fn parent_id(&self) -> Option<uuid::Uuid> {
         self.parent_id
     }
@@ -273,5 +323,37 @@ impl Operations for Subscription {
     fn set_premium_token(&mut self, token: String) {
         self.premium_token = Some(token);
         self.updated_at = Utc::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plan_kind_string_roundtrip() {
+        for (kind, s) in [
+            (PlanKind::Standard, "standard"),
+            (PlanKind::Lite, "lite"),
+            (PlanKind::Premium, "premium"),
+        ] {
+            assert_eq!(kind.to_string(), s);
+            assert_eq!(PlanKind::from_str(s).unwrap(), kind);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{}\"", s));
+            assert_eq!(
+                serde_json::from_str::<PlanKind>(&format!("\"{}\"", s)).unwrap(),
+                kind
+            );
+        }
+
+        assert!(PlanKind::from_str("trial").is_err());
+        assert_eq!(PlanKind::default(), PlanKind::Standard);
+    }
+
+    #[test]
+    fn test_new_subscription_is_standard() {
+        let sub = Subscription::new(uuid::Uuid::new_v4(), "ref".to_string(), None, None);
+
+        assert_eq!(sub.plan_kind(), PlanKind::Standard);
     }
 }

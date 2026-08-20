@@ -173,6 +173,10 @@ impl ConnCreateRequest {
 pub struct KeyReq {
     pub days: i16,
     pub distributor: Option<String>,
+    /// Key kind: absent/"standard" keeps the v1 days behavior, "lite"
+    /// creates a traffic-only key and requires traffic_gib.
+    pub kind: Option<String>,
+    pub traffic_gib: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -262,5 +266,35 @@ pub struct ConnectionInfoRequest {
 impl ConnectionInfoRequest {
     pub fn validate(&self) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_req_standard_without_kind() {
+        let req: KeyReq = serde_json::from_str(r#"{"days": 30}"#).unwrap();
+
+        assert_eq!(req.days, 30);
+        assert!(req.kind.is_none());
+        assert!(req.traffic_gib.is_none());
+    }
+
+    #[test]
+    fn test_key_req_lite() {
+        let req: KeyReq =
+            serde_json::from_str(r#"{"days": 0, "kind": "lite", "traffic_gib": 5}"#).unwrap();
+
+        assert_eq!(req.kind.as_deref(), Some("lite"));
+        assert_eq!(req.traffic_gib, Some(5));
+    }
+
+    #[test]
+    fn test_key_req_requires_days() {
+        let parsed: Result<KeyReq, _> = serde_json::from_str(r#"{"kind": "lite"}"#);
+
+        assert!(parsed.is_err());
     }
 }

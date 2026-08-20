@@ -1,10 +1,11 @@
 use tracing::{error, Instrument};
+use std::str::FromStr;
 
 use fcore::{
     http::{helpers as http, response::Instance},
     utils::get_uuid_last_octet_simple,
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Distributor, Env, Error, Key,
-    NodeStorageOperations, Status, Subscription, SubscriptionOperations, Tag,
+    KeyKind, NodeStorageOperations, Status, Subscription, SubscriptionOperations, Tag,
 };
 
 use super::super::{
@@ -14,6 +15,28 @@ use super::super::{
     request::{ActivateKeyReq, KeyReq},
 };
 use super::connection::ensure_enabled_connections;
+
+/// Serializes a key for API responses, adding the traffic_gib view of
+/// traffic_bytes (null for standard keys) next to the raw key fields.
+fn key_instance_json(key: &Key) -> serde_json::Value {
+    let mut value = serde_json::to_value(key).unwrap_or_default();
+    if let Some(obj) = value.as_object_mut() {
+        let traffic_gib = key.traffic_bytes.map(|b| b / (1024 * 1024 * 1024));
+        obj.insert("traffic_gib".to_string(), serde_json::json!(traffic_gib));
+    }
+    value
+}
+
+/// Same envelope as http::success_response, but with the key instance
+/// carrying the extra traffic_gib field.
+fn key_success_response(msg: String, key: &Key) -> warp::reply::WithStatus<warp::reply::Json> {
+    let body = serde_json::json!({
+        "status": warp::http::StatusCode::OK.as_u16(),
+        "message": msg,
+        "response": { "id": key.id, "instance": key_instance_json(key) },
+    });
+    warp::reply::with_status(warp::reply::json(&body), warp::http::StatusCode::OK)
+}
 
 /// Get specific & validate key handler
 pub async fn get_key_validate_handler<N, C, S>(
@@ -36,26 +59,20 @@ where
     let code = params.key;
     let db = memory.db.key();
 
-    if !code.is_valid(&secret) {
+    if code.validate_payload(&secret).is_err() {
         return Ok(http::bad_request("Key is not valid"));
     }
 
     match db.get(code.as_str()).await {
         Some(key) => {
             if key.activated {
-                return Ok(http::success_response(
+                return Ok(key_success_response(
                     "Key is valid and already activated".to_string(),
-                    Some(key.id),
-                    Instance::Key(key.clone()),
+                    &key,
                 ));
             }
 
-            let instance = Instance::Key(key.clone());
-            Ok(http::success_response(
-                "Key is valid".to_string(),
-                Some(key.id),
-                instance,
-            ))
+            Ok(key_success_response("Key is valid".to_string(), &key))
         }
         None => Ok(http::not_found("Key is not found")),
     }
@@ -82,12 +99,27 @@ where
     const DEFAULT_DISTRIBUTOR: &str = "FRKN";
     let distributor_str = req.distributor.as_deref().unwrap_or(DEFAULT_DISTRIBUTOR);
 
-    let days = req.days;
+    let kind = match req.kind.as_deref().map(KeyKind::from_str) {
+        Some(Ok(kind)) => kind,
+        Some(Err(_)) => return Ok(http::bad_request("Unknown key kind")),
+        None => KeyKind::Standard,
+    };
+
     let distributor = Distributor::new(distributor_str)
         .map_err(|_| Error::Custom("invalid distributor".to_string()))?;
 
+    let key = match kind {
+        KeyKind::Standard => Key::new(req.days, &distributor, &secret),
+        KeyKind::Lite => {
+            let traffic_gib = match req.traffic_gib {
+                Some(gib) if gib > 0 => gib,
+                _ => return Ok(http::bad_request("traffic_gib must be greater than 0")),
+            };
+            Key::new_lite(traffic_gib, &distributor, &secret)
+        }
+    };
+
     let db = memory.db.key();
-    let key = Key::new(days, &distributor, &secret);
 
     match db.insert(&key).await {
         Ok(_) => {

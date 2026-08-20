@@ -18,6 +18,38 @@ pub struct Key {
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub distributor: Distributor,
+    pub kind: KeyKind,
+    pub traffic_bytes: Option<i64>,
+}
+
+/// What a key grants on activation: days (standard) or traffic (lite).
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyKind {
+    #[default]
+    Standard,
+    Lite,
+}
+
+impl fmt::Display for KeyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyKind::Standard => write!(f, "standard"),
+            KeyKind::Lite => write!(f, "lite"),
+        }
+    }
+}
+
+impl FromStr for KeyKind {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "standard" => Ok(KeyKind::Standard),
+            "lite" => Ok(KeyKind::Lite),
+            _ => Err(Error::Custom("Wrong KeyKind string".into())),
+        }
+    }
 }
 
 impl Key {
@@ -35,6 +67,29 @@ impl Key {
             created_at: now,
             modified_at: now,
             distributor: *distributor,
+            kind: KeyKind::Standard,
+            traffic_bytes: None,
+        }
+    }
+
+    /// Creates a lite (traffic-only) key: the v2 code carries traffic_gib,
+    /// the days column stays 0 — a lite subscription has no time expiry.
+    pub fn new_lite(traffic_gib: u32, distributor: &Distributor, secret: &[u8]) -> Key {
+        let id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let code = Code::new_lite(traffic_gib, distributor.as_bytes(), secret).to_string();
+
+        Key {
+            id,
+            code,
+            days: 0,
+            activated: false,
+            subscription_id: None,
+            created_at: now,
+            modified_at: now,
+            distributor: *distributor,
+            kind: KeyKind::Lite,
+            traffic_bytes: Some(traffic_gib as i64 * 1024 * 1024 * 1024),
         }
     }
 
@@ -62,6 +117,11 @@ impl From<tokio_postgres::Row> for Key {
                 Distributor::new(&dist_str)
                     .expect("distributor in DB must be exactly 4 valid chars")
             },
+            kind: {
+                let kind_str: String = row.get("kind");
+                KeyKind::from_str(&kind_str).unwrap_or_default()
+            },
+            traffic_bytes: row.get::<_, Option<i64>>("traffic_bytes"),
         }
     }
 }
@@ -547,5 +607,40 @@ mod tests {
             Code::parse_payload(&raw, SECRET),
             Code::parse_payload(&formatted, SECRET),
         );
+    }
+
+    #[test]
+    fn test_key_new_lite() {
+        let key = Key::new_lite(5, &distributor(), SECRET);
+
+        assert_eq!(key.kind, KeyKind::Lite);
+        assert_eq!(key.days, 0);
+        assert_eq!(key.traffic_bytes, Some(5 * 1024 * 1024 * 1024));
+        assert!(!key.activated);
+        assert!(key.subscription_id.is_none());
+
+        // The code must round-trip through the v2 payload parser with the
+        // same traffic and distributor.
+        let parsed = Code::parse_payload(&key.code, SECRET).expect("lite code should parse");
+        assert_eq!(
+            parsed,
+            CodePayload::Lite {
+                traffic_gib: 5,
+                distributor: *b"TEST",
+            }
+        );
+    }
+
+    #[test]
+    fn test_key_kind_string_roundtrip() {
+        for (kind, s) in [(KeyKind::Standard, "standard"), (KeyKind::Lite, "lite")] {
+            assert_eq!(kind.to_string(), s);
+            assert_eq!(KeyKind::from_str(s).unwrap(), kind);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{}\"", s));
+            assert_eq!(serde_json::from_str::<KeyKind>(&format!("\"{}\"", s)).unwrap(), kind);
+        }
+
+        assert!(KeyKind::from_str("premium").is_err());
+        assert_eq!(KeyKind::default(), KeyKind::Standard);
     }
 }
