@@ -85,6 +85,27 @@ impl Subscription {
             limit_bytes,
         }
     }
+
+    /// Creates a lite (traffic-only) subscription: no time expiry
+    /// (expires_at stays NULL — the sub is active while it has traffic),
+    /// the traffic limit comes from the lite key.
+    pub fn new_lite(id: uuid::Uuid, ref_code: String, limit_bytes: i64) -> Subscription {
+        let now = Utc::now();
+        Self {
+            id,
+            expires_at: None,
+            refer_code: ref_code,
+            created_at: now,
+            updated_at: now,
+            is_deleted: false,
+            parent_id: None,
+            scope_env: None,
+            premium_token: None,
+            plan_kind: PlanKind::Lite,
+
+            limit_bytes: Some(limit_bytes),
+        }
+    }
 }
 
 impl Default for Subscription {
@@ -355,5 +376,17 @@ mod tests {
         let sub = Subscription::new(uuid::Uuid::new_v4(), "ref".to_string(), None, None);
 
         assert_eq!(sub.plan_kind(), PlanKind::Standard);
+    }
+
+    #[test]
+    fn test_new_lite_subscription() {
+        let sub = Subscription::new_lite(uuid::Uuid::new_v4(), "ref".to_string(), 1024);
+
+        assert_eq!(sub.plan_kind(), PlanKind::Lite);
+        assert_eq!(sub.expires_at(), None);
+        assert_eq!(sub.limit_bytes(), Some(1024));
+        // A lite sub with expires_at NULL is active: it lives while it has
+        // traffic, so the cleanup task must never treat it as expired.
+        assert!(sub.is_active());
     }
 }

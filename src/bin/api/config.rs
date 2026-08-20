@@ -101,6 +101,11 @@ pub struct ServiceConfig {
     pub amnezia_wireguard_mobile_network: Option<IpAddrMask>,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
+    /// Env that hosts lite (traffic-only) subscriptions: lite key activation
+    /// creates connections only in this env, picked from enabled_conns.
+    /// Without it lite activations create no connections (a warning is logged).
+    #[serde(default)]
+    pub lite_env: Option<String>,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     pub updates_endpoint_zmq: String,

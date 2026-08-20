@@ -184,6 +184,9 @@ pub struct ActivateKeyReq {
     pub code: String,
     pub subscription_id: Option<uuid::Uuid>,
     pub limit_bytes: Option<i64>,
+    /// Required for lite keys: fcore binds it to the subscription via
+    /// mrkting's POST /account. Ignored for standard keys.
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,5 +299,15 @@ mod tests {
         let parsed: Result<KeyReq, _> = serde_json::from_str(r#"{"kind": "lite"}"#);
 
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn test_activate_key_req_email_optional() {
+        let req: ActivateKeyReq = serde_json::from_str(r#"{"code": "XXXX"}"#).unwrap();
+        assert!(req.email.is_none());
+
+        let req: ActivateKeyReq =
+            serde_json::from_str(r#"{"code": "XXXX", "email": "a@b.c"}"#).unwrap();
+        assert_eq!(req.email.as_deref(), Some("a@b.c"));
     }
 }

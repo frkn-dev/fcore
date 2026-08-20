@@ -1,12 +1,13 @@
 use async_trait::async_trait;
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 use warp::Filter;
 
 use fcore::{
     http::filters::{with_param_bool, with_param_string},
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, NodeStorageOperations, Result,
-    Subscription, SubscriptionOperations,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, NodeStorageOperations,
+    Result, Subscription, SubscriptionOperations,
 };
 
 use super::{
@@ -520,6 +521,12 @@ where
 
         let enabled_conns = params.enabled_conns.clone();
         let mrkting_config = params.mrkting.clone();
+        // Matches the Env parsing of enabled_conns keys: known envs by name,
+        // anything else is a custom env (e.g. "lite-prod").
+        let lite_env = params
+            .lite_env
+            .as_ref()
+            .map(|s| Env::from_str(s).unwrap_or_else(|_| Env::Custom(s.clone())));
 
         let post_activate_key_route = warp::post()
             .and(warp::path("key"))
@@ -535,6 +542,7 @@ where
                 move || net.clone()
             }))
             .and(warp::any().map(move || enabled_conns.clone()))
+            .and(warp::any().map(move || lite_env.clone()))
             .and(warp::any().map(move || mrkting_config.clone()))
             .and_then(post_activate_key_handler);
 
