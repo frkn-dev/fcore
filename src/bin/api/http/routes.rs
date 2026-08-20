@@ -169,6 +169,14 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(get_subscription_traffic_history);
 
+        let post_subscription_traffic_route = warp::post()
+            .and(warp::path!("subscription" / Uuid / "traffic"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and_then(post_subscription_traffic_handler);
+
         // Admin routes
         let admin_enabled = self.settings.service.admin_enabled;
         let admin_token = self
@@ -695,6 +703,7 @@ where
             .or(get_subscription_traffic_route)
             .or(post_subscription_route)
             .or(put_subscription_route)
+            .or(post_subscription_traffic_route)
             // Node
             .or(get_nodes_route)
             .or(get_node_route)

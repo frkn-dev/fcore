@@ -21,6 +21,10 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # enabled_conns = { dev = ["Hysteria2", "VlessTcpReality"], wl = ["VlessXhttpCdn"], ru = ["Wireguard", "Hysteria2"] }
 # Mobile AmneziaWG (dedicated pool): add "AmneziaWgMobile" to the env list, e.g.
 # enabled_conns = { ru = ["AmneziaWg", "AmneziaWgMobile", "VlessTcpReality"] }
+# Lite (traffic-only) keys: connections are created only in this env, picked
+# from enabled_conns. Without it lite activations create no connections.
+# lite_env = "lite-prod"
+# enabled_conns = { lite-prod = ["VlessTcpReality", "Hysteria2"] }
 # Labels on the client's service cards (/v1/services). Bare numbers only —
 # the client formats them itself. Defaults shown.
 # gateway_price_label = "500"

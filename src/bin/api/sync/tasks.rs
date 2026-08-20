@@ -63,6 +63,12 @@ where
     async fn update_sub(&self, sub_id: &uuid::Uuid, sub_req: SubReq) -> SyncResult<Status>;
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
     async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
+    async fn add_limit_bytes(
+        &self,
+        sub_id: &uuid::Uuid,
+        bytes: i64,
+        trace_id: &uuid::Uuid,
+    ) -> SyncResult<Status>;
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
@@ -583,6 +589,58 @@ where
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {
         let status = self.add_days_inner(sub_id, days).await?;
         Ok(status)
+    }
+
+    async fn add_limit_bytes(
+        &self,
+        sub_id: &uuid::Uuid,
+        bytes: i64,
+        trace_id: &uuid::Uuid,
+    ) -> SyncResult<Status> {
+        info!(
+            "Adding {} limit bytes to subscription {} (trace {})",
+            bytes, sub_id, trace_id
+        );
+
+        // DB first: traffic_topups.trace_id is the idempotency key — a
+        // repeated top-up with the same trace_id must not add twice.
+        let new_limit = match self.db.sub().add_limit_bytes(sub_id, trace_id, bytes).await {
+            Ok(new_limit) => new_limit,
+            Err(e) => {
+                error!(
+                    "Failed to add limit bytes for subscription {}: {}",
+                    sub_id, e
+                );
+                return Err(SyncError::Database(e));
+            }
+        };
+
+        let Some(new_limit) = new_limit else {
+            info!(
+                "Traffic top-up {} for subscription {} already applied",
+                trace_id, sub_id
+            );
+            return Ok(Status::AlreadyExist(*sub_id));
+        };
+
+        {
+            let mut mem = self.memory.write().await;
+            match mem.subscriptions.find_by_id_mut(sub_id) {
+                Some(sub) => sub.set_limit_bytes(new_limit),
+                None => {
+                    warn!(
+                        "Subscription {} not found in memory (limit {} already persisted)",
+                        sub_id, new_limit
+                    );
+                }
+            }
+        }
+
+        info!(
+            "Subscription {} limit updated to {} bytes",
+            sub_id, new_limit
+        );
+        Ok(Status::Updated(*sub_id))
     }
 
     async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {

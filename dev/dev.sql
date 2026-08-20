@@ -238,6 +238,15 @@ ALTER TABLE keys
 ALTER TABLE subscriptions
     ADD COLUMN IF NOT EXISTS plan_kind TEXT NOT NULL DEFAULT 'standard';
 
+-- Idempotent traffic top-ups for lite subscriptions: trace_id is the
+-- idempotency key, a repeated POST with the same trace_id is a no-op.
+CREATE TABLE IF NOT EXISTS traffic_topups (
+    trace_id UUID PRIMARY KEY,
+    subscription_id UUID NOT NULL,
+    bytes BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Backfill example: create an AmneziaWgMobile connection for every active
 -- subscription that has an AmneziaWg connection, allocating addresses from
 -- the mobile pool starting at 10.77.0.2 (first_peer_ip). Adjust envs to

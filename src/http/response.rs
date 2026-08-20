@@ -2,7 +2,7 @@ use crate::memory::connection::conn::Conn as Connection;
 use crate::memory::connection::stat::Stat as ConnectionStat;
 use crate::memory::env::Env;
 use crate::memory::key::Key;
-use crate::memory::subscription::Subscription;
+use crate::memory::subscription::{PlanKind, Subscription};
 use crate::memory::tag::ProtoTag as Tag;
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,9 @@ pub struct SubscriptionResponse {
     pub monthly_downlink: i64,
     pub monthly_uplink: i64,
     pub limit_bytes: i64,
+    pub plan_kind: PlanKind,
+    /// Lifetime traffic (uplink + downlink) persisted for the subscription.
+    pub used_bytes: i64,
     pub env_traffic: Vec<EnvTrafficInfo>,
 }
 

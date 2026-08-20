@@ -18,7 +18,7 @@ use fcore::http::{
 use fcore::{
     utils::get_uuid_last_octet_simple, Connection, ConnectionApiOperations,
     ConnectionBaseOperations, ConnectionStorageApiOperations, Env, Inbound, InboundClashConfig,
-    InboundConnLink, MetricStorage, NodeStorageOperations, Status, Subscription,
+    InboundConnLink, MetricStorage, NodeStorageOperations, PlanKind, Status, Subscription,
     SubscriptionOperations, SubscriptionStorageOperations, Tag,
 };
 
@@ -29,7 +29,7 @@ use super::super::super::{
 use super::super::{
     param::SubIdQueryParam,
     request::EnvFilter,
-    request::{FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
+    request::{AddTrafficReq, FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
 
 #[derive(Debug, Deserialize)]
@@ -442,12 +442,25 @@ where
     }
 
     let limit_bytes = sub.limit_bytes().unwrap_or(0);
+    let plan_kind = sub.plan_kind();
     let created_at = sub.created_at();
     let sub_id = sub.id();
     let expires = sub.expires_at().unwrap_or_default();
     let days = sub.days_remaining().unwrap_or(0);
     let ref_code = sub.refer_code();
     drop(mem);
+
+    let used_bytes = match memory.db.traffic().total_for_subscription(sub_id).await {
+        Ok((uplink, downlink)) => (uplink + downlink).max(0),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load total traffic for subscription {}: {}",
+                sub_id,
+                e
+            );
+            0
+        }
+    };
 
     let traffic =
         match build_subscription_traffic(&memory.db, &metrics, subscription_id, created_at).await {
@@ -511,6 +524,8 @@ where
         monthly_downlink: traffic.monthly.downlink as i64,
         monthly_uplink: traffic.monthly.uplink as i64,
         limit_bytes,
+        plan_kind,
+        used_bytes,
         env_traffic,
     };
 
@@ -1000,4 +1015,84 @@ where
     };
 
     Ok(Box::new(warp::reply::json(&response)))
+}
+
+/// POST /subscription/<id>/traffic
+/// Traffic top-up for lite subscriptions, idempotent by trace_id: a repeat
+/// with the same trace_id answers 200 with the current limit, no double-add.
+pub async fn post_subscription_traffic_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    req: AddTrafficReq,
+    memory: MemSync<N, C, S>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    {
+        let mem = memory.memory.read().await;
+        match mem.subscriptions.find_by_id(&subscription_id) {
+            None => {
+                return Ok(Box::new(warp::reply::with_status(
+                    warp::reply::json(&"Subscription not found"),
+                    StatusCode::NOT_FOUND,
+                )));
+            }
+            Some(sub) if sub.plan_kind() != PlanKind::Lite => {
+                return Ok(Box::new(http::bad_request(
+                    "Traffic top-up is only allowed for lite subscriptions",
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    if req.add_bytes <= 0 {
+        return Ok(Box::new(http::bad_request("add_bytes must be greater than 0")));
+    }
+
+    match SyncOp::add_limit_bytes(&memory, &subscription_id, req.add_bytes, &req.trace_id).await {
+        Ok(Status::Updated(_)) | Ok(Status::AlreadyExist(_)) => {
+            let limit_bytes = {
+                let mem = memory.memory.read().await;
+                mem.subscriptions
+                    .find_by_id(&subscription_id)
+                    .and_then(|s| s.limit_bytes())
+                    .unwrap_or(0)
+            };
+
+            let used_bytes = match memory.db.traffic().total_for_subscription(subscription_id).await
+            {
+                Ok((uplink, downlink)) => (uplink + downlink).max(0),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load total traffic for subscription {}: {}",
+                        subscription_id,
+                        e
+                    );
+                    0
+                }
+            };
+
+            Ok(Box::new(warp::reply::json(&serde_json::json!({
+                "limit_bytes": limit_bytes,
+                "used_bytes": used_bytes,
+            }))))
+        }
+        Ok(Status::NotFound(_)) => Ok(Box::new(http::not_found("Subscription not found"))),
+        Ok(_) => Ok(Box::new(http::not_modified(""))),
+        Err(err) => Ok(Box::new(http::internal_error(&format!(
+            "Failed to add traffic for subscription {}: {}",
+            subscription_id, err
+        )))),
+    }
 }

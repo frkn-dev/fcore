@@ -179,6 +179,14 @@ pub struct KeyReq {
     pub traffic_gib: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AddTrafficReq {
+    /// Bytes to add to the subscription limit; must be positive.
+    pub add_bytes: i64,
+    /// Idempotency key: a repeated top-up with the same trace_id is a no-op.
+    pub trace_id: uuid::Uuid,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ActivateKeyReq {
     pub code: String,
