@@ -63,6 +63,8 @@ pub struct ConnectionInfo {
     pub proto: Tag,
     pub label: Option<String>,
     pub is_deleted: bool,
+    pub uplink: i64,
+    pub downlink: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -121,6 +123,8 @@ mod tests {
             proto: Tag::Wireguard,
             label: Some("Мама Андроид".to_string()),
             is_deleted: false,
+            uplink: 1024,
+            downlink: 2048,
         };
 
         let value = serde_json::to_value(&info).unwrap();
@@ -130,12 +134,17 @@ mod tests {
         // material (wg_privkey), addresses or tokens.
         let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, ["env", "id", "is_deleted", "label", "proto"]);
+        assert_eq!(
+            keys,
+            ["downlink", "env", "id", "is_deleted", "label", "proto", "uplink"]
+        );
 
         assert_eq!(obj["proto"], serde_json::json!("Wireguard"));
         assert_eq!(obj["env"], serde_json::json!("ru"));
         assert_eq!(obj["label"], serde_json::json!("Мама Андроид"));
         assert_eq!(obj["is_deleted"], serde_json::json!(false));
+        assert_eq!(obj["uplink"], serde_json::json!(1024));
+        assert_eq!(obj["downlink"], serde_json::json!(2048));
     }
 
     #[test]
@@ -146,6 +155,8 @@ mod tests {
             proto: Tag::AmneziaWgMobile,
             label: None,
             is_deleted: true,
+            uplink: 0,
+            downlink: 0,
         };
 
         let value = serde_json::to_value(&info).unwrap();

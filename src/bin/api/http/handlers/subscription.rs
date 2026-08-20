@@ -451,7 +451,7 @@ where
     // Safe projection of every connection of the subscription (soft-deleted
     // included, the front hides them) with the user-facing device label
     // from the side map — no key material, addresses or tokens.
-    let connections: Vec<ConnectionInfo> = connections
+    let mut connections: Vec<ConnectionInfo> = connections
         .unwrap_or_default()
         .iter()
         .map(|(conn_id, conn)| ConnectionInfo {
@@ -460,9 +460,36 @@ where
             proto: conn.get_proto().proto(),
             label: mem.conn_labels.get(conn_id).cloned(),
             is_deleted: conn.get_deleted(),
+            uplink: 0,
+            downlink: 0,
         })
         .collect();
     drop(mem);
+
+    // Per-device lifetime traffic (named devices view). A read failure must
+    // not fail the whole response — devices just show zero.
+    match memory
+        .db
+        .traffic()
+        .per_connection_for_subscription(subscription_id)
+        .await
+    {
+        Ok(per_conn) => {
+            for c in connections.iter_mut() {
+                if let Some((up, down)) = per_conn.get(&c.id) {
+                    c.uplink = *up;
+                    c.downlink = *down;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Per-connection traffic read failed for sub {}: {}",
+                subscription_id,
+                e
+            );
+        }
+    }
 
     let traffic =
         match build_subscription_traffic(&memory.db, &metrics, subscription_id, created_at).await {
