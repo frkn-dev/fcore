@@ -333,10 +333,12 @@ impl Node {
 
     /// Return the cluster domain if the node belongs to a cluster,
     /// otherwise fall back to the node IPv4 address.
+    /// An empty cluster string counts as "no cluster".
     pub fn connection_host(&self) -> String {
-        self.cluster
-            .clone()
-            .unwrap_or_else(|| self.address.to_string())
+        match &self.cluster {
+            Some(cluster) if !cluster.is_empty() => cluster.clone(),
+            _ => self.address.to_string(),
+        }
     }
 }
 

@@ -817,14 +817,24 @@ where
 
     match req.format {
         FormatReq::Txt => {
-            let links: Result<Vec<_>, _> = inbounds_list
+            // A broken link (e.g. an inbound with an empty host) must not
+            // fail the whole subscription — skip it and log.
+            let links: Vec<_> = inbounds_list
                 .iter()
-                .map(|(inbound, conn_id, conn, hostname, host, label)| {
-                    inbound.create_link(conn_id, conn, hostname, host, label)
+                .filter_map(|(inbound, conn_id, conn, hostname, host, label)| {
+                    inbound
+                        .create_link(conn_id, conn, hostname, host, label)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "Skipping broken {:?} link for conn {} (host '{}'): {}",
+                                inbound.tag, conn_id, host, e
+                            );
+                        })
+                        .ok()
                 })
                 .collect();
 
-            let body = format!("{}{}", meta, links?.join("\n"));
+            let body = format!("{}{}", meta, links.join("\n"));
             let body = if happ_mode {
                 sanitize_for_happ(&body)
             } else {
@@ -838,14 +848,23 @@ where
         }
 
         FormatReq::Base64 => {
-            let links: Result<Vec<_>, _> = inbounds_list
+            // Same as Txt: skip broken links instead of failing the sub.
+            let links: Vec<_> = inbounds_list
                 .iter()
-                .map(|(inbound, conn_id, conn, hostname, host, label)| {
-                    inbound.create_link(conn_id, conn, hostname, host, label)
+                .filter_map(|(inbound, conn_id, conn, hostname, host, label)| {
+                    inbound
+                        .create_link(conn_id, conn, hostname, host, label)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "Skipping broken {:?} link for conn {} (host '{}'): {}",
+                                inbound.tag, conn_id, host, e
+                            );
+                        })
+                        .ok()
                 })
                 .collect();
 
-            let body = format!("{}{}", meta, links?.join("\n"));
+            let body = format!("{}{}", meta, links.join("\n"));
             let body = if happ_mode {
                 sanitize_for_happ(&body)
             } else {
