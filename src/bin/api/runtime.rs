@@ -156,6 +156,18 @@ where
             }
         });
 
+        if self.settings.tasks.device_limit_enabled {
+            spawn_task("enforce_device_limit", {
+                let interval = self.settings.tasks.device_limit_interval_sec;
+                let max_ticks = self.settings.tasks.device_limit_max_ticks;
+                let service = Arc::clone(&self);
+
+                async move {
+                    service.enforce_device_limit(interval, max_ticks).await;
+                }
+            });
+        }
+
         spawn_task("metric_worker", {
             let metrics = Arc::clone(&self.metrics);
             let receiver = self.settings.metrics.reciever.clone();

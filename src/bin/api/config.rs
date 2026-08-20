@@ -150,6 +150,14 @@ pub struct TasksConfig {
     /// How often lite subscriptions are checked against their traffic limit.
     #[serde(default = "default_traffic_limit_interval_sec")]
     pub traffic_limit_interval_sec: u64,
+    /// Reissue connections of lite subscriptions that stay above the
+    /// per-connection device limit for too many consecutive ticks.
+    #[serde(default)]
+    pub device_limit_enabled: bool,
+    #[serde(default = "default_device_limit_interval_sec")]
+    pub device_limit_interval_sec: u64,
+    #[serde(default = "default_device_limit_max_ticks")]
+    pub device_limit_max_ticks: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -212,4 +220,12 @@ fn default_traffic_persist_interval_sec() -> u64 {
 
 fn default_traffic_limit_interval_sec() -> u64 {
     300
+}
+
+fn default_device_limit_interval_sec() -> u64 {
+    60
+}
+
+fn default_device_limit_max_ticks() -> u32 {
+    3
 }

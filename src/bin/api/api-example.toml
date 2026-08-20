@@ -64,6 +64,12 @@ traffic_persist_interval_sec = 3600
 # Lite tariff: how often lite subscriptions are checked against their
 # traffic limit (default 300).
 # traffic_limit_interval_sec = 300
+# Lite tariff: reissue a connection when it stays above the per-connection
+# device limit for device_limit_max_ticks consecutive ticks (defaults:
+# disabled, 60s interval, 3 ticks).
+# device_limit_enabled = false
+# device_limit_interval_sec = 60
+# device_limit_max_ticks = 3
 connection_expire_interval = 600
 monitor_nodes_interval = 60
 heartbeat_node_offline_threshold_sec = 120
