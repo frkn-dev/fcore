@@ -148,6 +148,7 @@ where
             .and(warp::path::end())
             .and(with_sync(self.sync.clone()))
             .and(with_metrics(self.metrics.clone()))
+            .and(with_param_string(params.base_url.clone()))
             .and_then(get_subscription_info_json);
 
         let get_subscription_by_ref_code_route = warp::get()
@@ -507,6 +508,7 @@ where
             .and(mgmt_auth.clone())
             .and(warp::body::json::<MgmtShareMintRequest>())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_string(params.base_url.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
             .and(with_param_ipaddrmask(
                 params.amnezia_wireguard_network.clone(),
@@ -619,6 +621,10 @@ where
             let limiter = share_rate_limiter.clone();
             warp::any().map(move || limiter.clone())
         };
+        // The public per-share feed (GET /sub/<token>) gets polled by
+        // clients — a more generous budget than mint.
+        let share_feed_rate_limiter =
+            Arc::new(RateLimiter::new(30, std::time::Duration::from_secs(60)));
 
         let post_amnezia_config_route = warp::post()
             .and(warp::path("v1"))
@@ -652,6 +658,7 @@ where
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
             .and(with_share_limiter.clone())
+            .and(with_param_string(params.base_url.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
             .and(with_param_ipaddrmask(
                 params.amnezia_wireguard_network.clone(),
@@ -667,6 +674,7 @@ where
                  remote: Option<std::net::SocketAddr>,
                  x_forwarded_for: Option<String>,
                  rate_limiter: Arc<RateLimiter>,
+                 base_url: String,
                  wg_network: fcore::IpAddrMask,
                  awg_network: fcore::IpAddrMask,
                  awg_mobile_network: Option<fcore::IpAddrMask>| async move {
@@ -676,6 +684,7 @@ where
                         remote,
                         x_forwarded_for,
                         rate_limiter,
+                        base_url,
                         wg_network,
                         awg_network,
                         awg_mobile_network,
@@ -736,6 +745,25 @@ where
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
+
+        // Public per-share feed for third-party clients (Happ/Streisand/
+        // Clash). The token in the path is the whole credential; plain HTTP
+        // like the owner's /sub route. The existing query route keeps
+        // matching path::end() right after "sub", this one takes the param.
+        let get_share_feed_route = warp::get()
+            .and(warp::path("sub"))
+            .and(warp::path::param::<String>())
+            .and(warp::path::end())
+            .and(warp::query::<ShareFeedQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
+            .and(with_param_string(params.subscription_title.clone()))
+            .and(with_param_string(params.base_url.clone()))
+            .and(with_param_string(params.support_contact.clone()))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(warp::any().map(move || share_feed_rate_limiter.clone()))
+            .and_then(share_feed_handler);
 
         // App Store IAP: the client is optional — without [service.apple] the
         // route stays mounted and answers 503.
@@ -818,6 +846,7 @@ where
         let routes = get_healthcheck_route
             // Subscription
             .or(get_subscription_route)
+            .or(get_share_feed_route)
             .or(get_subscription_info_route)
             .or(get_subscription_by_ref_code_route)
             .or(get_subscription_traffic_route)

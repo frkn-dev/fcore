@@ -71,6 +71,9 @@ pub struct ConnectionInfo {
     /// the shared child connection's config via /v1/config, nothing else.
     pub share_token: Option<String>,
     pub share_url: Option<String>,
+    /// Public feed of just the shared server (GET /sub/<token>) for
+    /// third-party clients (Happ/Streisand/Clash); null like share_token.
+    pub share_feed_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -133,6 +136,7 @@ mod tests {
             downlink: 2048,
             share_token: Some("k7f29mxq4tvzabcd".to_string()),
             share_url: Some("frkn://conn/k7f2-9mxq-4tvz-abcd".to_string()),
+            share_feed_url: Some("https://api.frkn.org/sub/k7f2-9mxq-4tvz-abcd".to_string()),
         };
 
         let value = serde_json::to_value(&info).unwrap();
@@ -147,8 +151,8 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "downlink", "env", "id", "is_deleted", "label", "proto", "share_token",
-                "share_url", "uplink"
+                "downlink", "env", "id", "is_deleted", "label", "proto", "share_feed_url",
+                "share_token", "share_url", "uplink"
             ]
         );
 
@@ -162,6 +166,10 @@ mod tests {
         assert_eq!(
             obj["share_url"],
             serde_json::json!("frkn://conn/k7f2-9mxq-4tvz-abcd")
+        );
+        assert_eq!(
+            obj["share_feed_url"],
+            serde_json::json!("https://api.frkn.org/sub/k7f2-9mxq-4tvz-abcd")
         );
     }
 
@@ -177,12 +185,14 @@ mod tests {
             downlink: 0,
             share_token: None,
             share_url: None,
+            share_feed_url: None,
         };
 
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value["label"], serde_json::Value::Null);
         assert_eq!(value["share_token"], serde_json::Value::Null);
         assert_eq!(value["share_url"], serde_json::Value::Null);
+        assert_eq!(value["share_feed_url"], serde_json::Value::Null);
         assert_eq!(value["proto"], serde_json::json!("AmneziaWgMobile"));
         assert_eq!(value["is_deleted"], serde_json::json!(true));
     }

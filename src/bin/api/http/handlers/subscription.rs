@@ -328,6 +328,7 @@ pub async fn get_subscription_info_json<N, C, S>(
     subscription_id: uuid::Uuid,
     memory: MemSync<N, C, S>,
     metrics: std::sync::Arc<MetricStorage>,
+    base_url: String,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -474,6 +475,7 @@ where
             downlink: 0,
             share_token: None,
             share_url: None,
+            share_feed_url: None,
         })
         .collect();
     drop(mem);
@@ -515,7 +517,10 @@ where
                 .collect();
             for c in connections.iter_mut() {
                 if let Some(token) = by_source.get(&c.id) {
-                    c.share_url = Some(format!("frkn://conn/{}", grouped_token(token)));
+                    let grouped = grouped_token(token);
+                    c.share_url = Some(format!("frkn://conn/{}", grouped));
+                    c.share_feed_url =
+                        Some(format!("{}/sub/{}", base_url.trim_end_matches('/'), grouped));
                     c.share_token = Some(token.clone());
                 }
             }
@@ -707,6 +712,19 @@ fn conn_link_label(
     }
 }
 
+/// Internal scope for the public per-share feed (GET /sub/<token>): pins
+/// the feed to the token's child connection on the token's node and
+/// overrides the profile title with the share label. Never constructed
+/// from public query params.
+pub(crate) struct ShareFeedScope {
+    pub conn_id: uuid::Uuid,
+    pub node_id: uuid::Uuid,
+    pub title: String,
+    /// Self URL for #profile-web-page-url — the owner's
+    /// /subscription?id=<uuid> URL would leak the subscription id.
+    pub feed_url: String,
+}
+
 pub async fn subscription_link_handler<N, C, S>(
     req: SubscriptionInfoRequest,
     memory: MemSync<N, C, S>,
@@ -714,6 +732,33 @@ pub async fn subscription_link_handler<N, C, S>(
     title: String,
     base_url: String,
     support_contact: String,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    Connection: From<C>,
+    Vec<(uuid::Uuid, fcore::Connection)>: FromIterator<(uuid::Uuid, C)>,
+{
+    subscription_feed_inner(req, memory, metrics, title, base_url, support_contact, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn subscription_feed_inner<N, C, S>(
+    req: SubscriptionInfoRequest,
+    memory: MemSync<N, C, S>,
+    metrics: Arc<MetricStorage>,
+    title: String,
+    base_url: String,
+    support_contact: String,
+    share: Option<ShareFeedScope>,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -741,13 +786,21 @@ where
     // -------------------------
     // Subscription lookup
     // -------------------------
+    // Under a share scope the error messages must not leak the
+    // subscription id — the recipient only knows the token.
     let sub = match mem.subscriptions.find_by_id(&req.id) {
         Some(sub) if sub.is_active() => sub,
+        Some(_) if share.is_some() => {
+            return Ok(Box::new(http::not_found("Subscription is expired")));
+        }
         Some(_) => {
             return Ok(Box::new(http::not_found(&format!(
                 "Subscription {} is expired",
                 req.id
             ))));
+        }
+        None if share.is_some() => {
+            return Ok(Box::new(http::not_found("Subscription not found")));
         }
         None => {
             return Ok(Box::new(http::not_found(&format!(
@@ -778,7 +831,9 @@ where
 
             // Share-issued child connections are credentials for the share
             // recipient, not part of the owner's whole-subscription feed.
-            if is_share_connection(&mem.share_conns, conn_id) {
+            // Under a share scope the child IS the feed, so the exclusion
+            // does not apply.
+            if share.is_none() && is_share_connection(&mem.share_conns, conn_id) {
                 return false;
             }
 
@@ -825,6 +880,12 @@ where
                 let nodes = mem.nodes.get_by_env(&env).unwrap_or_default();
 
                 for node in nodes {
+                    // A share feed is pinned to the token's node.
+                    if let Some(scope) = &share {
+                        if node.uuid != scope.node_id {
+                            continue;
+                        }
+                    }
                     if let Some(inbound) = node.inbounds.get(&proto) {
                         inbounds_list.push((
                             inbound.clone(),
@@ -854,6 +915,12 @@ where
                 }
 
                 for node in &nodes {
+                    // A share feed is pinned to the token's node.
+                    if let Some(scope) = &share {
+                        if node.uuid != scope.node_id {
+                            continue;
+                        }
+                    }
                     if let Some(inbound) = node.inbounds.get(&proto) {
                         inbounds_list.push((
                             inbound.clone(),
@@ -887,6 +954,9 @@ where
     // Empty check
     // -------------------------
     if inbounds_list.is_empty() {
+        if share.is_some() {
+            return Ok(Box::new(http::not_found("Nodes not found")));
+        }
         return Ok(Box::new(http::not_found(&format!(
             "Nodes for subscription {} not found",
             req.id
@@ -900,27 +970,68 @@ where
     let sub_id = sub.id();
     let expires_at = sub.expires_at().map(|e| e.timestamp()).unwrap_or(0);
     let limit = sub.limit_bytes();
-    // A device-scoped feed (conn=...) gets the device label as profile title.
-    let title = match req.conn.and_then(|cid| mem.conn_labels.get(&cid).cloned()) {
-        Some(label) => label,
-        None => title,
+    // A share feed gets the share label as profile title; a device-scoped
+    // feed (conn=...) gets the device label; otherwise the configured one.
+    let title = match &share {
+        Some(scope) => scope.title.clone(),
+        None => match req.conn.and_then(|cid| mem.conn_labels.get(&cid).cloned()) {
+            Some(label) => label,
+            None => title,
+        },
     };
     drop(mem);
 
-    let traffic = match build_subscription_traffic(&memory.db, &metrics, req.id, created_at).await {
-        Ok(t) => t,
-        Err(e) => {
-            return Ok(Box::new(http::internal_error(&format!(
-                "Traffic aggregation failed: {}",
-                e
-            ))));
+    // Traffic for the meta line: the owner's feed shows whole-subscription
+    // totals; a share feed shows only the shared connection's counters (the
+    // recipient must not see the owner's totals). The per-connection read
+    // is best-effort — zeros on failure, the feed never fails on it.
+    let (upload, download, sub_url) = match &share {
+        Some(scope) => {
+            let (up, down) = match memory
+                .db
+                .traffic()
+                .per_connection_for_subscription(sub_id)
+                .await
+            {
+                Ok(per_conn) => per_conn
+                    .get(&scope.conn_id)
+                    .map(|(u, d)| {
+                        (
+                            u64::try_from(*u).unwrap_or(0),
+                            u64::try_from(*d).unwrap_or(0),
+                        )
+                    })
+                    .unwrap_or((0, 0)),
+                Err(e) => {
+                    tracing::warn!(
+                        "Share feed traffic read failed for conn {}: {}",
+                        scope.conn_id,
+                        e
+                    );
+                    (0, 0)
+                }
+            };
+            (up, down, scope.feed_url.clone())
+        }
+        None => {
+            let traffic =
+                match build_subscription_traffic(&memory.db, &metrics, req.id, created_at).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Ok(Box::new(http::internal_error(&format!(
+                            "Traffic aggregation failed: {}",
+                            e
+                        ))));
+                    }
+                };
+
+            (
+                traffic.total.uplink,
+                traffic.total.downlink,
+                format!("{}/subscription?id={}", base_url, sub_id),
+            )
         }
     };
-
-    let upload = traffic.total.uplink;
-    let download = traffic.total.downlink;
-
-    let sub_url = format!("{}/subscription?id={}", base_url, sub_id);
 
     let meta = format!(
         "#profile-title: {}\n\

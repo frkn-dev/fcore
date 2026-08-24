@@ -19,18 +19,23 @@ use warp::Reply;
 
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    IpAddrMask, NodeStatus, NodeStorageOperations, Subscription, SubscriptionOperations,
+    IpAddrMask, MetricStorage, NodeStatus, NodeStorageOperations, Subscription,
+    SubscriptionOperations,
 };
 
 use super::super::super::{
     postgres::share::{ShareTokenRow, ISSUED_VIA_SHARE},
     sync::{tasks::SyncOp, MemSync},
 };
+use super::super::request::{
+    EnvFilter, ShareFeedQuery, SubscriptionInfoRequest, TagReq,
+};
 use super::amnezia::{
     build_gateway_config_response, extract_subscription_id, GatewayConfigParams,
     GatewayConfigRequest,
 };
 use super::connection::create_connection_inner;
+use super::subscription::{subscription_feed_inner, ShareFeedScope};
 
 /// Per-subscription cap on active (non-revoked) share tokens.
 pub const MAX_SHARES_PER_SUBSCRIPTION: i64 = 20;
@@ -79,6 +84,27 @@ pub(crate) fn normalize_share_token(raw: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Normalization for the public feed route (GET /sub/<token>): on top of
+/// normalize_share_token, map the ambiguous chars the way mrkting's
+/// short-code resolver does (o→0, i/l→1) — people retype these from URLs.
+pub(crate) fn normalize_share_feed_token(raw: &str) -> Option<String> {
+    let mapped: String = raw
+        .chars()
+        .map(|c| match c.to_ascii_lowercase() {
+            'o' => '0',
+            'i' | 'l' => '1',
+            c => c,
+        })
+        .collect();
+    normalize_share_token(&mapped)
+}
+
+/// Masked token form for logs — the token is a credential, never log it.
+pub(crate) fn mask_token(token: &str) -> String {
+    let prefix: String = token.chars().take(4).collect();
+    format!("{}…", prefix)
 }
 
 /// Trimmed label, 1..=64 chars (user-facing, may be Cyrillic).
@@ -181,10 +207,17 @@ fn fmt_ts(ts: &DateTime<Utc>) -> String {
     ts.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn mint_response(token: &str, label: &str, created_at: &DateTime<Utc>) -> warp::reply::Response {
+fn mint_response(
+    base_url: &str,
+    token: &str,
+    label: &str,
+    created_at: &DateTime<Utc>,
+) -> warp::reply::Response {
+    let grouped = grouped_token(token);
     warp::reply::json(&serde_json::json!({
         "share_token": token,
-        "share_url": format!("frkn://conn/{}", grouped_token(token)),
+        "share_url": format!("frkn://conn/{}", grouped),
+        "share_feed_url": format!("{}/sub/{}", base_url.trim_end_matches('/'), grouped),
         "label": label,
         "created_at": fmt_ts(created_at),
     }))
@@ -289,6 +322,7 @@ pub async fn gateway_share_mint_handler<N, C, S>(
     remote: Option<SocketAddr>,
     x_forwarded_for: Option<String>,
     rate_limiter: Arc<RateLimiter>,
+    base_url: String,
     wg_network: IpAddrMask,
     awg_network: IpAddrMask,
     awg_mobile_network: Option<IpAddrMask>,
@@ -370,7 +404,7 @@ where
     )
     .await
     {
-        Ok(row) => Ok(mint_response(&row.token, &row.label, &row.created_at)),
+        Ok(row) => Ok(mint_response(&base_url, &row.token, &row.label, &row.created_at)),
         Err(resp) => Ok(resp),
     }
 }
@@ -801,6 +835,7 @@ pub(crate) fn pick_share_node(candidates: &[(uuid::Uuid, bool, bool)]) -> Option
 pub async fn mgmt_share_mint_handler<N, C, S>(
     req: MgmtShareMintRequest,
     memory: MemSync<N, C, S>,
+    base_url: String,
     wg_network: IpAddrMask,
     awg_network: IpAddrMask,
     awg_mobile_network: Option<IpAddrMask>,
@@ -877,7 +912,7 @@ where
     )
     .await
     {
-        Ok(row) => Ok(mint_response(&row.token, &row.label, &row.created_at)),
+        Ok(row) => Ok(mint_response(&base_url, &row.token, &row.label, &row.created_at)),
         Err(resp) => Ok(resp),
     }
 }
@@ -885,8 +920,7 @@ where
 /// POST /share/revoke — revoke via mgmt auth. Revokes only when the token's
 /// subscription matches the request's; unknown/revoked/mismatched tokens all
 /// get the uniform 404 share_not_found.
-pub async fn mgmt_share_revoke_handler<N, C, S>(
-    req: MgmtShareRevokeRequest,
+pub async fn mgmt_share_revoke_handler<N, C, S>(    req: MgmtShareRevokeRequest,
     memory: MemSync<N, C, S>,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
@@ -915,6 +949,117 @@ where
         "message": "share_revoked"
     }))
     .into_response())
+}
+
+// ============================================================================
+// Public per-share feed (GET /sub/<token>) — plain HTTP, third-party clients
+// ============================================================================
+
+/// GET /sub/<token> — a standard subscription feed containing ONLY the
+/// shared server, for third-party clients (Happ/Streisand/Clash). The token
+/// in the path is the whole credential; the subscription id never appears
+/// in the response. Same format/app knobs and meta block as the owner's
+/// /sub feed, built by the same code with a pinned (conn, node) scope.
+#[allow(clippy::too_many_arguments)]
+pub async fn share_feed_handler<N, C, S>(
+    raw_token: String,
+    query: ShareFeedQuery,
+    memory: MemSync<N, C, S>,
+    metrics: Arc<MetricStorage>,
+    title: String,
+    base_url: String,
+    support_contact: String,
+    remote: Option<SocketAddr>,
+    x_forwarded_for: Option<String>,
+    rate_limiter: Arc<RateLimiter>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    Connection: From<C>,
+    Vec<(uuid::Uuid, fcore::Connection)>: FromIterator<(uuid::Uuid, C)>,
+{
+    let ip = client_ip(remote, x_forwarded_for.as_deref());
+    if !rate_limiter.check(ip) {
+        return Ok(Box::new(too_many_requests()));
+    }
+
+    let Some(token) = normalize_share_feed_token(&raw_token) else {
+        // Never log the token; a malformed-token spike from one IP is an
+        // enumeration signal.
+        warn!("share feed: malformed token from {}", ip);
+        return Ok(Box::new(share_not_found()));
+    };
+
+    let row = match memory.db.share().get(&token).await {
+        Ok(Some(row)) if row.revoked_at.is_none() => row,
+        Ok(_) => {
+            warn!("share feed: unknown/revoked token {} from {}", mask_token(&token), ip);
+            return Ok(Box::new(share_not_found()));
+        }
+        Err(e) => {
+            error!("share feed: token lookup failed: {}", e);
+            return Ok(Box::new(http::internal_error("share lookup failed").into_response()));
+        }
+    };
+
+    // The child's proto decides the feed's proto selector (the client cannot
+    // pick one); a missing/deleted child 404s like a conn-scope miss.
+    let proto = {
+        let mem = memory.memory.read().await;
+        match mem.connections.get(&row.connection_id) {
+            Some(conn) if !conn.get_deleted() => conn.get_proto().proto(),
+            _ => return Ok(Box::new(http::not_found("Connection not found"))),
+        }
+    };
+
+    let scope = ShareFeedScope {
+        conn_id: row.connection_id,
+        node_id: row.node_id,
+        title: row.label.clone(),
+        feed_url: format!("{}/sub/{}", base_url.trim_end_matches('/'), grouped_token(&token)),
+    };
+
+    let req = SubscriptionInfoRequest {
+        id: row.subscription_id,
+        format: query.format,
+        env: EnvFilter::All,
+        proto: TagReq::for_tag(proto),
+        app: query.app,
+        conn: Some(row.connection_id),
+    };
+
+    let db = memory.db.clone();
+    let resp = subscription_feed_inner(
+        req,
+        memory,
+        metrics,
+        title,
+        base_url,
+        support_contact,
+        Some(scope),
+    )
+    .await?
+    .into_response();
+
+    // Cheap async bookkeeping on successful fetches only.
+    if resp.status() == warp::http::StatusCode::OK {
+        tokio::spawn(async move {
+            if let Err(e) = db.share().touch_last_used(&token).await {
+                warn!("share last_used_at update failed: {}", e);
+            }
+        });
+    }
+
+    Ok(Box::new(resp))
 }
 
 #[cfg(test)]
@@ -963,6 +1108,35 @@ mod tests {    use super::*;
         // 'o', 'i', 'l', 'u' are outside the Crockford alphabet.
         assert_eq!(normalize_share_token("o7f29mxq4tvzabcd"), None);
         assert_eq!(normalize_share_token("k7f29mxq4tvzabcde"), None);
+    }
+
+    #[test]
+    fn test_normalize_share_feed_token_crockford_mapping() {
+        let bare = "k7f29mxq4tvzabcd";
+        // Display forms and case are tolerated, same as the app routes.
+        assert_eq!(normalize_share_feed_token("k7f2-9mxq-4tvz-abcd").as_deref(), Some(bare));
+        assert_eq!(normalize_share_feed_token("K7F29MXQ4TVZABCD").as_deref(), Some(bare));
+        assert_eq!(normalize_share_feed_token("k7f2 9mxq 4tvz abcd").as_deref(), Some(bare));
+        // Ambiguous chars map the Crockford way (mrkting short codes rule):
+        // o→0, i/l→1.
+        assert_eq!(
+            normalize_share_feed_token("o7f29mxq1tvzabcd").as_deref(),
+            Some("07f29mxq1tvzabcd")
+        );
+        assert_eq!(
+            normalize_share_feed_token("k7f2-9Mxq-Ltvz-abcd").as_deref(),
+            Some("k7f29mxq1tvzabcd")
+        );
+        // Still garbage: 'u' has no mapping and is outside the alphabet.
+        assert_eq!(normalize_share_feed_token("u7f29mxq4tvzabcd"), None);
+        assert_eq!(normalize_share_feed_token(""), None);
+        assert_eq!(normalize_share_feed_token("k7f2"), None);
+        assert_eq!(normalize_share_feed_token("k7f29mxq4tvzabcde"), None);
+    }
+
+    #[test]
+    fn test_mask_token() {
+        assert_eq!(mask_token("k7f29mxq4tvzabcd"), "k7f2…");
     }
 
     #[test]

@@ -90,6 +90,23 @@ impl TagReq {
             TagReq::Mtproto => vec![Tag::Mtproto],
         }
     }
+
+    /// The feed proto selector covering exactly this connection tag — used
+    /// for the scoped per-share feed, where the client cannot pick a proto.
+    pub fn for_tag(tag: Tag) -> TagReq {
+        match tag {
+            Tag::VlessTcpReality => TagReq::VlessTcpReality,
+            Tag::VlessGrpcReality => TagReq::VlessGrpcReality,
+            Tag::VlessXhttpReality => TagReq::VlessXhttpReality,
+            Tag::VlessXhttpCdn => TagReq::VlessXhttpCdn,
+            // No dedicated selectors for these — the xray group covers them.
+            Tag::Vmess | Tag::Shadowsocks => TagReq::Xray,
+            Tag::Hysteria2 => TagReq::Hysteria2,
+            Tag::Wireguard => TagReq::Wireguard,
+            Tag::AmneziaWg | Tag::AmneziaWgMobile => TagReq::AmneziaWg,
+            Tag::Mtproto => TagReq::Mtproto,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,6 +258,22 @@ pub struct SubscriptionInfoRequest {
     /// subscription, otherwise the handler answers 404.
     #[serde(default)]
     pub conn: Option<uuid::Uuid>,
+}
+
+fn default_share_feed_format() -> FormatReq {
+    FormatReq::Base64
+}
+
+/// Query for the public per-share feed (GET /sub/<token>): the same knobs
+/// as the subscription feed minus id/env/proto, which are pinned by the
+/// token. Unlike SubscriptionInfoRequest, `format` is optional —
+/// third-party clients (Happ/Streisand) fetch the bare URL.
+#[derive(Debug, Deserialize)]
+pub struct ShareFeedQuery {
+    #[serde(default = "default_share_feed_format")]
+    pub format: FormatReq,
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 impl SubscriptionInfoRequest {
