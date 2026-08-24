@@ -121,6 +121,12 @@ pub struct NodeResponse {
     pub country: String,
     pub r#type: Type,
     pub cluster: Option<String>,
+    /// Extra entry IPs of the node: node_ips[0] is the primary address
+    /// (== `address`); absent = single-address node (current behavior).
+    /// Skipped in serialization when absent so old consumers see the
+    /// byte-for-byte old shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ips: Option<Vec<Ipv4Addr>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -153,6 +159,12 @@ pub struct Node {
     pub country: String,
     pub r#type: Type,
     pub cluster: Option<String>,
+    /// Extra entry IPs of the node: node_ips[0] is the primary address
+    /// (== `address`); absent = single-address node (current behavior).
+    /// Participates in the derived PartialEq so a changed IP set registers
+    /// as a node update in storage (see NodeStorageOperations::add).
+    #[serde(default)]
+    pub node_ips: Option<Vec<Ipv4Addr>>,
 }
 
 impl Node {
@@ -274,6 +286,7 @@ impl Node {
             country: settings.country,
             r#type: settings.r#type,
             cluster: settings.cluster,
+            node_ips: settings.node_ips,
         }
     }
 
@@ -319,6 +332,7 @@ impl Node {
             country: self.country.clone(),
             r#type: self.r#type,
             cluster: self.cluster.clone(),
+            node_ips: self.node_ips.clone(),
         }
     }
 
@@ -380,6 +394,7 @@ mod tests {
             country: "RU".to_string(),
             r#type: Type::Node,
             cluster: Some("test-cluster.example.com".to_string()),
+            node_ips: None,
         };
 
         let response = node.as_node_response();

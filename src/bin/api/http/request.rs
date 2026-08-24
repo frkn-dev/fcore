@@ -141,9 +141,35 @@ pub struct NodeRequest {
     pub r#type: Option<NodeType>,
     #[serde(default)]
     pub cluster: Option<String>,
+    /// Extra entry IPs sent by the node at registration: node_ips[0] is the
+    /// primary and must equal `address`; absent = single-address node
+    /// (old node binaries simply omit the field).
+    #[serde(default)]
+    pub node_ips: Option<Vec<Ipv4Addr>>,
 }
 
 impl NodeRequest {
+    /// Consistency rule for the entry-IP list: when present it must be
+    /// non-empty and start with the primary address, so old clients that
+    /// only read `address` stay correct.
+    pub fn validate(&self) -> Result<(), Error> {
+        if let Some(node_ips) = &self.node_ips {
+            match node_ips.first() {
+                None => {
+                    return Err(Error::Custom(
+                        "node_ips must be non-empty when present".into(),
+                    ));
+                }
+                Some(primary) if *primary != self.address => {
+                    return Err(Error::Custom(
+                        "node_ips[0] must equal the node address".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
     pub fn as_node(&self) -> Node {
         let now = Utc::now();
 
@@ -168,6 +194,7 @@ impl NodeRequest {
             country: self.country.clone(),
             r#type: t,
             cluster: self.cluster.clone(),
+            node_ips: self.node_ips.clone(),
         }
     }
 }
@@ -404,5 +431,68 @@ mod tests {
         let qs = format!("id={}&format=txt&env=all&proto=proxy", id);
         let req: SubscriptionInfoRequest = serde_urlencoded::from_str(&qs).unwrap();
         assert_eq!(req.conn, None);
+    }
+
+    fn node_request_json(extra: &str) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "env": "ru",
+            "hostname": "node-1",
+            "address": "78.17.28.66",
+            "inbounds": {},
+            "uuid": uuid::Uuid::new_v4(),
+            "label": "Node",
+            "interface": "eth0",
+            "cores": 4,
+            "max_bandwidth_bps": 1000000000i64,
+            "country": "RU",
+            "type": "Node"
+        });
+        if !extra.is_empty() {
+            let extra: serde_json::Value = serde_json::from_str(extra).unwrap();
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        }
+        v
+    }
+
+    #[test]
+    fn test_node_request_without_node_ips_backward_compat() {
+        // Old node binaries send no node_ips field at all.
+        let req: NodeRequest = serde_json::from_value(node_request_json("")).unwrap();
+        assert!(req.node_ips.is_none());
+        assert!(req.validate().is_ok());
+        assert!(req.as_node().node_ips.is_none());
+    }
+
+    #[test]
+    fn test_node_request_node_ips_passthrough() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"node_ips": ["78.17.28.66", "78.17.28.67"]}"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_ok());
+        let node = req.as_node();
+        assert_eq!(
+            node.node_ips,
+            Some(vec![
+                "78.17.28.66".parse::<Ipv4Addr>().unwrap(),
+                "78.17.28.67".parse::<Ipv4Addr>().unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_node_request_node_ips_primary_mismatch_rejected() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"node_ips": ["78.17.28.67", "78.17.28.66"]}"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_node_request_node_ips_empty_rejected() {
+        let req: NodeRequest =
+            serde_json::from_value(node_request_json(r#"{"node_ips": []}"#)).unwrap();
+        assert!(req.validate().is_err());
     }
 }

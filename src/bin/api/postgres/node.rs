@@ -32,12 +32,19 @@ impl PgNode {
 
         let address: IpAddr = IpAddr::V4(node.address);
 
+        // TEXT[] of plain IP strings; the values were validated as
+        // Ipv4Addr at the API boundary. None -> NULL (single-address node).
+        let node_ips: Option<Vec<String>> = node
+            .node_ips
+            .as_ref()
+            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect());
+
         let node_query = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16
         )
         ON CONFLICT (id) DO UPDATE SET
             uuid = EXCLUDED.uuid,
@@ -52,7 +59,8 @@ impl PgNode {
             max_bandwidth_bps = EXCLUDED.max_bandwidth_bps,
             country = EXCLUDED.country,
             node_type = EXCLUDED.node_type,
-            cluster = EXCLUDED.cluster
+            cluster = EXCLUDED.cluster,
+            node_ips = EXCLUDED.node_ips
     ";
 
         tx.execute(
@@ -73,6 +81,7 @@ impl PgNode {
                 &node.country,
                 &node.r#type,
                 &node.cluster,
+                &node_ips,
             ],
         )
         .await?;
@@ -204,6 +213,7 @@ impl PgNode {
                       n.country,
                       n.node_type,
                       n.cluster,
+                      n.node_ips,
 
                       i.id AS inbound_id,
                       i.tag,
@@ -248,6 +258,22 @@ impl PgNode {
             let max_bandwidth_bps: i64 = row.get("max_bandwidth_bps");
             let r#type: NodeType = row.get("node_type");
             let cluster: Option<String> = row.get("cluster");
+
+            // Stored as TEXT[]; parse each entry back into Ipv4Addr.
+            // Unparseable entries are skipped with a warning rather than
+            // failing the whole node.
+            let node_ips: Option<Vec<Ipv4Addr>> =
+                row.get::<_, Option<Vec<String>>>("node_ips").map(|ips| {
+                    ips.into_iter()
+                        .filter_map(|s| match s.parse::<Ipv4Addr>() {
+                            Ok(ip) => Some(ip),
+                            Err(e) => {
+                                warn!("Skipping unparseable node_ips entry {:?}: {}", s, e);
+                                None
+                            }
+                        })
+                        .collect()
+                });
 
             let wg_address: Option<IpAddrMask> = row
                 .get::<_, Option<String>>("wg_address")
@@ -302,6 +328,7 @@ impl PgNode {
                     country,
                     r#type,
                     cluster: cluster.clone(),
+                    node_ips: node_ips.clone(),
                 });
 
                 if let Some(_inbound_id) = inbound_id {

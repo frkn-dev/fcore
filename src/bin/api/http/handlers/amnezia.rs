@@ -110,6 +110,10 @@ pub struct GatewayConnection {
     pub env: String,
     #[serde(rename = "connection_label")]
     pub connection_label: String,
+    /// All entry IPs of the node as plain IP strings (first = primary).
+    /// Absent for single-address nodes so old clients see the old shape.
+    #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
+    pub node_ips: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +237,11 @@ pub struct GatewayConfigResponse {
     pub service_protocol: Option<String>,
     #[serde(rename = "service_type", skip_serializing_if = "Option::is_none")]
     pub service_type: Option<String>,
+    /// All entry IPs of the chosen node as plain IP strings (first =
+    /// primary); the client picks/rotates addresses itself. Absent for
+    /// single-address nodes so old clients see the old shape.
+    #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
+    pub node_ips: Option<Vec<String>>,
 }
 
 // ============================================================================
@@ -346,6 +355,10 @@ where
                     service_protocol: proto_label(tag).to_string(),
                     env: conn.get_env().to_string(),
                     connection_label: label,
+                    node_ips: node
+                        .node_ips
+                        .as_ref()
+                        .map(|ips| ips.iter().map(|ip| ip.to_string()).collect()),
                 });
             }
         }
@@ -359,6 +372,7 @@ where
             service_protocol: String::new(),
             env: String::new(),
             connection_label: "All countries".to_string(),
+            node_ips: None,
         }];
     }
     result
@@ -1368,6 +1382,10 @@ where
         country_name: None,
         service_protocol: None,
         service_type: None,
+        node_ips: node
+            .node_ips
+            .as_ref()
+            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect()),
     })
 }
 
@@ -1594,6 +1612,33 @@ mod tests {
     }
 
     #[test]
+    fn gateway_connection_node_ips_serialization() {
+        let base = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "FI".to_string(),
+            country_name: "FI".to_string(),
+            service_protocol: "awg".to_string(),
+            env: "ru".to_string(),
+            connection_label: "Moscow · AmneziaWG".to_string(),
+            node_ips: None,
+        };
+        // Single-address node: the field is omitted entirely (old shape).
+        let v = serde_json::to_value(&base).unwrap();
+        assert!(v.get("node_ips").is_none());
+
+        let multi = GatewayConnection {
+            node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
+            ..base
+        };
+        let v = serde_json::to_value(&multi).unwrap();
+        assert_eq!(
+            v["node_ips"],
+            serde_json::json!(["78.17.28.66", "78.17.28.67"])
+        );
+    }
+
+    #[test]
     fn share_config_response_carries_display_fields() {
         // The share recipient has no /v1/services access: the config response
         // must carry share_label/country/service_protocol/service_type.
@@ -1612,6 +1657,7 @@ mod tests {
             country_name: Some("FI".to_string()),
             service_protocol: Some("awg".to_string()),
             service_type: Some(share::SHARE_SERVICE_TYPE.to_string()),
+            node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["share_label"], "Android Mama");
@@ -1620,6 +1666,10 @@ mod tests {
         assert_eq!(v["service_protocol"], "awg");
         assert_eq!(v["service_type"], "amnezia-premium");
         assert_eq!(v["api_config"]["service_type"], "amnezia-premium");
+        assert_eq!(
+            v["node_ips"],
+            serde_json::json!(["78.17.28.66", "78.17.28.67"])
+        );
 
         // Owner branch: display fields are omitted entirely.
         let owner = GatewayConfigResponse {
@@ -1632,6 +1682,7 @@ mod tests {
             country_name: None,
             service_protocol: None,
             service_type: None,
+            node_ips: None,
         };
         let v = serde_json::to_value(&owner).unwrap();
         for field in [
@@ -1640,6 +1691,7 @@ mod tests {
             "country_name",
             "service_protocol",
             "service_type",
+            "node_ips",
         ] {
             assert!(v.get(field).is_none(), "{} must be omitted", field);
         }

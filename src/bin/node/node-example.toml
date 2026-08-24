@@ -42,6 +42,11 @@ country = "RU"
 type = "common"
 # Optional cluster FQDN. When set, client configs use this domain instead of the node IP.
 # cluster = "node-cdn.example.com"
+# Optional extra entry IPs for one node (anti IP-blocking). The first IP is
+# the primary and MUST equal `address` above; all IPs share the same
+# ports/keys/inbounds — only the entry address differs. Clients pick/rotate
+# addresses themselves. Omit for a single-address node.
+# node_ips = ["192.168.1.100", "192.168.1.101"]
 
 [api]
 endpoint = "http://127.0.0.1:3000"

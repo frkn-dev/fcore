@@ -919,6 +919,7 @@ mod tests {
             country: "RU".to_string(),
             r#type: NodeType::Node,
             cluster: None,
+            node_ips: None,
         }
     }
 

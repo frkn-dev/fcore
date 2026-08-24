@@ -34,6 +34,17 @@ where
 {
     tracing::debug!("Received node request: {:?}", node_req);
 
+    if let Err(e) = node_req.validate() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+                status: StatusCode::BAD_REQUEST.as_u16(),
+                message: e.to_string(),
+                response: None,
+            }),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+
     let node = node_req.clone().as_node();
     let node_id = node_req.uuid;
 

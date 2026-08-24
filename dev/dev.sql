@@ -289,3 +289,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS share_tokens_active_triple
 -- behavior); only named devices created with a node pin set it. PG-only,
 -- like label/issued_via: the api mirrors it into an in-memory side map.
 alter table connections add column node_id uuid;
+
+-- Extra entry IPs of a node (anti IP-blocking). TEXT[], not INET[]:
+-- values are validated as Ipv4Addr at the API boundary, so no
+-- tokio-postgres type plumbing is needed. The first element is the
+-- primary (== nodes.address); NULL = single-address node.
+alter table nodes add column node_ips text[];
