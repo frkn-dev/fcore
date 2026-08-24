@@ -285,6 +285,10 @@ pub struct RefCodeQuery {
 pub struct ConnectionInfoRequest {
     pub id: uuid::Uuid,
     pub env: Env,
+    /// Optional single-connection (named device) scope: only this
+    /// connection's configs are returned.
+    #[serde(default)]
+    pub conn: Option<uuid::Uuid>,
 }
 
 impl ConnectionInfoRequest {

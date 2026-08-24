@@ -524,6 +524,13 @@ where
                 continue;
             }
 
+            // Named-device scope (conn=<connection_id>) and share-child
+            // exclusion: child connections issued via share tokens must not
+            // duplicate the owner's configs here.
+            if req.conn.is_some_and(|cid| cid != conn_id) || mem.share_conns.contains(&conn_id) {
+                continue;
+            }
+
             if conn.get_proto().proto() != Tag::Wireguard {
                 continue;
             }
@@ -604,6 +611,11 @@ where
     if let Some(conns) = conns {
         for (conn_id, conn) in conns {
             if conn.get_deleted() || conn.get_env() != req.env {
+                continue;
+            }
+
+            // Same scope/exclusion as the WG handler above.
+            if req.conn.is_some_and(|cid| cid != conn_id) || mem.share_conns.contains(&conn_id) {
                 continue;
             }
 
@@ -688,6 +700,11 @@ where
     if let Some(conns) = conns {
         for (conn_id, conn) in conns {
             if conn.get_deleted() || conn.get_env() != req.env {
+                continue;
+            }
+
+            // Same scope/exclusion as the WG handler above.
+            if req.conn.is_some_and(|cid| cid != conn_id) || mem.share_conns.contains(&conn_id) {
                 continue;
             }
 
