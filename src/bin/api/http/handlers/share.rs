@@ -383,6 +383,15 @@ where
         let env = source.get_env();
         let proto = source.get_proto().proto();
 
+        // A pinned source conn can only be shared from its own node; a
+        // mismatched request gets the uniform not-found so the pin never
+        // leaks.
+        if let Some(pin) = mem.conn_nodes.get(&req.connection_uuid) {
+            if *pin != req.node_id {
+                return Ok(http::not_found("connection_not_found").into_response());
+            }
+        }
+
         let node_known = mem
             .nodes
             .get_by_env(&env)
@@ -475,14 +484,16 @@ where
         MintDecision::Mint => {}
     }
 
-    // The child connection inherits the subscription lifetime (days=None)
-    // and carries the share label like a named device.
+    // The child connection inherits the subscription lifetime (days=None),
+    // carries the share label like a named device, and stays UNPINNED
+    // (env-wide): the serving pin lives on the share_tokens row.
     let (child_id, child) = match create_connection_inner(
         &env,
         proto,
         Some(sub_id),
         None,
         Some(label.clone()),
+        None,
         memory,
         wg_network,
         awg_network,
@@ -887,20 +898,35 @@ where
         let env = conn.get_env();
         let proto = conn.get_proto().proto();
 
-        let node_id = mem.nodes.get_by_env(&env).and_then(|nodes| {
-            pick_share_node(
-                &nodes
-                    .iter()
-                    .map(|n| {
-                        (
-                            n.uuid,
-                            n.status == NodeStatus::Online,
-                            n.inbounds.contains_key(&proto),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        });
+        let node_id = match mem.conn_nodes.get(&req.connection_id) {
+            // A pinned source conn is served only by its own node: skip
+            // the auto-pick and verify that node directly. An offline or
+            // inbound-less pinned node gets the same error as the
+            // no-candidate path.
+            Some(pin) => mem
+                .nodes
+                .get_by_id(pin)
+                .filter(|n| {
+                    n.env == env
+                        && n.status == NodeStatus::Online
+                        && n.inbounds.contains_key(&proto)
+                })
+                .map(|n| n.uuid),
+            None => mem.nodes.get_by_env(&env).and_then(|nodes| {
+                pick_share_node(
+                    &nodes
+                        .iter()
+                        .map(|n| {
+                            (
+                                n.uuid,
+                                n.status == NodeStatus::Online,
+                                n.inbounds.contains_key(&proto),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }),
+        };
         let Some(node_id) = node_id else {
             return Ok(http::not_found("node_not_found").into_response());
         };

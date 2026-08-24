@@ -32,6 +32,11 @@ pub struct ConnRow {
     /// share token recipient. PG-only like `label`; the api mirrors it into
     /// an in-memory set to hide share children from owner-facing listings.
     pub issued_via: Option<String>,
+    /// Pin of a "named device" connection to a single node (nodes.uuid).
+    /// PG-only like `label`; the api mirrors it into an in-memory map so
+    /// pinned peers are only published to/listed on their node. None =
+    /// env-wide (current behavior).
+    pub node_id: Option<uuid::Uuid>,
 }
 
 impl From<(uuid::Uuid, Connection)> for ConnRow {
@@ -55,6 +60,9 @@ impl From<(uuid::Uuid, Connection)> for ConnRow {
             // Same for the share provenance flag: set post-insert by the
             // share mint flow (PgConn::set_issued_via).
             issued_via: None,
+            // Same for the node pin: callers that have one set it on the
+            // row explicitly (see SyncOp::add_conn).
+            node_id: None,
         }
     }
 }
@@ -156,7 +164,8 @@ impl PgConn {
             wg_address,
             is_deleted,
             label,
-            issued_via
+            issued_via,
+            node_id
         FROM connections
     ";
 
@@ -182,6 +191,7 @@ impl PgConn {
                 let is_deleted: bool = row.get("is_deleted");
                 let label: Option<String> = row.get("label");
                 let issued_via: Option<String> = row.get("issued_via");
+                let node_id: Option<uuid::Uuid> = row.get("node_id");
 
                 let wg = match (wg_privkey, wg_address) {
                     (Some(privkey), Some(address)) => {
@@ -207,6 +217,7 @@ impl PgConn {
                     is_deleted,
                     label,
                     issued_via,
+                    node_id,
                 }
             })
             .collect()
@@ -266,11 +277,12 @@ impl PgConn {
             wg_address,
             token,
             label,
-            issued_via
+            issued_via,
+            node_id
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13, $14
+            $11, $12, $13, $14, $15
         )
     ";
 
@@ -292,6 +304,7 @@ impl PgConn {
                     &conn.token,
                     &conn.label,
                     &conn.issued_via,
+                    &conn.node_id,
                 ],
             )
             .await;

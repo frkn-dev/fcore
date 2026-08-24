@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use warp::Reply;
 
+use super::connection::pinned_to;
 use super::share;
 
 // ============================================================================
@@ -295,8 +296,10 @@ fn inbound_label(tag: Tag) -> &'static str {
 
 /// Returns the list of connections for the given protocol.
 /// For each online node with the required inbound, finds a matching connection of the subscription.
+/// A node-pinned conn (`conn_nodes`) matches only its own node.
 fn connections_for_protocol<N, C>(
     nodes: &N,
+    conn_nodes: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
     protocol: &str,
     conns: Option<&[(uuid::Uuid, C)]>,
 ) -> Vec<GatewayConnection>
@@ -313,6 +316,10 @@ where
         if let Some(cs) = conns {
             for (conn_id, conn) in cs {
                 if conn.get_deleted() {
+                    continue;
+                }
+                // A node-pinned conn exists only on its node.
+                if !pinned_to(conn_nodes, conn_id, &node.uuid) {
                     continue;
                 }
                 let tag = conn.get_proto().proto();
@@ -917,15 +924,15 @@ where
         });
     let conns_slice = conns.as_deref();
 
-    let vless_connections = connections_for_protocol(&mem.nodes, "vless", conns_slice);
-    let awg_connections = connections_for_protocol(&mem.nodes, "awg", conns_slice);
+    let vless_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, "vless", conns_slice);
+    let awg_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, "awg", conns_slice);
 
     // One merged service: the client must not offer a protocol choice at purchase.
     let mut connections = vless_connections;
     connections.extend(awg_connections);
-    connections.extend(connections_for_protocol(&mem.nodes, "hysteria2", conns_slice));
-    connections.extend(connections_for_protocol(&mem.nodes, "awg-mobile", conns_slice));
-    connections.extend(connections_for_protocol(&mem.nodes, "wireguard", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "hysteria2", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "awg-mobile", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "wireguard", conns_slice));
     let countries = available_countries_from_connections(&connections);
 
     let info = GatewayServiceInfo {
@@ -1183,6 +1190,11 @@ where
 
         if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
             for node in nodes {
+                // A node-pinned conn exists only on its node: never render
+                // its config for another node where the peer is absent.
+                if !pinned_to(&mem.conn_nodes, &conn_id, &node.uuid) {
+                    continue;
+                }
                 // A pinned node_id selects exactly that node; a mismatch is
                 // an explicit error, not a silent fallback to another node.
                 if let Some(wanted) = params.node_id {

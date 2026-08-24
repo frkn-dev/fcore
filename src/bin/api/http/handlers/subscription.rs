@@ -32,6 +32,7 @@ use super::super::{
     request::{FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
 use super::share::{grouped_token, is_share_connection};
+use super::connection::pinned_to;
 
 #[derive(Debug, Deserialize)]
 pub struct TrafficHistoryQuery {
@@ -886,6 +887,10 @@ where
                             continue;
                         }
                     }
+                    // A node-pinned conn exists only on its node.
+                    if !pinned_to(&mem.conn_nodes, conn_id, &node.uuid) {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&proto) {
                         inbounds_list.push((
                             inbound.clone(),
@@ -920,6 +925,10 @@ where
                         if node.uuid != scope.node_id {
                             continue;
                         }
+                    }
+                    // A node-pinned conn exists only on its node.
+                    if !pinned_to(&mem.conn_nodes, conn_id, &node.uuid) {
+                        continue;
                     }
                     if let Some(inbound) = node.inbounds.get(&proto) {
                         inbounds_list.push((

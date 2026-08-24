@@ -55,6 +55,7 @@ where
         conn_id: &uuid::Uuid,
         conn: Connection,
         label: Option<String>,
+        node_id: Option<uuid::Uuid>,
     ) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
     async fn delete_connection(&self, conn_id: &uuid::Uuid, conn: &C) -> SyncResult<Status>;
@@ -234,17 +235,20 @@ where
         conn_id: &uuid::Uuid,
         conn: Connection,
         label: Option<String>,
+        node_id: Option<uuid::Uuid>,
     ) -> SyncResult<Status> {
         info!("Adding connection: {}", conn_id);
 
         // Validate input
         conn.validate()?;
 
-        // Create database row. The label is PG-only (connections.label):
-        // it is persisted here and mirrored into the api-side conn_labels
-        // side map, but never becomes part of the rkyv payload to nodes.
+        // Create database row. The label and the node pin are PG-only
+        // (connections.label / connections.node_id): they are persisted
+        // here and mirrored into the api-side conn_labels/conn_nodes side
+        // maps, but never become part of the rkyv payload to nodes.
         let mut conn_row: ConnRow = (*conn_id, conn.clone()).into();
         conn_row.label = label.clone();
+        conn_row.node_id = node_id;
 
         // Insert into database first
         if let Err(e) = self.db.conn().insert(conn_row).await {
@@ -260,6 +264,9 @@ where
             let mut memory = self.memory.write().await;
             if let Some(label) = label {
                 memory.conn_labels.insert(*conn_id, label);
+            }
+            if let Some(node_id) = node_id {
+                memory.conn_nodes.insert(*conn_id, node_id);
             }
             ConnectionStorageApiOperations::add(
                 &mut memory.connections,
@@ -320,8 +327,24 @@ where
         debug!("Connection {} successfully removed from database", conn_id);
 
         let msg = vec![conn.as_delete_message(conn_id)];
+
+        // Read the node pin before it is removed from the side map below:
+        // on a node Action::Create and Action::Update are handled
+        // identically, so a pinned conn's delete must go to the pin's Init
+        // topic, never to the env-wide Updates broadcast.
+        let pin = {
+            let memory = self.memory.read().await;
+            memory.conn_nodes.get(conn_id).copied()
+        };
+
         let topic = if conn.get_token().is_some() {
+            // H2 token conns stay on Auth; pinning is never exposed for H2.
             Topic::Auth
+        } else if !conn.get_proto().is_mtproto() {
+            match pin {
+                Some(pin) => Topic::Init(pin),
+                None => conn.get_env().into(),
+            }
         } else {
             conn.get_env().into()
         };
@@ -358,6 +381,8 @@ where
             // side map (PG keeps the column, so a full reload or a restore
             // followed by a periodic sync re-populates it).
             memory.conn_labels.remove(conn_id);
+            // The pin is per-device too; a deleted device drops it.
+            memory.conn_nodes.remove(conn_id);
             // A deleted share child leaves the hidden set as well.
             memory.share_conns.remove(conn_id);
         }
@@ -382,14 +407,14 @@ where
             + PartialEq,
         Connection: From<C>,
     {
-        let conns_to_restore: Vec<(uuid::Uuid, Connection)> = {
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = {
             let mem = self.memory.read().await;
 
             match mem.connections.get_by_subscription_id(sub_id) {
                 Some(conns) => conns
                     .iter()
                     .filter(|(_, c)| c.get_deleted())
-                    .map(|(id, c)| (*id, c.clone().into()))
+                    .map(|(id, c)| (*id, c.clone().into(), mem.conn_nodes.get(id).copied()))
                     .collect(),
                 None => Vec::new(),
             }
@@ -401,7 +426,7 @@ where
 
         let this = self.clone();
 
-        let tasks = conns_to_restore.into_iter().map(|(conn_id, conn)| {
+        let tasks = conns_to_restore.into_iter().map(|(conn_id, conn, pin)| {
             let this = this.clone();
             async move {
                 let msg = vec![conn.as_update_message(&conn_id)];
@@ -414,8 +439,16 @@ where
                     }
                 };
 
+                // A node treats Action::Update like Action::Create, so a
+                // pinned conn's restore must go to the pin's Init topic,
+                // not to the env-wide Updates broadcast.
                 let topic = if conn.get_token().is_some() {
                     Topic::Auth
+                } else if !conn.get_proto().is_mtproto() {
+                    match pin {
+                        Some(pin) => Topic::Init(pin),
+                        None => conn.get_env().into(),
+                    }
                 } else {
                     conn.get_env().into()
                 };

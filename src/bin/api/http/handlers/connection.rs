@@ -51,11 +51,14 @@ where
     let connections_to_send: Vec<_> = mem
         .connections
         .iter()
-        .filter(|(_, conn)| {
+        .filter(|(conn_id, conn)| {
             !conn.get_deleted()
                 && conn.get_proto().proto() == proto
                 && (proto == Tag::Hysteria2 || conn.get_env() == env)
                 && last_update.is_none_or(|ts| conn.get_modified_at().timestamp() as u64 >= ts)
+                // A node-pinned conn is catch-up visible only to its node's
+                // Init topic; on every other topic pinned conns are hidden.
+                && sync_conn_visible(mem.conn_nodes.get(conn_id), &topic)
         })
         .collect();
 
@@ -108,6 +111,7 @@ pub async fn create_connection_inner<N, C, S>(
     subscription_id: Option<uuid::Uuid>,
     days: Option<u16>,
     label: Option<String>,
+    node_id: Option<uuid::Uuid>,
     memory: &MemSync<N, C, S>,
     wg_network: &IpAddrMask,
     awg_network: &IpAddrMask,
@@ -211,19 +215,25 @@ where
 
     let messages = vec![msg];
 
-    match SyncOp::add_conn(memory, &conn_id, conn.clone(), label).await {
+    match SyncOp::add_conn(memory, &conn_id, conn.clone(), label, node_id).await {
         Ok(Status::Ok(id)) => {
             let bytes = match rkyv::to_bytes::<_, 1024>(&messages) {
                 Ok(b) => b,
                 Err(e) => return Err(format!("Serialization error: {}", e)),
             };
 
+            // A pinned conn exists only on its node; since a node treats
+            // Action::Create and Action::Update identically, the create
+            // must go to the pin's Init topic, not the env broadcast.
             let topic = if conn.get_token().is_some() {
                 Some(Topic::Auth)
             } else if conn.get_proto().is_mtproto() {
                 None
             } else {
-                Some(conn.get_env().into())
+                match node_id {
+                    Some(pin) => Some(Topic::Init(pin)),
+                    None => Some(conn.get_env().into()),
+                }
             };
 
             if let Some(topic) = topic {
@@ -255,6 +265,51 @@ pub(crate) fn existing_default_pairs(
         .filter(|(conn_id, _, _)| !labels.contains_key(conn_id))
         .map(|(_, env, tag)| (env.clone(), *tag))
         .collect()
+}
+
+/// Validation for a node pin on POST /connection: the node must exist,
+/// belong to the connection's env, and expose the requested protocol's
+/// inbound.
+pub(crate) fn validate_node_pin(
+    node: Option<&fcore::Node>,
+    env: &fcore::Env,
+    proto: Tag,
+) -> Result<(), String> {
+    let Some(node) = node else {
+        return Err("Node not found".to_string());
+    };
+    if node.env != *env {
+        return Err("Node env mismatch".to_string());
+    }
+    if !node.inbounds.values().any(|i| i.tag == proto) {
+        return Err(format!("Node has no {} inbound", proto));
+    }
+    Ok(())
+}
+
+/// Sync catch-up visibility for node-pinned connections. A node asking on
+/// its own Init topic sees unpinned conns and conns pinned to it; pinned
+/// conns never leak to any other topic (env-wide Updates, Auth, mgmt).
+pub(crate) fn sync_conn_visible(pin: Option<&uuid::Uuid>, topic: &Topic) -> bool {
+    match (pin, topic) {
+        (Some(pin), Topic::Init(u)) => pin == u,
+        (Some(_), _) => false,
+        (None, _) => true,
+    }
+}
+
+/// Listing visibility for node-pinned connections: a pinned conn appears
+/// only on the node whose uuid matches its pin; unpinned conns appear on
+/// every node. Returns true = the conn is visible on this node.
+pub(crate) fn pinned_to(
+    conn_nodes: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+    conn_id: &uuid::Uuid,
+    node_uuid: &uuid::Uuid,
+) -> bool {
+    match conn_nodes.get(conn_id) {
+        Some(pin) => pin == node_uuid,
+        None => true,
+    }
 }
 
 /// Ensure the subscription has a connection for every (env, tag) pair from
@@ -312,6 +367,7 @@ pub async fn ensure_enabled_connections<N, C, S>(
                 Some(subscription_id),
                 None,
                 None,
+                None,
                 memory,
                 wg_network,
                 awg_network,
@@ -354,12 +410,23 @@ where
         return Ok(http::bad_request(&e.to_string()));
     }
 
+    // A pin must name a node of the requested env that actually exposes
+    // the requested protocol's inbound.
+    if let Some(node_id) = conn_req.node_id {
+        let mem = memory.memory.read().await;
+        let node = mem.nodes.get_by_id(&node_id);
+        if let Err(msg) = validate_node_pin(node.as_ref(), &conn_req.env, conn_req.proto) {
+            return Ok(http::bad_request(&msg));
+        }
+    }
+
     match create_connection_inner(
         &conn_req.env,
         conn_req.proto,
         conn_req.subscription_id,
         conn_req.days,
         conn_req.normalized_label(),
+        conn_req.node_id,
         &memory,
         &wg_network,
         &awg_network,
@@ -540,6 +607,10 @@ where
                     if node.status != NodeStatus::Online {
                         continue;
                     }
+                    // A node-pinned conn exists only on its node.
+                    if !pinned_to(&mem.conn_nodes, &conn_id, &node.uuid) {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&Tag::Wireguard) {
                         let c: Connection = conn.clone().into();
                         let host = node.connection_host();
@@ -627,6 +698,10 @@ where
             if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
                 for node in nodes {
                     if node.status != NodeStatus::Online {
+                        continue;
+                    }
+                    // A node-pinned conn exists only on its node.
+                    if !pinned_to(&mem.conn_nodes, &conn_id, &node.uuid) {
                         continue;
                     }
                     if let Some(inbound) = node.inbounds.get(&conn_tag) {
@@ -717,6 +792,10 @@ where
                     if node.status != NodeStatus::Online {
                         continue;
                     }
+                    // A node-pinned conn exists only on its node.
+                    if !pinned_to(&mem.conn_nodes, &conn_id, &node.uuid) {
+                        continue;
+                    }
                     if let Some(inbound) = node.inbounds.get(&Tag::Mtproto) {
                         let host = node.connection_host();
                         let link = inbound.mtproto(&node.hostname, &host, &node.label);
@@ -742,8 +821,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::existing_default_pairs;
-    use fcore::{Env, Tag};
+    use super::{existing_default_pairs, pinned_to, sync_conn_visible, validate_node_pin};
+    use chrono::Utc;
+    use fcore::{Env, Inbound, Node, NodeStatus, NodeType, Tag, Topic};
     use std::collections::HashMap;
 
     #[test]
@@ -785,5 +865,100 @@ mod tests {
 
         assert!(pairs.contains(&(Env::Dev, Tag::Mtproto)));
         assert_eq!(pairs.len(), 1);
+    }
+
+    #[test]
+    fn test_sync_conn_visible() {
+        let node_a = uuid::Uuid::new_v4();
+        let node_b = uuid::Uuid::new_v4();
+
+        // Unpinned conns are visible on every topic (current behavior).
+        assert!(sync_conn_visible(None, &Topic::Init(node_a)));
+        assert!(sync_conn_visible(None, &Topic::Updates(Env::Ru)));
+        assert!(sync_conn_visible(None, &Topic::Auth));
+
+        // A pinned conn is visible only on its own node's Init topic.
+        assert!(sync_conn_visible(Some(&node_a), &Topic::Init(node_a)));
+        assert!(!sync_conn_visible(Some(&node_a), &Topic::Init(node_b)));
+        assert!(!sync_conn_visible(Some(&node_a), &Topic::Updates(Env::Ru)));
+        assert!(!sync_conn_visible(Some(&node_a), &Topic::Auth));
+    }
+
+    #[test]
+    fn test_pinned_to() {
+        let conn_id = uuid::Uuid::new_v4();
+        let node_a = uuid::Uuid::new_v4();
+        let node_b = uuid::Uuid::new_v4();
+
+        // Unpinned: visible on every node.
+        let conn_nodes: HashMap<uuid::Uuid, uuid::Uuid> = HashMap::new();
+        assert!(pinned_to(&conn_nodes, &conn_id, &node_a));
+        assert!(pinned_to(&conn_nodes, &conn_id, &node_b));
+
+        // Pinned: visible only on the pin.
+        let conn_nodes: HashMap<uuid::Uuid, uuid::Uuid> =
+            [(conn_id, node_a)].into_iter().collect();
+        assert!(pinned_to(&conn_nodes, &conn_id, &node_a));
+        assert!(!pinned_to(&conn_nodes, &conn_id, &node_b));
+    }
+
+    fn test_node(env: Env, inbounds: HashMap<Tag, Inbound>) -> Node {
+        Node {
+            uuid: uuid::Uuid::new_v4(),
+            env,
+            hostname: "test-node".to_string(),
+            address: "192.168.1.100".parse().unwrap(),
+            status: NodeStatus::Online,
+            label: "Test".to_string(),
+            interface: "eth0".to_string(),
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            inbounds,
+            cores: 4,
+            max_bandwidth_bps: 1_000_000_000,
+            country: "RU".to_string(),
+            r#type: NodeType::Node,
+            cluster: None,
+        }
+    }
+
+    fn wg_inbound() -> Inbound {
+        Inbound {
+            tag: Tag::Wireguard,
+            port: 51820,
+            stream_settings: None,
+            wg: None,
+            awg: None,
+            h2: None,
+            mtproto_secret: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_node_pin() {
+        let mut inbounds = HashMap::new();
+        inbounds.insert(Tag::Wireguard, wg_inbound());
+        let node = test_node(Env::Ru, inbounds);
+
+        // Happy path.
+        assert!(validate_node_pin(Some(&node), &Env::Ru, Tag::Wireguard).is_ok());
+
+        // Unknown node.
+        assert_eq!(
+            validate_node_pin(None, &Env::Ru, Tag::Wireguard),
+            Err("Node not found".to_string())
+        );
+
+        // Wrong env.
+        assert_eq!(
+            validate_node_pin(Some(&node), &Env::Dev, Tag::Wireguard),
+            Err("Node env mismatch".to_string())
+        );
+
+        // Node has no inbound for the requested protocol.
+        assert_eq!(
+            validate_node_pin(Some(&node), &Env::Ru, Tag::VlessTcpReality),
+            Err("Node has no VlessTcpReality inbound".to_string())
+        );
     }
 }

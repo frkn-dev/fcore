@@ -282,3 +282,10 @@ CREATE TABLE IF NOT EXISTS share_tokens (
 CREATE UNIQUE INDEX IF NOT EXISTS share_tokens_active_triple
     ON share_tokens (source_connection_id, node_id, label)
     WHERE revoked_at IS NULL;
+
+-- Node-pinned connections ("named devices"): the pin is the node's uuid
+-- (nodes.uuid), not the row id. The column existed historically and was
+-- dropped above (line 122) — re-added here. NULL = env-wide (current
+-- behavior); only named devices created with a node pin set it. PG-only,
+-- like label/issued_via: the api mirrors it into an in-memory side map.
+alter table connections add column node_id uuid;

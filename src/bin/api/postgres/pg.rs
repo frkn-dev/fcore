@@ -145,11 +145,18 @@ where
         let conn_id = db_conn.conn_id;
         let label = db_conn.label.clone();
         let issued_via = db_conn.issued_via.clone();
+        let node_id = db_conn.node_id;
         let conn: Connection = db_conn.try_into()?;
 
         // Rebuild the conn_id -> label side map from the PG-only column.
         if let Some(label) = label {
             self.conn_labels.insert(conn_id, label);
+        }
+
+        // Same PG-only side channel: the node pin of a named-device
+        // connection (conn_id -> node uuid).
+        if let Some(node_id) = node_id {
+            self.conn_nodes.insert(conn_id, node_id);
         }
 
         // Same PG-only side channel as the label: share-issued child

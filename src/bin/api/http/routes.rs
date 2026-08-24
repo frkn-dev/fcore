@@ -102,12 +102,14 @@ where
         let get_nodes_route = warp::get()
             .and(warp::path("nodes"))
             .and(warp::path::end())
+            .and(mgmt_auth.clone())
             .and(warp::query::<NodesQueryParams>())
             .and(with_sync(self.sync.clone()))
             .and_then(get_nodes_handler);
 
         let get_node_route = warp::path!("node" / Uuid)
             .and(warp::get())
+            .and(mgmt_auth.clone())
             .and(with_sync(self.sync.clone()))
             .and(with_metrics(self.metrics.clone()))
             .and_then(get_node_handler);

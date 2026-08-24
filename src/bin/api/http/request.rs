@@ -182,6 +182,11 @@ pub struct ConnCreateRequest {
     /// (e.g. "Мама Андроид"). None = system/default connection.
     #[serde(default)]
     pub label: Option<String>,
+    /// Optional pin of a named-device connection to a single node
+    /// (nodes.uuid): the peer exists only on that node. None = env-wide
+    /// (current behavior).
+    #[serde(default)]
+    pub node_id: Option<uuid::Uuid>,
 }
 
 impl ConnCreateRequest {
@@ -342,6 +347,7 @@ mod tests {
             proto: Tag::Wireguard,
             days: None,
             label: label.map(str::to_string),
+            node_id: None,
         }
     }
 
