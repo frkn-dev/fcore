@@ -1,10 +1,8 @@
 name: fcore build
 
+# Builds run on the self-hosted build server. Manual emergency use only.
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,12 +53,6 @@ jobs:
           file target/${{ matrix.target }}/release/node
           ldd target/${{ matrix.target }}/release/node || true
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fcore-node-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/node
-
   build-api:
     needs: [tests]
     runs-on: ubuntu-22.04
@@ -92,12 +84,6 @@ jobs:
           file target/x86_64-unknown-linux-musl/release/api
           ldd target/x86_64-unknown-linux-musl/release/api || true
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fcore-api
-          path: target/x86_64-unknown-linux-musl/release/api
-
   build-auth:
     needs: [tests]
     runs-on: ubuntu-22.04
@@ -128,27 +114,3 @@ jobs:
         run: |
           file target/x86_64-unknown-linux-musl/release/auth
           ldd target/x86_64-unknown-linux-musl/release/auth || true
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fcore-auth
-          path: target/x86_64-unknown-linux-musl/release/auth
-
-  collect-binaries:
-    runs-on: ubuntu-latest
-    needs: [build-node, build-api, build-auth]
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: collected
-          pattern: fcore-*
-          merge-multiple: false
-
-      - name: Upload combined bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: fcore-full-bundle
-          path: collected/
