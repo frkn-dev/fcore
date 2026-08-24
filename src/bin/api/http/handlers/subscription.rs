@@ -746,6 +746,23 @@ where
         .collect();
 
     // -------------------------
+    // Optional named-device scope (conn=<connection_id>)
+    // -------------------------
+    let conns: Vec<(uuid::Uuid, Connection)> = match req.conn {
+        Some(conn_id) => {
+            let filtered: Vec<_> = conns
+                .into_iter()
+                .filter(|(id, _)| *id == conn_id)
+                .collect();
+            if filtered.is_empty() {
+                return Ok(Box::new(http::not_found("Connection not found")));
+            }
+            filtered
+        }
+        None => conns,
+    };
+
+    // -------------------------
     // Build inbound list
     // -------------------------
     let mut inbounds_list: Vec<(Inbound, uuid::Uuid, Connection, String, String, String)> =
@@ -839,6 +856,11 @@ where
     let sub_id = sub.id();
     let expires_at = sub.expires_at().map(|e| e.timestamp()).unwrap_or(0);
     let limit = sub.limit_bytes();
+    // A device-scoped feed (conn=...) gets the device label as profile title.
+    let title = match req.conn.and_then(|cid| mem.conn_labels.get(&cid).cloned()) {
+        Some(label) => label,
+        None => title,
+    };
     drop(mem);
 
     let traffic = match build_subscription_traffic(&memory.db, &metrics, req.id, created_at).await {

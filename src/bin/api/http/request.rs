@@ -236,6 +236,11 @@ pub struct SubscriptionInfoRequest {
     pub proto: TagReq,
     #[serde(default)]
     pub app: Option<String>,
+    /// Optional single-connection (named device) scope: the feed contains
+    /// only links of this connection. The connection must belong to the
+    /// subscription, otherwise the handler answers 404.
+    #[serde(default)]
+    pub conn: Option<uuid::Uuid>,
 }
 
 impl SubscriptionInfoRequest {
@@ -340,5 +345,21 @@ mod tests {
         let label = "я".repeat(65);
         let req = req_with_label(Some(&label));
         assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_subscription_info_conn_param() {
+        let id = uuid::Uuid::new_v4();
+        let conn = uuid::Uuid::new_v4();
+
+        let qs = format!("id={}&format=txt&env=all&proto=proxy&conn={}", id, conn);
+        let req: SubscriptionInfoRequest = serde_urlencoded::from_str(&qs).unwrap();
+        assert_eq!(req.id, id);
+        assert_eq!(req.conn, Some(conn));
+
+        // Absent conn — whole-subscription feed, as before.
+        let qs = format!("id={}&format=txt&env=all&proto=proxy", id);
+        let req: SubscriptionInfoRequest = serde_urlencoded::from_str(&qs).unwrap();
+        assert_eq!(req.conn, None);
     }
 }
