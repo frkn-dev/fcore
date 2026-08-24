@@ -773,9 +773,11 @@ where
         }
     };
 
+    // Under share auth the token pins connection+node, so the client's
+    // service_type/service_protocol are unused (and may be absent).
     let params = GatewayConfigParams {
-        service_protocol: &req.service_protocol,
-        service_type: &req.service_type,
+        service_protocol: "",
+        service_type: "",
         user_country_code: req.user_country_code.as_deref(),
         server_country_code: req.server_country_code.as_deref(),
         connection_id: Some(row.connection_id),
