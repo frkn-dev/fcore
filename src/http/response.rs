@@ -65,6 +65,12 @@ pub struct ConnectionInfo {
     pub is_deleted: bool,
     pub uplink: i64,
     pub downlink: i64,
+    /// Active share token minted FROM this connection (the site shows the
+    /// frkn://conn/... link per device); null when the connection has no
+    /// live share. The token is a share-scope credential — it yields only
+    /// the shared child connection's config via /v1/config, nothing else.
+    pub share_token: Option<String>,
+    pub share_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -125,18 +131,25 @@ mod tests {
             is_deleted: false,
             uplink: 1024,
             downlink: 2048,
+            share_token: Some("k7f29mxq4tvzabcd".to_string()),
+            share_url: Some("frkn://conn/k7f2-9mxq-4tvz-abcd".to_string()),
         };
 
         let value = serde_json::to_value(&info).unwrap();
         let obj = value.as_object().unwrap();
 
         // Exactly these fields — the projection must never grow key
-        // material (wg_privkey), addresses or tokens.
+        // material (wg_privkey), addresses or subscription credentials.
+        // share_token is a share-scope credential: it unlocks only the
+        // shared child connection's config via /v1/config.
         let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
         keys.sort();
         assert_eq!(
             keys,
-            ["downlink", "env", "id", "is_deleted", "label", "proto", "uplink"]
+            [
+                "downlink", "env", "id", "is_deleted", "label", "proto", "share_token",
+                "share_url", "uplink"
+            ]
         );
 
         assert_eq!(obj["proto"], serde_json::json!("Wireguard"));
@@ -145,6 +158,11 @@ mod tests {
         assert_eq!(obj["is_deleted"], serde_json::json!(false));
         assert_eq!(obj["uplink"], serde_json::json!(1024));
         assert_eq!(obj["downlink"], serde_json::json!(2048));
+        assert_eq!(obj["share_token"], serde_json::json!("k7f29mxq4tvzabcd"));
+        assert_eq!(
+            obj["share_url"],
+            serde_json::json!("frkn://conn/k7f2-9mxq-4tvz-abcd")
+        );
     }
 
     #[test]
@@ -157,10 +175,14 @@ mod tests {
             is_deleted: true,
             uplink: 0,
             downlink: 0,
+            share_token: None,
+            share_url: None,
         };
 
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value["label"], serde_json::Value::Null);
+        assert_eq!(value["share_token"], serde_json::Value::Null);
+        assert_eq!(value["share_url"], serde_json::Value::Null);
         assert_eq!(value["proto"], serde_json::json!("AmneziaWgMobile"));
         assert_eq!(value["is_deleted"], serde_json::json!(true));
     }

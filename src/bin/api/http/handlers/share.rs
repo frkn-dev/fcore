@@ -19,7 +19,7 @@ use warp::Reply;
 
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    IpAddrMask, NodeStorageOperations, Subscription, SubscriptionOperations,
+    IpAddrMask, NodeStatus, NodeStorageOperations, Subscription, SubscriptionOperations,
 };
 
 use super::super::super::{
@@ -236,6 +236,20 @@ pub struct ShareRevokeRequest {
     pub share_token: String,
 }
 
+/// POST /share (mgmt, service token) — the site's per-device share link.
+#[derive(Debug, Deserialize)]
+pub struct MgmtShareMintRequest {
+    pub connection_id: uuid::Uuid,
+    pub label: String,
+}
+
+/// POST /share/revoke (mgmt, service token).
+#[derive(Debug, Deserialize)]
+pub struct MgmtShareRevokeRequest {
+    pub share_token: String,
+    pub subscription_id: uuid::Uuid,
+}
+
 // ============================================================================
 // Handlers
 // ============================================================================
@@ -342,16 +356,62 @@ where
         (env, proto)
     };
 
+    match mint_share_inner(
+        &memory,
+        sub_id,
+        req.connection_uuid,
+        req.node_id,
+        env,
+        proto,
+        label,
+        &wg_network,
+        &awg_network,
+        &awg_mobile_network,
+    )
+    .await
+    {
+        Ok(row) => Ok(mint_response(&row.token, &row.label, &row.created_at)),
+        Err(resp) => Ok(resp),
+    }
+}
+
+/// Shared mint core for /v1/share (app, AGW envelope) and POST /share
+/// (mgmt): idempotent per (source, node, label) triple, limited to
+/// MAX_SHARES_PER_SUBSCRIPTION active tokens per subscription. Callers
+/// validate that the source connection and node are legit; `env`/`proto`
+/// come from the source connection.
+pub(crate) async fn mint_share_inner<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    sub_id: uuid::Uuid,
+    source_connection_id: uuid::Uuid,
+    node_id: uuid::Uuid,
+    env: fcore::Env,
+    proto: fcore::Tag,
+    label: String,
+    wg_network: &IpAddrMask,
+    awg_network: &IpAddrMask,
+    awg_mobile_network: &Option<IpAddrMask>,
+) -> Result<ShareTokenRow, warp::reply::Response>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
     let db = memory.db.share();
 
-    let existing = match db
-        .find_active(&req.connection_uuid, &req.node_id, &label)
-        .await
-    {
+    let existing = match db.find_active(&source_connection_id, &node_id, &label).await {
         Ok(v) => v,
         Err(e) => {
             error!("share mint: lookup failed for sub {}: {}", sub_id, e);
-            return Ok(http::internal_error("share lookup failed").into_response());
+            return Err(http::internal_error("share lookup failed").into_response());
         }
     };
 
@@ -359,7 +419,7 @@ where
         Ok(v) => v,
         Err(e) => {
             error!("share mint: count failed for sub {}: {}", sub_id, e);
-            return Ok(http::internal_error("share lookup failed").into_response());
+            return Err(http::internal_error("share lookup failed").into_response());
         }
     };
 
@@ -367,11 +427,11 @@ where
         MintDecision::ReturnExisting => {
             // Idempotency: never create a duplicate child connection.
             if let Some(row) = existing {
-                return Ok(mint_response(&row.token, &row.label, &row.created_at));
+                return Ok(row);
             }
         }
         MintDecision::LimitReached => {
-            return Ok(http::conflict("share_limit_reached").into_response())
+            return Err(http::conflict("share_limit_reached").into_response())
         }
         MintDecision::Mint => {}
     }
@@ -384,19 +444,19 @@ where
         Some(sub_id),
         None,
         Some(label.clone()),
-        &memory,
-        &wg_network,
-        &awg_network,
-        &awg_mobile_network,
+        memory,
+        wg_network,
+        awg_network,
+        awg_mobile_network,
     )
     .await
     {
         Ok(v) => v,
         Err(msg) => {
             if msg.contains("not found") || msg.contains("not active") || msg.contains("IP out of range") {
-                return Ok(http::bad_request(&msg).into_response());
+                return Err(http::bad_request(&msg).into_response());
             }
-            return Ok(http::internal_error(&msg).into_response());
+            return Err(http::internal_error(&msg).into_response());
         }
     };
 
@@ -407,8 +467,8 @@ where
         .await
     {
         error!("share mint: issued_via flag failed for sub {}: {}", sub_id, e);
-        delete_child_connection(&memory, &child_id, child).await;
-        return Ok(http::internal_error("share mint failed").into_response());
+        delete_child_connection(memory, &child_id, child).await;
+        return Err(http::internal_error("share mint failed").into_response());
     }
 
     {
@@ -423,8 +483,8 @@ where
             token: generate_share_token(),
             subscription_id: sub_id,
             connection_id: child_id,
-            node_id: req.node_id,
-            source_connection_id: req.connection_uuid,
+            node_id,
+            source_connection_id,
             label: label.clone(),
             created_at: Utc::now(),
             last_used_at: None,
@@ -432,35 +492,32 @@ where
         };
 
         match db.insert(&row).await {
-            Ok(true) => return Ok(mint_response(&row.token, &row.label, &row.created_at)),
+            Ok(true) => return Ok(row),
             Ok(false) => {
-                match db
-                    .find_active(&req.connection_uuid, &req.node_id, &label)
-                    .await
-                {
+                match db.find_active(&source_connection_id, &node_id, &label).await {
                     Ok(Some(winner)) => {
-                        delete_child_connection(&memory, &child_id, child).await;
-                        return Ok(mint_response(&winner.token, &winner.label, &winner.created_at));
+                        delete_child_connection(memory, &child_id, child).await;
+                        return Ok(winner);
                     }
                     Ok(None) => continue, // token PK collision — try again
                     Err(e) => {
                         error!("share mint: re-read failed for sub {}: {}", sub_id, e);
-                        delete_child_connection(&memory, &child_id, child).await;
-                        return Ok(http::internal_error("share mint failed").into_response());
+                        delete_child_connection(memory, &child_id, child).await;
+                        return Err(http::internal_error("share mint failed").into_response());
                     }
                 }
             }
             Err(e) => {
                 error!("share mint: insert failed for sub {}: {}", sub_id, e);
-                delete_child_connection(&memory, &child_id, child).await;
-                return Ok(http::internal_error("share mint failed").into_response());
+                delete_child_connection(memory, &child_id, child).await;
+                return Err(http::internal_error("share mint failed").into_response());
             }
         }
     }
 
     error!("share mint: token allocation retries exhausted for sub {}", sub_id);
-    delete_child_connection(&memory, &child_id, child).await;
-    Ok(http::internal_error("failed to allocate share token").into_response())
+    delete_child_connection(memory, &child_id, child).await;
+    Err(http::internal_error("failed to allocate share token").into_response())
 }
 
 /// POST /v1/shares — list active share tokens (owner).
@@ -565,24 +622,55 @@ where
         return Ok(share_not_found());
     };
 
-    let row = match memory.db.share().get(&token).await {
+    if let Err(resp) = revoke_share_inner(&memory, &token, sub_id).await {
+        return Ok(resp);
+    }
+
+    Ok(warp::reply::json(&serde_json::json!({
+        "status": 200,
+        "message": "share_revoked"
+    }))
+    .into_response())
+}
+
+/// Shared revoke core for /v1/share/revoke (app) and POST /share/revoke
+/// (mgmt): marks the token revoked and deletes its child connection.
+/// Unknown, already revoked or cross-subscription tokens get a uniform 404
+/// share_not_found (the caller's subscription id is the ownership proof).
+pub(crate) async fn revoke_share_inner<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    token: &str,
+    sub_id: uuid::Uuid,
+) -> Result<(), warp::reply::Response>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let row = match memory.db.share().get(token).await {
         Ok(Some(row)) => row,
-        Ok(None) => return Ok(share_not_found()),
+        Ok(None) => return Err(share_not_found()),
         Err(e) => {
             error!("share revoke: lookup failed for sub {}: {}", sub_id, e);
-            return Ok(http::internal_error("share revoke failed").into_response());
+            return Err(http::internal_error("share revoke failed").into_response());
         }
     };
 
-    // Unknown, already revoked or not the caller's token: uniform 404 (the
-    // client treats it as success).
     if row.revoked_at.is_some() || row.subscription_id != sub_id {
-        return Ok(share_not_found());
+        return Err(share_not_found());
     }
 
-    if let Err(e) = memory.db.share().revoke(&token).await {
+    if let Err(e) = memory.db.share().revoke(token).await {
         error!("share revoke: update failed for sub {}: {}", sub_id, e);
-        return Ok(http::internal_error("share revoke failed").into_response());
+        return Err(http::internal_error("share revoke failed").into_response());
     }
 
     // Drop the child connection from the node (ZMQ delete) and from memory.
@@ -593,15 +681,11 @@ where
     };
     if let Some(conn) = child {
         if !conn.get_deleted() {
-            delete_child_connection(&memory, &row.connection_id, conn.into()).await;
+            delete_child_connection(memory, &row.connection_id, conn.into()).await;
         }
     }
 
-    Ok(warp::reply::json(&serde_json::json!({
-        "status": 200,
-        "message": "share_revoked"
-    }))
-    .into_response())
+    Ok(())
 }
 
 /// The share_token branch of POST /v1/config: the config is built strictly
@@ -697,9 +781,144 @@ where
     }
 }
 
+// ============================================================================
+// Mgmt handlers (service-token auth; the site's proxy in mrkting uses these)
+// ============================================================================
+
+/// First online node exposing a matching inbound — the same selection rule
+/// as the subscription feed builder. Candidates are (uuid, is_online,
+/// has_matching_inbound) triples so the rule stays unit-testable.
+pub(crate) fn pick_share_node(candidates: &[(uuid::Uuid, bool, bool)]) -> Option<uuid::Uuid> {
+    candidates
+        .iter()
+        .find(|(_, is_online, has_inbound)| *is_online && *has_inbound)
+        .map(|(id, _, _)| *id)
+}
+
+/// POST /share — mint a share token via mgmt (service token) auth. Unlike
+/// /v1/share the node is auto-picked: the first online node of the source
+/// connection's env with a matching inbound.
+pub async fn mgmt_share_mint_handler<N, C, S>(
+    req: MgmtShareMintRequest,
+    memory: MemSync<N, C, S>,
+    wg_network: IpAddrMask,
+    awg_network: IpAddrMask,
+    awg_mobile_network: Option<IpAddrMask>,
+) -> Result<warp::reply::Response, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let label = match normalize_share_label(&req.label) {
+        Ok(l) => l,
+        Err(msg) => return Ok(http::bad_request(msg).into_response()),
+    };
+
+    let (sub_id, env, proto, node_id) = {
+        let mem = memory.memory.read().await;
+
+        let conn = mem
+            .connections
+            .get(&req.connection_id)
+            .filter(|c| !c.get_deleted());
+        let Some(conn) = conn else {
+            return Ok(http::not_found("connection_not_found").into_response());
+        };
+        // A connection without a subscription cannot be shared: the token
+        // row and the per-subscription limit both need it.
+        let Some(sub_id) = conn.get_subscription_id() else {
+            return Ok(http::not_found("connection_not_found").into_response());
+        };
+
+        let env = conn.get_env();
+        let proto = conn.get_proto().proto();
+
+        let node_id = mem.nodes.get_by_env(&env).and_then(|nodes| {
+            pick_share_node(
+                &nodes
+                    .iter()
+                    .map(|n| {
+                        (
+                            n.uuid,
+                            n.status == NodeStatus::Online,
+                            n.inbounds.contains_key(&proto),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        });
+        let Some(node_id) = node_id else {
+            return Ok(http::not_found("node_not_found").into_response());
+        };
+
+        (sub_id, env, proto, node_id)
+    };
+
+    match mint_share_inner(
+        &memory,
+        sub_id,
+        req.connection_id,
+        node_id,
+        env,
+        proto,
+        label,
+        &wg_network,
+        &awg_network,
+        &awg_mobile_network,
+    )
+    .await
+    {
+        Ok(row) => Ok(mint_response(&row.token, &row.label, &row.created_at)),
+        Err(resp) => Ok(resp),
+    }
+}
+
+/// POST /share/revoke — revoke via mgmt auth. Revokes only when the token's
+/// subscription matches the request's; unknown/revoked/mismatched tokens all
+/// get the uniform 404 share_not_found.
+pub async fn mgmt_share_revoke_handler<N, C, S>(
+    req: MgmtShareRevokeRequest,
+    memory: MemSync<N, C, S>,
+) -> Result<warp::reply::Response, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let Some(token) = normalize_share_token(&req.share_token) else {
+        return Ok(share_not_found());
+    };
+
+    if let Err(resp) = revoke_share_inner(&memory, &token, req.subscription_id).await {
+        return Ok(resp);
+    }
+
+    Ok(warp::reply::json(&serde_json::json!({
+        "status": 200,
+        "message": "share_revoked"
+    }))
+    .into_response())
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
 
     #[test]
     fn test_generate_share_token_charset_and_length() {
@@ -786,5 +1005,27 @@ mod tests {
 
         assert!(is_share_connection(&share_conns, &child));
         assert!(!is_share_connection(&share_conns, &normal));
+    }
+
+    #[test]
+    fn test_pick_share_node() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let c = uuid::Uuid::new_v4();
+
+        // First online node with a matching inbound wins.
+        let candidates = vec![
+            (a, false, true),  // offline
+            (b, true, false),  // no matching inbound
+            (c, true, true),
+        ];
+        assert_eq!(pick_share_node(&candidates), Some(c));
+
+        // Order matters: the first candidate wins.
+        let candidates = vec![(c, true, true), (b, true, true)];
+        assert_eq!(pick_share_node(&candidates), Some(c));
+
+        assert_eq!(pick_share_node(&[(a, false, true)]), None);
+        assert_eq!(pick_share_node(&[]), None);
     }
 }

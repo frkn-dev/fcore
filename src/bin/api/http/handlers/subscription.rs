@@ -31,7 +31,7 @@ use super::super::{
     request::EnvFilter,
     request::{FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
-use super::share::is_share_connection;
+use super::share::{grouped_token, is_share_connection};
 
 #[derive(Debug, Deserialize)]
 pub struct TrafficHistoryQuery {
@@ -472,6 +472,8 @@ where
             is_deleted: conn.get_deleted(),
             uplink: 0,
             downlink: 0,
+            share_token: None,
+            share_url: None,
         })
         .collect();
     drop(mem);
@@ -495,6 +497,32 @@ where
         Err(e) => {
             tracing::warn!(
                 "Per-connection traffic read failed for sub {}: {}",
+                subscription_id,
+                e
+            );
+        }
+    }
+
+    // The active share link minted FROM each connection (the site shows a
+    // frkn://conn/... link per device). Best-effort like the traffic read:
+    // on failure devices simply show nulls. Latest share wins when a device
+    // somehow has several live ones.
+    match memory.db.share().list_active(&subscription_id).await {
+        Ok(shares) => {
+            let by_source: HashMap<uuid::Uuid, String> = shares
+                .iter()
+                .map(|s| (s.source_connection_id, s.token.clone()))
+                .collect();
+            for c in connections.iter_mut() {
+                if let Some(token) = by_source.get(&c.id) {
+                    c.share_url = Some(format!("frkn://conn/{}", grouped_token(token)));
+                    c.share_token = Some(token.clone());
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Share token read failed for sub {}: {}",
                 subscription_id,
                 e
             );

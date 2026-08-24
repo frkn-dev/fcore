@@ -499,6 +499,33 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(delete_connection_handler);
 
+        // Share token management (service token auth — the site's mrkting
+        // proxy calls these; the app uses the AGW /v1/share* routes).
+        let post_share_mgmt_route = warp::post()
+            .and(warp::path("share"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<MgmtShareMintRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
+            .and_then(mgmt_share_mint_handler);
+
+        let post_share_revoke_mgmt_route = warp::post()
+            .and(warp::path("share"))
+            .and(warp::path("revoke"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<MgmtShareRevokeRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(mgmt_share_revoke_handler);
+
         // Keys Routes
         let get_key_validation_route = warp::get()
             .and(warp::path("key"))
@@ -812,6 +839,9 @@ where
             .or(get_wg_connections_info_route)
             .or(get_awg_connections_info_route)
             .or(get_a_connection_route)
+            // Share (mgmt)
+            .or(post_share_mgmt_route)
+            .or(post_share_revoke_mgmt_route)
             // Key
             .or(get_key_validation_route)
             .or(post_key_route)
