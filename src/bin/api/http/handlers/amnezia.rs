@@ -230,6 +230,8 @@ pub struct GatewayConfigResponse {
     pub country_name: Option<String>,
     #[serde(rename = "service_protocol", skip_serializing_if = "Option::is_none")]
     pub service_protocol: Option<String>,
+    #[serde(rename = "service_type", skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<String>,
 }
 
 // ============================================================================
@@ -1353,6 +1355,7 @@ where
         country_code: None,
         country_name: None,
         service_protocol: None,
+        service_type: None,
     })
 }
 
@@ -1576,6 +1579,58 @@ mod tests {
         assert!(req.service_type.is_none());
         assert!(req.service_protocol.is_none());
         assert!(share::auth_data_has_share_token(&req.auth_data));
+    }
+
+    #[test]
+    fn share_config_response_carries_display_fields() {
+        // The share recipient has no /v1/services access: the config response
+        // must carry share_label/country/service_protocol/service_type.
+        let resp = GatewayConfigResponse {
+            config: "Y2Zn".to_string(),
+            supported_protocols: vec!["awg".to_string()],
+            service_info: serde_json::json!({"name": "Moscow", "type": share::SHARE_SERVICE_TYPE}),
+            api_config: serde_json::json!({
+                "service_type": share::SHARE_SERVICE_TYPE,
+                "service_protocol": "awg",
+                "user_country_code": "",
+                "server_country_code": null
+            }),
+            share_label: Some("Android Mama".to_string()),
+            country_code: Some("FI".to_string()),
+            country_name: Some("FI".to_string()),
+            service_protocol: Some("awg".to_string()),
+            service_type: Some(share::SHARE_SERVICE_TYPE.to_string()),
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["share_label"], "Android Mama");
+        assert_eq!(v["country_code"], "FI");
+        assert_eq!(v["country_name"], "FI");
+        assert_eq!(v["service_protocol"], "awg");
+        assert_eq!(v["service_type"], "amnezia-premium");
+        assert_eq!(v["api_config"]["service_type"], "amnezia-premium");
+
+        // Owner branch: display fields are omitted entirely.
+        let owner = GatewayConfigResponse {
+            config: resp.config.clone(),
+            supported_protocols: resp.supported_protocols.clone(),
+            service_info: resp.service_info.clone(),
+            api_config: resp.api_config.clone(),
+            share_label: None,
+            country_code: None,
+            country_name: None,
+            service_protocol: None,
+            service_type: None,
+        };
+        let v = serde_json::to_value(&owner).unwrap();
+        for field in [
+            "share_label",
+            "country_code",
+            "country_name",
+            "service_protocol",
+            "service_type",
+        ] {
+            assert!(v.get(field).is_none(), "{} must be omitted", field);
+        }
     }
 }
 

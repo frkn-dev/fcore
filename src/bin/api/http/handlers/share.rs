@@ -40,6 +40,11 @@ use super::subscription::{conn_link_label, subscription_feed_inner, ShareFeedSco
 /// Per-subscription cap on active (non-revoked) share tokens.
 pub const MAX_SHARES_PER_SUBSCRIPTION: i64 = 20;
 
+/// service_type reported to share recipients — the same type the owner's
+/// Premium card carries in /v1/services, so the app renders the imported
+/// server identically.
+pub(crate) const SHARE_SERVICE_TYPE: &str = "amnezia-premium";
+
 /// Crockford base32, lowercase: 16 chars = 80 bits of CSPRNG entropy.
 const TOKEN_LEN: usize = 16;
 const TOKEN_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -774,10 +779,12 @@ where
     };
 
     // Under share auth the token pins connection+node, so the client's
-    // service_type/service_protocol are unused (and may be absent).
+    // service_type/service_protocol are unused (and may be absent). The
+    // recipient still needs a service_type to render the card — report the
+    // same type the owner's Premium card carries.
     let params = GatewayConfigParams {
         service_protocol: "",
-        service_type: "",
+        service_type: SHARE_SERVICE_TYPE,
         user_country_code: req.user_country_code.as_deref(),
         server_country_code: req.server_country_code.as_deref(),
         connection_id: Some(row.connection_id),
@@ -802,6 +809,7 @@ where
                 .get("service_protocol")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            resp.service_type = Some(SHARE_SERVICE_TYPE.to_string());
 
             // Cheap async bookkeeping; must not block or fail the request.
             let db = memory.db.clone();
