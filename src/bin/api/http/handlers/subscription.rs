@@ -701,7 +701,7 @@ fn is_url_safe_punctuation(c: char) -> bool {
 /// Share-link fragment label for a connection: a named device prefixes the
 /// node/cluster label ("Мама Андроид | NL-1"), a default connection keeps
 /// the plain node/cluster label.
-fn conn_link_label(
+pub(crate) fn conn_link_label(
     labels: &HashMap<uuid::Uuid, String>,
     conn_id: &uuid::Uuid,
     node_label: String,

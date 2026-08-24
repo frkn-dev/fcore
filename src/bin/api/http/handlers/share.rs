@@ -19,7 +19,7 @@ use warp::Reply;
 
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    IpAddrMask, MetricStorage, NodeStatus, NodeStorageOperations, Subscription,
+    InboundConnLink, IpAddrMask, MetricStorage, NodeStatus, NodeStorageOperations, Subscription,
     SubscriptionOperations,
 };
 
@@ -35,7 +35,7 @@ use super::amnezia::{
     GatewayConfigRequest,
 };
 use super::connection::create_connection_inner;
-use super::subscription::{subscription_feed_inner, ShareFeedScope};
+use super::subscription::{conn_link_label, subscription_feed_inner, ShareFeedScope};
 
 /// Per-subscription cap on active (non-revoked) share tokens.
 pub const MAX_SHARES_PER_SUBSCRIPTION: i64 = 20;
@@ -955,6 +955,17 @@ where
 // Public per-share feed (GET /sub/<token>) — plain HTTP, third-party clients
 // ============================================================================
 
+/// WG-family share feeds bypass the link-list formats entirely and answer
+/// the raw INI config: the owner feed's format validation allows no format
+/// for these protos (they are served via /info/connections/* instead), but
+/// a share feed has exactly one entry, so the INI alone is the body.
+pub(crate) fn share_feed_is_raw_ini(tag: fcore::Tag) -> bool {
+    matches!(
+        tag,
+        fcore::Tag::Wireguard | fcore::Tag::AmneziaWg | fcore::Tag::AmneziaWgMobile
+    )
+}
+
 /// GET /sub/<token> — a standard subscription feed containing ONLY the
 /// shared server, for third-party clients (Happ/Streisand/Clash). The token
 /// in the path is the whole credential; the subscription id never appears
@@ -1013,13 +1024,60 @@ where
 
     // The child's proto decides the feed's proto selector (the client cannot
     // pick one); a missing/deleted child 404s like a conn-scope miss.
-    let proto = {
+    let (child, proto) = {
         let mem = memory.memory.read().await;
         match mem.connections.get(&row.connection_id) {
-            Some(conn) if !conn.get_deleted() => conn.get_proto().proto(),
+            Some(conn) if !conn.get_deleted() => (conn.clone(), conn.get_proto().proto()),
             _ => return Ok(Box::new(http::not_found("Connection not found"))),
         }
     };
+
+    // WG-family connections can't go through the link-list feed formats (the
+    // owner feed allows none for these protos): answer the single INI config
+    // as the whole body, whatever the format param says. One entry — the
+    // multi-line concern doesn't apply.
+    if share_feed_is_raw_ini(proto) {
+        let ini = {
+            let mem = memory.memory.read().await;
+            let conn: Connection = child.into();
+            match mem.nodes.get_by_id(&row.node_id) {
+                Some(node) if node.status == NodeStatus::Online => match node.inbounds.get(&proto)
+                {
+                    Some(inbound) => {
+                        let host = node.connection_host();
+                        let label = conn_link_label(
+                            &mem.conn_labels,
+                            &row.connection_id,
+                            node.cluster.clone().unwrap_or(node.label.clone()),
+                        );
+                        inbound
+                            .create_link(&row.connection_id, &conn, &node.hostname, &host, &label)
+                            .ok()
+                    }
+                    None => None,
+                },
+                _ => None,
+            }
+        };
+
+        let Some(ini) = ini else {
+            // Offline/missing node or a broken inbound: don't leak internals.
+            return Ok(Box::new(http::not_found("Nodes not found")));
+        };
+
+        // Cheap async bookkeeping on success, same as the list feed.
+        let db = memory.db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db.share().touch_last_used(&token).await {
+                warn!("share last_used_at update failed: {}", e);
+            }
+        });
+
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::with_header(ini, "Content-Type", "text/plain"),
+            warp::http::StatusCode::OK,
+        )));
+    }
 
     let scope = ShareFeedScope {
         conn_id: row.connection_id,
@@ -1137,6 +1195,28 @@ mod tests {    use super::*;
     #[test]
     fn test_mask_token() {
         assert_eq!(mask_token("k7f29mxq4tvzabcd"), "k7f2…");
+    }
+
+    #[test]
+    fn test_share_feed_is_raw_ini() {
+        use fcore::Tag;
+        // WG-family goes the raw-INI path...
+        for tag in [Tag::Wireguard, Tag::AmneziaWg, Tag::AmneziaWgMobile] {
+            assert!(share_feed_is_raw_ini(tag), "{tag:?}");
+        }
+        // ...everything else stays on the link-list feed.
+        for tag in [
+            Tag::VlessTcpReality,
+            Tag::VlessGrpcReality,
+            Tag::VlessXhttpReality,
+            Tag::VlessXhttpCdn,
+            Tag::Vmess,
+            Tag::Shadowsocks,
+            Tag::Hysteria2,
+            Tag::Mtproto,
+        ] {
+            assert!(!share_feed_is_raw_ini(tag), "{tag:?}");
+        }
     }
 
     #[test]
