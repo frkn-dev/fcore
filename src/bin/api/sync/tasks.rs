@@ -358,6 +358,8 @@ where
             // side map (PG keeps the column, so a full reload or a restore
             // followed by a periodic sync re-populates it).
             memory.conn_labels.remove(conn_id);
+            // A deleted share child leaves the hidden set as well.
+            memory.share_conns.remove(conn_id);
         }
 
         info!("Successfully completed deletion flow for: {}", conn_id);

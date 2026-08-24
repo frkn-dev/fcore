@@ -28,6 +28,10 @@ pub struct ConnRow {
     /// into `Connection`/`Conn` so it cannot cross the rkyv wire to nodes
     /// (same precedent as `deleted_reason`).
     pub label: Option<String>,
+    /// Provenance flag: Some("share") marks a child connection minted for a
+    /// share token recipient. PG-only like `label`; the api mirrors it into
+    /// an in-memory set to hide share children from owner-facing listings.
+    pub issued_via: Option<String>,
 }
 
 impl From<(uuid::Uuid, Connection)> for ConnRow {
@@ -48,6 +52,9 @@ impl From<(uuid::Uuid, Connection)> for ConnRow {
             // The label never lives on `Connection`; callers that have one
             // set it on the row explicitly (see SyncOp::add_conn).
             label: None,
+            // Same for the share provenance flag: set post-insert by the
+            // share mint flow (PgConn::set_issued_via).
+            issued_via: None,
         }
     }
 }
@@ -148,7 +155,8 @@ impl PgConn {
             wg_privkey,
             wg_address,
             is_deleted,
-            label
+            label,
+            issued_via
         FROM connections
     ";
 
@@ -173,6 +181,7 @@ impl PgConn {
                 let wg_address: Option<String> = row.get("wg_address");
                 let is_deleted: bool = row.get("is_deleted");
                 let label: Option<String> = row.get("label");
+                let issued_via: Option<String> = row.get("issued_via");
 
                 let wg = match (wg_privkey, wg_address) {
                     (Some(privkey), Some(address)) => {
@@ -197,6 +206,7 @@ impl PgConn {
                     wg,
                     is_deleted,
                     label,
+                    issued_via,
                 }
             })
             .collect()
@@ -224,6 +234,19 @@ impl PgConn {
         Ok(())
     }
 
+    /// Sets the PG-only provenance flag (e.g. "share" for minted child
+    /// connections). Called post-insert by the share mint flow.
+    pub async fn set_issued_via(&self, conn_id: &uuid::Uuid, issued_via: &str) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let query = "UPDATE connections SET issued_via = $2 WHERE id = $1";
+
+        client.execute(query, &[conn_id, &issued_via]).await?;
+
+        Ok(())
+    }
+
     pub async fn insert(&self, conn: ConnRow) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
@@ -242,11 +265,12 @@ impl PgConn {
             wg_privkey,
             wg_address,
             token,
-            label
+            label,
+            issued_via
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13
+            $11, $12, $13, $14
         )
     ";
 
@@ -267,6 +291,7 @@ impl PgConn {
                     &conn.wg.as_ref().map(|w| w.address.to_string()),
                     &conn.token,
                     &conn.label,
+                    &conn.issued_via,
                 ],
             )
             .await;

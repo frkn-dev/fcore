@@ -31,6 +31,7 @@ use super::super::{
     request::EnvFilter,
     request::{FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
+use super::share::is_share_connection;
 
 #[derive(Debug, Deserialize)]
 pub struct TrafficHistoryQuery {
@@ -348,7 +349,16 @@ where
         )));
     };
 
-    let connections = mem.connections.get_by_subscription_id(&subscription_id);
+    // Share-issued child connections never leak into the owner's device
+    // list (or the location list derived from it).
+    let connections = mem
+        .connections
+        .get_by_subscription_id(&subscription_id)
+        .map(|cs| {
+            cs.into_iter()
+                .filter(|(conn_id, _)| !is_share_connection(&mem.share_conns, conn_id))
+                .collect::<Vec<_>>()
+        });
     let mut locations = Vec::new();
     if let Some(conns) = connections.clone() {
         let active_envs: HashSet<Env> = conns
@@ -733,8 +743,14 @@ where
         .get_by_subscription_id(&req.id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|(_, conn)| {
+        .filter(|(conn_id, conn)| {
             if conn.get_deleted() {
+                return false;
+            }
+
+            // Share-issued child connections are credentials for the share
+            // recipient, not part of the owner's whole-subscription feed.
+            if is_share_connection(&mem.share_conns, conn_id) {
                 return false;
             }
 

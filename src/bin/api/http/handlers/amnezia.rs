@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use warp::Reply;
 
+use super::share;
+
 // ============================================================================
 // DTOs
 // ============================================================================
@@ -215,6 +217,16 @@ pub struct GatewayConfigResponse {
     pub service_info: serde_json::Value,
     #[serde(rename = "api_config")]
     pub api_config: serde_json::Value,
+    // Display fields set only under share_token auth: the recipient has no
+    // /v1/services access to learn them from.
+    #[serde(rename = "share_label", skip_serializing_if = "Option::is_none")]
+    pub share_label: Option<String>,
+    #[serde(rename = "country_code", skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(rename = "country_name", skip_serializing_if = "Option::is_none")]
+    pub country_name: Option<String>,
+    #[serde(rename = "service_protocol", skip_serializing_if = "Option::is_none")]
+    pub service_protocol: Option<String>,
 }
 
 // ============================================================================
@@ -222,7 +234,7 @@ pub struct GatewayConfigResponse {
 // ============================================================================
 
 /// Extracts subscription_id from auth_data.
-fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> {
+pub(crate) fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> {
     auth_data
         .get("id")
         .and_then(|v| v.as_str())
@@ -865,6 +877,15 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
+    // A share token authorizes /v1/config and nothing else.
+    if req
+        .auth_data
+        .as_ref()
+        .is_some_and(share::auth_data_has_share_token)
+    {
+        return Ok(share::forbidden("share_token is only valid for /v1/config"));
+    }
+
     let mem = memory.memory.read().await;
 
     // If subscription_id is provided, use the real subscription end_date and its connections.
@@ -881,7 +902,14 @@ where
     let end_date = sub
         .as_ref()
         .and_then(|sub| sub.expires_at().map(|d| d.to_rfc3339()));
-    let conns = sub_id.and_then(|sub_id| mem.connections.get_by_subscription_id(&sub_id));
+    let conns = sub_id
+        .and_then(|sub_id| mem.connections.get_by_subscription_id(&sub_id))
+        .map(|cs| {
+            // Share-issued child connections are not the owner's devices.
+            cs.into_iter()
+                .filter(|(conn_id, _)| !share::is_share_connection(&mem.share_conns, conn_id))
+                .collect::<Vec<_>>()
+        });
     let conns_slice = conns.as_deref();
 
     let vless_connections = connections_for_protocol(&mem.nodes, "vless", conns_slice);
@@ -945,6 +973,11 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
+    // A share token authorizes /v1/config and nothing else.
+    if share::auth_data_has_share_token(&req.auth_data) {
+        return Ok(share::forbidden("share_token is only valid for /v1/config"));
+    }
+
     let sub_id = match extract_subscription_id(&req.auth_data) {
         Some(id) => id,
         None => {
@@ -968,7 +1001,15 @@ where
     }
 
     let conns = mem.connections.get_by_subscription_id(&sub_id);
-    let active_devices = conns.as_ref().map(|c| c.len() as i64).unwrap_or(0);
+    // Share-issued child connections are not the owner's devices.
+    let active_devices = conns
+        .as_ref()
+        .map(|cs| {
+            cs.iter()
+                .filter(|(conn_id, _)| !share::is_share_connection(&mem.share_conns, conn_id))
+                .count() as i64
+        })
+        .unwrap_or(0);
 
     // Build issued_configs from real connections.
     let issued_configs: Vec<GatewayIssuedConfig> = conns
@@ -1305,12 +1346,19 @@ where
             "user_country_code": params.user_country_code.unwrap_or(""),
             "server_country_code": params.server_country_code
         }),
+        share_label: None,
+        country_code: None,
+        country_name: None,
+        service_protocol: None,
     })
 }
 
 pub async fn gateway_config_handler<N, C, S>(
     req: GatewayConfigRequest,
     memory: MemSync<N, C, S>,
+    remote: Option<std::net::SocketAddr>,
+    x_forwarded_for: Option<String>,
+    rate_limiter: std::sync::Arc<share::RateLimiter>,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1325,6 +1373,21 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
+    // Share-token auth is a separate, tightly scoped branch: the config is
+    // pinned to the token's child connection and nothing else.
+    if let Some(raw_token) = req.auth_data.get("share_token").and_then(|v| v.as_str()) {
+        let raw_token = raw_token.to_string();
+        return Ok(share::gateway_share_config_handler(
+            req,
+            &raw_token,
+            memory,
+            remote,
+            x_forwarded_for,
+            rate_limiter,
+        )
+        .await);
+    }
+
     let sub_id = match extract_subscription_id(&req.auth_data) {
         Some(id) => id,
         None => {

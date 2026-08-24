@@ -86,6 +86,11 @@ where
     /// part of the rkyv payload) and maintained on create/delete/full
     /// reload. Absent entry = system/default connection.
     pub conn_labels: std::collections::HashMap<uuid::Uuid, String>,
+    /// Ids of share-issued child connections (connections.issued_via =
+    /// 'share'), maintained like `conn_labels`. These are credentials
+    /// minted for share token recipients, not the owner's devices: every
+    /// owner-facing listing filters them out.
+    pub share_conns: std::collections::HashSet<uuid::Uuid>,
 }
 
 impl<T: Default, C, S: Default + PartialEq> Default for Cache<T, C, S>
@@ -123,6 +128,7 @@ where
             connections: Connections::default(),
             subscriptions: Subscriptions::default(),
             conn_labels: std::collections::HashMap::new(),
+            share_conns: std::collections::HashSet::new(),
         }
     }
 }

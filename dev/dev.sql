@@ -249,3 +249,36 @@ ADD VALUE 'amnezia_wg_mobile';
 -- map rebuilt from this column.
 ALTER TABLE connections
     ADD COLUMN IF NOT EXISTS label TEXT;
+
+
+-- Share tokens (frkn://conn/<token>): a scoped credential that lets a
+-- recipient import exactly one server. At mint time the backend creates a
+-- "child" connection on the same subscription (own UUID/keys, same env and
+-- proto as the source connection) and flags it issued_via = 'share'. The
+-- flag is PG-only like `label`: the api mirrors it into an in-memory set so
+-- share children stay hidden from every owner-facing listing (/v1/services,
+-- account info device count, the site device list, the whole-sub feed).
+ALTER TABLE connections
+    ADD COLUMN IF NOT EXISTS issued_via TEXT;
+
+-- Applied automatically at api startup; kept here for fresh environments.
+-- token: Crockford base32, 16 chars (80 bits), stored contiguous lowercase.
+-- No TTL: a token lives until explicit revoke. connection_id is the child
+-- connection created at mint; node_id pins the config to one node.
+CREATE TABLE IF NOT EXISTS share_tokens (
+    token TEXT PRIMARY KEY,
+    subscription_id UUID NOT NULL,
+    connection_id UUID NOT NULL,
+    node_id UUID NOT NULL,
+    source_connection_id UUID NOT NULL,
+    label TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+
+-- Idempotent mint: a repeat request for the same (source, node, label)
+-- triple returns the existing live token instead of duplicating the child.
+CREATE UNIQUE INDEX IF NOT EXISTS share_tokens_active_triple
+    ON share_tokens (source_connection_id, node_id, label)
+    WHERE revoked_at IS NULL;

@@ -17,6 +17,7 @@ use super::{
     iap::PgIap,
     keys::PgKey,
     node::PgNode,
+    share::{PgShare, ISSUED_VIA_SHARE},
     subscription::PgSubscription,
     traffic::PgTraffic,
 };
@@ -109,6 +110,10 @@ impl PgContext {
     pub fn iap(&self) -> PgIap {
         PgIap::new(self.manager.clone())
     }
+
+    pub fn share(&self) -> PgShare {
+        PgShare::new(self.manager.clone())
+    }
 }
 
 #[async_trait::async_trait]
@@ -139,11 +144,18 @@ where
     async fn add_conn(&mut self, db_conn: ConnRow) -> Result<Status> {
         let conn_id = db_conn.conn_id;
         let label = db_conn.label.clone();
+        let issued_via = db_conn.issued_via.clone();
         let conn: Connection = db_conn.try_into()?;
 
         // Rebuild the conn_id -> label side map from the PG-only column.
         if let Some(label) = label {
             self.conn_labels.insert(conn_id, label);
+        }
+
+        // Same PG-only side channel as the label: share-issued child
+        // connections are hidden from every owner-facing listing.
+        if issued_via.as_deref() == Some(ISSUED_VIA_SHARE) {
+            self.share_conns.insert(conn_id);
         }
 
         self.connections.add(&conn_id, conn.into()).map_err(|e| {
