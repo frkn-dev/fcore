@@ -1,8 +1,9 @@
 name: Release
 
+# Builds run on the self-hosted build server
+# (frkn-services: deploy/server-release.sh). Manual emergency use only.
 on:
-  push:
-    tags: ["*"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

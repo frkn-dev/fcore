@@ -1,10 +1,8 @@
 name: fcore build
 
+# Builds run on the self-hosted build server. Manual emergency use only.
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
