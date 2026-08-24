@@ -1,8 +1,9 @@
 name: Release
 
+# Builds run on the self-hosted build server
+# (frkn-services: deploy/server-release.sh). Manual emergency use only.
 on:
-  push:
-    tags: ["*"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,27 +20,20 @@ jobs:
       - name: Test
         run: cargo test --lib
 
-  build-node:
+  build-and-release:
     needs: [tests]
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, armv7-unknown-linux-gnueabihf
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release
 
       - name: Install Build Tools
         run: |
@@ -47,72 +41,29 @@ jobs:
           pip3 install ziglang
           cargo install cargo-zigbuild
 
-      - name: Build Node
-        run: cargo zigbuild --release --target ${{ matrix.target }} --bin node --features xray,wireguard,amnezia-wg
+      - name: Build Node (x86_64)
+        run: cargo zigbuild --release --target x86_64-unknown-linux-gnu --bin node --features xray,wireguard,amnezia-wg
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fcore-node-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/node
+      - name: Build Node (aarch64)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-gnu --bin node --features xray,wireguard,amnezia-wg
 
-  build-api:
-    needs: [tests]
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-      - name: Test Lib
-        run: cargo test --lib
+      - name: Build Node (armv7)
+        run: cargo zigbuild --release --target armv7-unknown-linux-gnueabihf --bin node --features xray,wireguard,amnezia-wg
+
       - name: Build API
         run: cargo build --release --bin api --no-default-features
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fcore-api
-          path: target/release/api
 
-  build-auth:
-    needs: [tests]
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
       - name: Build Auth
         run: cargo build --release --bin auth --no-default-features
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fcore-auth
-          path: target/release/auth
-
-  release:
-    name: Create Release
-    needs: [build-api, build-auth, build-node]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: fcore-*
-          merge-multiple: false
 
       - name: Prepare release files
         run: |
           mkdir -p release_dist
-          cp artifacts/fcore-node-x86_64-unknown-linux-gnu/node release_dist/node-x86_64
-          cp artifacts/fcore-node-aarch64-unknown-linux-gnu/node release_dist/node-aarch64
-          cp artifacts/fcore-node-armv7-unknown-linux-gnueabihf/node release_dist/node-armv7
-          cp artifacts/fcore-api/api release_dist/api-x86_64
-          cp artifacts/fcore-auth/auth release_dist/auth-x86_64
+          cp target/x86_64-unknown-linux-gnu/release/node release_dist/node-x86_64
+          cp target/aarch64-unknown-linux-gnu/release/node release_dist/node-aarch64
+          cp target/armv7-unknown-linux-gnueabihf/release/node release_dist/node-armv7
+          cp target/release/api release_dist/api-x86_64
+          cp target/release/auth release_dist/auth-x86_64
           chmod +x release_dist/*
 
       - name: Upload to GitHub Release
