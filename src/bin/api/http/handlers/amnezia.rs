@@ -1559,6 +1559,24 @@ mod tests {
         assert_eq!(tls["allowInsecure"], false);
         assert_eq!(ob["streamSettings"]["network"], "udp");
     }
+
+    #[test]
+    fn share_config_request_may_omit_service_fields() {
+        // Regression: the app's share import sends only auth_data +
+        // installation_uuid + public_key — no service_type/service_protocol.
+        let body = serde_json::json!({
+            "os_version": "linux",
+            "app_version": "4.8.14.33",
+            "app_language": "ru",
+            "installation_uuid": "11111111-2222-3333-4444-555555555555",
+            "auth_data": {"share_token": "skcvac6pt2z0hh51"},
+            "public_key": "abc"
+        });
+        let req: GatewayConfigRequest = serde_json::from_value(body).unwrap();
+        assert!(req.service_type.is_none());
+        assert!(req.service_protocol.is_none());
+        assert!(share::auth_data_has_share_token(&req.auth_data));
+    }
 }
 
 #[cfg(test)]
@@ -1585,24 +1603,6 @@ mod expiry_tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["end_date"], ts.to_rfc3339());
         assert!(json["message"].as_str().unwrap().contains(&ts.to_rfc3339()));
-    }
-
-    #[test]
-    fn share_config_request_may_omit_service_fields() {
-        // Regression: the app's share import sends only auth_data +
-        // installation_uuid + public_key — no service_type/service_protocol.
-        let body = serde_json::json!({
-            "os_version": "linux",
-            "app_version": "4.8.14.33",
-            "app_language": "ru",
-            "installation_uuid": "11111111-2222-3333-4444-555555555555",
-            "auth_data": {"share_token": "skcvac6pt2z0hh51"},
-            "public_key": "abc"
-        });
-        let req: GatewayConfigRequest = serde_json::from_value(body).unwrap();
-        assert!(req.service_type.is_none());
-        assert!(req.service_protocol.is_none());
-        assert!(share::auth_data_has_share_token(&req.auth_data));
     }
 }
 
