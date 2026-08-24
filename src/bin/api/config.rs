@@ -107,6 +107,10 @@ pub struct ServiceConfig {
     pub subscription_title: String,
     pub support_contact: String,
     pub base_url: String,
+    /// Public base URL of this api (feed links like /sub/<token>). Falls
+    /// back to base_url when unset.
+    #[serde(default)]
+    pub api_url: Option<String>,
     #[serde(default)]
     pub admin_enabled: bool,
     pub admin_token: Option<String>,

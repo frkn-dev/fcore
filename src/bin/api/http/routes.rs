@@ -62,6 +62,13 @@ where
         );
 
         let params = &self.settings.service;
+        // Public base URL of THIS api (feed links). Falls back to base_url
+        // (the site URL) when unset — but then feed links point at the site
+        // host, which is almost never what you want; set api_url in config.
+        let api_base = params
+            .api_url
+            .clone()
+            .unwrap_or_else(|| params.base_url.clone());
         let cors_origins = params.cors_origins.clone();
 
         let mut cors_builder = warp::cors()
@@ -148,7 +155,7 @@ where
             .and(warp::path::end())
             .and(with_sync(self.sync.clone()))
             .and(with_metrics(self.metrics.clone()))
-            .and(with_param_string(params.base_url.clone()))
+            .and(with_param_string(api_base.clone()))
             .and_then(get_subscription_info_json);
 
         let get_subscription_by_ref_code_route = warp::get()
@@ -508,7 +515,7 @@ where
             .and(mgmt_auth.clone())
             .and(warp::body::json::<MgmtShareMintRequest>())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_string(params.base_url.clone()))
+            .and(with_param_string(api_base.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
             .and(with_param_ipaddrmask(
                 params.amnezia_wireguard_network.clone(),
@@ -658,7 +665,7 @@ where
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
             .and(with_share_limiter.clone())
-            .and(with_param_string(params.base_url.clone()))
+            .and(with_param_string(api_base.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
             .and(with_param_ipaddrmask(
                 params.amnezia_wireguard_network.clone(),
@@ -758,7 +765,7 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_metrics(self.metrics.clone()))
             .and(with_param_string(params.subscription_title.clone()))
-            .and(with_param_string(params.base_url.clone()))
+            .and(with_param_string(api_base.clone()))
             .and(with_param_string(params.support_contact.clone()))
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
