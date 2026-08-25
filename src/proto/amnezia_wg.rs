@@ -181,6 +181,21 @@ impl AwgInterface {
             attributes.push(AmneziaWireguardAttribute::I5(params.i5.clone()));
         }
 
+        // AmneziaWG 3.1 device flags. Sent only when explicitly configured;
+        // the kernel module must be 3.1+ (the genl family version is still
+        // 3, so support cannot be probed — an older module will reject the
+        // request and the error will surface at node startup).
+        if let Some(random_trailers) = params.random_trailers {
+            attributes.push(AmneziaWireguardAttribute::RandomTrailers(
+                random_trailers,
+            ));
+        }
+        if let Some(disable_cookies) = params.disable_cookies {
+            attributes.push(AmneziaWireguardAttribute::DisableCookies(
+                disable_cookies,
+            ));
+        }
+
         let msg = AmneziaWireguardMessage {
             cmd: AmneziaWireguardCmd::SetDevice,
             attributes,

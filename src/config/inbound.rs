@@ -327,6 +327,16 @@ I5 = {}
                         obf.i4,
                         obf.i5,
                     ));
+
+                    // AWG 3.1 flags are emitted only when enabled: clients
+                    // older than 3.1 reject unknown config keys, and "off"
+                    // is the default anyway.
+                    if obf.random_trailers == Some(true) {
+                        config.push_str("RandomTrailers = on\n");
+                    }
+                    if obf.disable_cookies == Some(true) {
+                        config.push_str("DisableCookies = on\n");
+                    }
                 }
 
                 config.push_str(&format!(
@@ -685,6 +695,93 @@ PersistentKeepalive = 25
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::amnezia_wg::{AwgInterfaceConfig, AwgObfuscationParams};
+    use crate::memory::connection::proto::Proto;
+    use crate::memory::connection::wireguard::{Keys as WgKeys, Param as WgParam};
+    use crate::memory::env::Env;
+
+    fn awg_inbound(obfuscation: Option<AwgObfuscationParams>) -> Inbound {
+        Inbound {
+            tag: Tag::AmneziaWg,
+            port: 51820,
+            stream_settings: None,
+            wg: None,
+            awg: Some(AmneziaWgSettings {
+                interface: AwgInterfaceConfig {
+                    interface: "awg0".into(),
+                    address: "10.0.0.1/24".parse().unwrap(),
+                    listen_port: 51820,
+                    mtu: None,
+                    private_key: WgKeys::default(),
+                    dns: vec![],
+                },
+                obfuscation,
+            }),
+            h2: None,
+            mtproto_secret: None,
+        }
+    }
+
+    fn awg_obfuscation(random_trailers: Option<bool>, disable_cookies: Option<bool>) -> AwgObfuscationParams {
+        AwgObfuscationParams {
+            jc: 4,
+            jmin: 56,
+            jmax: 134,
+            s1: 70,
+            s2: 55,
+            s3: 11,
+            s4: 12,
+            h1: "100000-200000".into(),
+            h2: "300000-400000".into(),
+            h3: "500000-600000".into(),
+            h4: "700000-800000".into(),
+            i1: "<r 128>".into(),
+            i2: "0".into(),
+            i3: "0".into(),
+            i4: "0".into(),
+            i5: "0".into(),
+            random_trailers,
+            disable_cookies,
+        }
+    }
+
+    fn awg_conn() -> Connection {
+        Connection::new(
+            &Env::Dev,
+            None,
+            Proto::AmneziaWg {
+                param: WgParam::new("100.64.0.4/32".parse().unwrap()),
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn test_awg31_flags_rendered_when_enabled() {
+        let inbound = awg_inbound(Some(awg_obfuscation(Some(true), Some(true))));
+        let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+
+        assert!(config.contains("RandomTrailers = on\n"), "config: {config}");
+        assert!(config.contains("DisableCookies = on\n"), "config: {config}");
+    }
+
+    #[test]
+    fn test_awg31_flags_not_rendered_when_unset_or_off() {
+        for (rt, dc) in [(None, None), (Some(false), Some(false)), (Some(false), None)] {
+            let inbound = awg_inbound(Some(awg_obfuscation(rt, dc)));
+            let conn_id =
+                uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+            let config = inbound
+                .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+                .unwrap();
+
+            assert!(!config.contains("RandomTrailers"), "config: {config}");
+            assert!(!config.contains("DisableCookies"), "config: {config}");
+        }
+    }
 
     #[test]
     fn test_vless_xhttp_cdn_link() {
