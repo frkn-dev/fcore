@@ -339,13 +339,14 @@ I5 = {}
                     }
                 }
 
+                let keepalive = awg.keepalive.unwrap_or(25);
                 config.push_str(&format!(
                     r#"
 [Peer]
 PublicKey = {server_pubkey}
 Endpoint = {host}:{port}
 AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
+PersistentKeepalive = {keepalive}
 "#
                 ));
 
@@ -384,6 +385,8 @@ PersistentKeepalive = 25
                     .collect::<Vec<_>>()
                     .join(",");
 
+                let keepalive = wg.keepalive.unwrap_or(25);
+
                 let config = format!(
                     r#"
     [Interface]
@@ -395,7 +398,7 @@ PersistentKeepalive = 25
     PublicKey           = {server_pubkey}
     Endpoint            = {host}:{port}
     AllowedIPs          = 0.0.0.0/0, ::/0
-    PersistentKeepalive = 25
+    PersistentKeepalive = {keepalive}
 
     # {label} — conn_id: {conn_id}
     "#
@@ -716,6 +719,7 @@ mod tests {
                     dns: vec![],
                 },
                 obfuscation,
+                keepalive: None,
             }),
             h2: None,
             mtproto_secret: None,
@@ -766,6 +770,26 @@ mod tests {
 
         assert!(config.contains("RandomTrailers = on\n"), "config: {config}");
         assert!(config.contains("DisableCookies = on\n"), "config: {config}");
+    }
+
+    #[test]
+    fn test_keepalive_rendered_from_settings() {
+        let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        // Unset: default 25.
+        let inbound = awg_inbound(None);
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+        assert!(config.contains("PersistentKeepalive = 25\n"), "config: {config}");
+
+        // Set on the inbound: rendered as-is.
+        let mut inbound = awg_inbound(None);
+        inbound.awg.as_mut().unwrap().keepalive = Some(10);
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+        assert!(config.contains("PersistentKeepalive = 10\n"), "config: {config}");
     }
 
     #[test]

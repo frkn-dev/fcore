@@ -90,13 +90,15 @@ impl PgNode {
         INSERT INTO inbounds (
             id, node_id, tag, port, stream_settings,
             wg_privkey, wg_interface, wg_address, dns, h2, mtproto_secret,
-            awg_privkey, awg_interface, awg_address, awg_dns, awg_mtu, awg_obfuscation
+            awg_privkey, awg_interface, awg_address, awg_dns, awg_mtu, awg_obfuscation,
+            keepalive
         )
         VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8,
             $9, $10, $11,
-            $12, $13, $14, $15, $16, $17
+            $12, $13, $14, $15, $16, $17,
+            $18
         )
         ON CONFLICT (node_id, tag) DO UPDATE SET
             port = EXCLUDED.port,
@@ -112,13 +114,23 @@ impl PgNode {
             awg_address = EXCLUDED.awg_address,
             awg_dns = EXCLUDED.awg_dns,
             awg_mtu = EXCLUDED.awg_mtu,
-            awg_obfuscation = EXCLUDED.awg_obfuscation
+            awg_obfuscation = EXCLUDED.awg_obfuscation,
+            keepalive = EXCLUDED.keepalive
     ";
 
         for inbound in node.inbounds.values() {
             let inbound_id = uuid::Uuid::new_v4();
             let stream_settings = serde_json::to_value(&inbound.stream_settings)?;
             let h2_settings = serde_json::to_value(&inbound.h2)?;
+
+            // Per-inbound client keepalive: comes from the wg or awg settings,
+            // whichever this inbound carries.
+            let keepalive = inbound
+                .wg
+                .as_ref()
+                .and_then(|wg| wg.keepalive)
+                .or_else(|| inbound.awg.as_ref().and_then(|awg| awg.keepalive))
+                .map(|k| k as i32);
 
             let (wg_privkey, wg_interface, wg_address, dns) = inbound
                 .wg
@@ -182,6 +194,7 @@ impl PgNode {
                     &awg_dns,
                     &awg_mtu,
                     &awg_obfuscation,
+                    &keepalive,
                 ],
             )
             .await?;
@@ -233,7 +246,8 @@ impl PgNode {
                       i.awg_obfuscation,
 
                       i.h2,
-                      i.mtproto_secret
+                      i.mtproto_secret,
+                      i.keepalive
                  FROM nodes n
                  LEFT JOIN inbounds i ON n.id = i.node_id",
                 &[],
@@ -297,6 +311,9 @@ impl PgNode {
                 .get::<_, Option<serde_json::Value>>("awg_obfuscation")
                 .and_then(|v| serde_json::from_value(v).ok());
 
+            let keepalive: Option<u16> =
+                row.get::<_, Option<i32>>("keepalive").map(|k| k as u16);
+
             let dns: Option<Vec<Ipv4Addr>> = row.get::<_, Option<Vec<IpAddr>>>("dns").map(|ips| {
                 ips.into_iter()
                     .filter_map(|ip| match ip {
@@ -345,6 +362,7 @@ impl PgNode {
                                 address,
                                 port: row.get::<_, i32>("port") as u16,
                                 dns,
+                                keepalive,
                             })
                         }
                         _ => None,
@@ -369,6 +387,7 @@ impl PgNode {
                                     dns,
                                 },
                                 obfuscation: awg_obfuscation,
+                                keepalive,
                             })
                         }
                         _ => None,

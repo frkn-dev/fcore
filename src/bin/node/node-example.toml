@@ -15,16 +15,22 @@ path = "/opt/hysteria/config.yaml"
 [wg]
 enabled = false
 path = "/etc/wireguard/utun7.conf"
+# Optional: PersistentKeepalive (seconds) injected into client configs.
+# Do NOT put PersistentKeepalive into the interface .conf — wg-quick/awg
+# refuse to start with it in [Interface]. Default when unset: 25.
+# keepalive = 25
 
 [awg]
 enabled = false
 path = "/etc/amnezia-wg/awg.conf"
+# keepalive = 25
 
 # Second AmneziaWG interface (awg1) for AmneziaWgMobile connections with the
 # dedicated address pool. Config file has the same format as [awg].
 [awg_mobile]
 enabled = false
 path = "/etc/amnezia-wg/awg1.conf"
+# keepalive = 25
 
 [mtproto]
 enabled = false

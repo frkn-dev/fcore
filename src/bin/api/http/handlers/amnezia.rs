@@ -418,7 +418,7 @@ fn build_awg_server_config(
     let mtu = ini.get("MTU").unwrap_or(&"1420");
     let server_pub_key = ini.get("PublicKey").unwrap_or(&"");
     let psk_key = ini.get("PresharedKey").unwrap_or(&"");
-    let persistent_keepalive = "25";
+    let persistent_keepalive = ini.get("PersistentKeepalive").unwrap_or(&"25");
 
     let jc = ini.get("Jc").unwrap_or(&"4");
     let jmin = ini.get("Jmin").unwrap_or(&"40");
@@ -500,6 +500,7 @@ fn build_wg_server_config(
     let client_ip = param.address.address.to_string();
     // Real server-generated private key (AGW envelope is encrypted).
     let client_priv_key = &param.keys.privkey;
+    let keepalive = wg.keepalive.unwrap_or(25);
 
     let ini = format!(
         r#"[Interface]
@@ -512,7 +513,7 @@ MTU = 1420
 PublicKey = {server_pub_key}
 AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = {host}:{port}
-PersistentKeepalive = 25
+PersistentKeepalive = {keepalive}
 "#,
         address = param.address,
         server_pub_key = server_pub_key,
@@ -529,7 +530,7 @@ PersistentKeepalive = 25
         "hostName": host,
         "port": inbound.port,
         "mtu": "1420",
-        "persistent_keep_alive": "25",
+        "persistent_keep_alive": keepalive.to_string(),
     });
 
     Ok(serde_json::json!({
@@ -1504,6 +1505,7 @@ mod tests {
                 port: 51820,
                 keys: WgKeys::default(),
                 dns: vec![],
+                keepalive: None,
             }),
             awg: None,
             mtproto_secret: None,

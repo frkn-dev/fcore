@@ -295,3 +295,10 @@ alter table connections add column node_id uuid;
 -- tokio-postgres type plumbing is needed. The first element is the
 -- primary (== nodes.address); NULL = single-address node.
 alter table nodes add column node_ips text[];
+
+-- Per-inbound PersistentKeepalive (seconds) injected into client WG/AWG
+-- configs. Set from the node's config.toml ([wg]/[awg]/[awg_mobile]
+-- keepalive); it cannot live in the interface .conf because wg-quick/awg
+-- refuse to start with a keepalive in [Interface]. NULL = clients get the
+-- default 25.
+alter table inbounds add column keepalive integer;

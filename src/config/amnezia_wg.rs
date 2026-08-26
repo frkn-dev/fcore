@@ -244,6 +244,11 @@ pub struct AwgInterfaceConfig {
 pub struct AmneziaWgSettings {
     pub interface: AwgInterfaceConfig,
     pub obfuscation: Option<AwgObfuscationParams>,
+    /// PersistentKeepalive (seconds) for client configs, set from the node's
+    /// config.toml ([awg]/[awg_mobile] keepalive). None = clients get the
+    /// default 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive: Option<u16>,
 }
 
 // =====================
@@ -424,6 +429,7 @@ impl TryFrom<AmneziaWgServerConfig> for AmneziaWgSettings {
                 dns,
             },
             obfuscation: cfg.obfuscation,
+            keepalive: None,
         })
     }
 }
