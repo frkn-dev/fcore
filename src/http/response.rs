@@ -50,6 +50,40 @@ pub struct SubscriptionResponse {
     pub limit_bytes: i64,
     pub env_traffic: Vec<EnvTrafficInfo>,
     pub connections: Vec<ConnectionInfo>,
+    /// Private scope of the subscription (a dedicated env serving only its
+    /// owner); null for regular subscriptions.
+    pub scope: Option<ScopeInfo>,
+}
+
+/// Kind of a subscription's private scope: `premium` — our managed premium
+/// nodes, `personal` — the owner's own node plugged into their account
+/// (future).
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeKind {
+    Premium,
+    Personal,
+}
+
+impl ScopeKind {
+    /// The env name is the discriminator: `personalXXXX` envs are personal
+    /// scopes, any other scoped env is premium.
+    pub fn from_env(env: &Env) -> Self {
+        match env {
+            Env::Custom(name) if name.starts_with("personal") => ScopeKind::Personal,
+            _ => ScopeKind::Premium,
+        }
+    }
+}
+
+/// A subscription's private scope: a dedicated env whose nodes serve only
+/// this subscription. `protos` is the union of inbound tags over the
+/// scope's nodes — what the front may offer in the device-create form.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ScopeInfo {
+    pub kind: ScopeKind,
+    pub env: Env,
+    pub protos: Vec<Tag>,
 }
 
 /// Safe projection of a connection for the subscription-info endpoint:
@@ -195,5 +229,35 @@ mod tests {
         assert_eq!(value["share_feed_url"], serde_json::Value::Null);
         assert_eq!(value["proto"], serde_json::json!("AmneziaWgMobile"));
         assert_eq!(value["is_deleted"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_scope_kind_from_env() {
+        assert_eq!(
+            ScopeKind::from_env(&Env::Custom("premiumAb12Cd34".to_string())),
+            ScopeKind::Premium
+        );
+        assert_eq!(
+            ScopeKind::from_env(&Env::Custom("personalXy78".to_string())),
+            ScopeKind::Personal
+        );
+        assert_eq!(ScopeKind::from_env(&Env::Dev), ScopeKind::Premium);
+    }
+
+    #[test]
+    fn test_scope_info_serialization() {
+        let scope = ScopeInfo {
+            kind: ScopeKind::Premium,
+            env: Env::Custom("premiumAb12Cd34".to_string()),
+            protos: vec![Tag::AmneziaWg, Tag::Hysteria2],
+        };
+
+        let value = serde_json::to_value(&scope).unwrap();
+        assert_eq!(value["kind"], serde_json::json!("premium"));
+        assert_eq!(value["env"], serde_json::json!("premiumAb12Cd34"));
+        assert_eq!(
+            value["protos"],
+            serde_json::json!(["AmneziaWg", "Hysteria2"])
+        );
     }
 }

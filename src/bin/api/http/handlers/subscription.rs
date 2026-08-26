@@ -9,8 +9,8 @@ use warp::http::{Response, StatusCode};
 use fcore::http::{
     helpers as http,
     response::{
-        ConnectionInfo, EnvInfo, EnvTrafficHistoryBucket, EnvTrafficInfo, Instance,
-        SubscriptionResponse, SubscriptionTrafficHistoryResponse, TrafficHistoryBucket,
+        ConnectionInfo, EnvInfo, EnvTrafficHistoryBucket, EnvTrafficInfo, Instance, ScopeInfo,
+        ScopeKind, SubscriptionResponse, SubscriptionTrafficHistoryResponse, TrafficHistoryBucket,
     },
     ResponseMessage,
 };
@@ -479,6 +479,31 @@ where
             share_feed_url: None,
         })
         .collect();
+
+    // Private scope (premium/personal env owned by the subscription): the
+    // front renders the extra env from this block, so it must know which
+    // protos the scope's nodes actually expose (union over the env's
+    // inbounds).
+    let scope = sub.scope_env().map(|env| {
+        let mut protos: Vec<Tag> = mem
+            .nodes
+            .get_by_env(env)
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .flat_map(|n| n.inbounds.keys().copied())
+                    .collect()
+            })
+            .unwrap_or_default();
+        protos.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        protos.dedup();
+        ScopeInfo {
+            kind: ScopeKind::from_env(env),
+            env: env.clone(),
+            protos,
+        }
+    });
+
     drop(mem);
 
     // Per-device lifetime traffic (named devices view). A read failure must
@@ -599,6 +624,7 @@ where
         limit_bytes,
         env_traffic,
         connections,
+        scope,
     };
 
     Ok(Box::new(warp::reply::json(&sub_resp)))
