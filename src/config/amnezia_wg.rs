@@ -90,6 +90,44 @@ enum BoolOrString {
     Str(String),
 }
 
+/// Packs a `u16` range spec (`"120"` or `"110-130"`) into the `u32` wire
+/// value the AmneziaWG 3.0 kernel module expects for the timing/padding
+/// attributes: `lo | hi << 16`. The kernel picks a random value in the
+/// range at use time (`u16_range_pick_one`), so the range is sent as-is
+/// rather than resolved here. Distinct from the `u64` `u32`-range packing
+/// used for the H1..H4 magic headers.
+pub(crate) fn u16_range_wire(spec: &str) -> Result<u32, Error> {
+    let invalid = || Error::Custom(format!("invalid u16 range spec: {spec:?}"));
+
+    let mut parts = spec.splitn(2, '-');
+    let lo: u16 = parts
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(invalid)?;
+    let hi: u16 = match parts.next() {
+        Some(s) => s.trim().parse().map_err(|_| invalid())?,
+        None => lo,
+    };
+    if lo > hi {
+        return Err(invalid());
+    }
+    Ok(((hi as u32) << 16) | (lo as u32))
+}
+
+/// Parses an AWG 3.0 HeaderProtectionKey: base64 decoding to exactly
+/// 32 bytes (the kernel expects `WG_KEY_LEN`).
+pub(crate) fn parse_header_protection_key(key: &str) -> Result<[u8; 32], Error> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let bytes = general_purpose::STANDARD
+        .decode(key.trim())
+        .map_err(|e| Error::Custom(format!("bad HeaderProtectionKey base64: {e}")))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::Custom("HeaderProtectionKey must decode to 32 bytes".into()))
+}
+
 /// Parses an AmneziaWG-style bool: `on`/`off`, `true`/`false`, `1`/`0`.
 fn parse_awg_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -475,6 +513,25 @@ impl AmneziaWgServerConfig {
                         "HeaderProtectionKey requires S1..S4 >= 12".into(),
                     ));
                 }
+                if let Some(key) = &header_protection_key {
+                    parse_header_protection_key(key)?;
+                }
+
+                // Timing/padding specs must be valid u16 ranges; catch typos
+                // at startup rather than at the netlink call.
+                for spec in [
+                    &content_padding_addition,
+                    &rekey_after_time,
+                    &rekey_timeout,
+                    &reject_after_time,
+                    &keepalive_timeout,
+                    &max_handshake_attempts,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    u16_range_wire(spec)?;
+                }
 
                 Some(AwgObfuscationParams {
                     jc: jc_val,
@@ -735,21 +792,25 @@ mod tests {
     #[test]
     fn from_file_parses_awg30_params() {
         let path = std::env::temp_dir().join("fcore-awg30params-test.conf");
+        // 32-byte key (zeros), base64-encoded.
+        let hp_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         std::fs::write(
             &path,
-            "[Interface]\n\
-             PrivateKey = priv\n\
-             Address = 10.0.0.1/24\n\
-             ListenPort = 51820\n\
-             Jc = 6\n\
-             S1 = 20\n\
-             S2 = 30\n\
-             S3 = 40\n\
-             S4 = 50\n\
-             HeaderProtectionKey = cHVibGljLWtleQ==\n\
-             ContentPaddingAddition = 5-25\n\
-             RekeyAfterTime = 110-130\n\
-             MaxHandshakeAttempts = 18\n",
+            &format!(
+                "[Interface]\n\
+                 PrivateKey = priv\n\
+                 Address = 10.0.0.1/24\n\
+                 ListenPort = 51820\n\
+                 Jc = 6\n\
+                 S1 = 20\n\
+                 S2 = 30\n\
+                 S3 = 40\n\
+                 S4 = 50\n\
+                 HeaderProtectionKey = {hp_key}\n\
+                 ContentPaddingAddition = 5-25\n\
+                 RekeyAfterTime = 110-130\n\
+                 MaxHandshakeAttempts = 18\n"
+            ),
         )
         .unwrap();
 
@@ -757,7 +818,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         let obf = cfg.obfuscation.unwrap();
-        assert_eq!(obf.header_protection_key.as_deref(), Some("cHVibGljLWtleQ=="));
+        assert_eq!(obf.header_protection_key.as_deref(), Some(hp_key));
         assert_eq!(obf.content_padding_addition.as_deref(), Some("5-25"));
         assert_eq!(obf.rekey_after_time.as_deref(), Some("110-130"));
         assert_eq!(obf.max_handshake_attempts.as_deref(), Some("18"));
@@ -776,7 +837,7 @@ mod tests {
              Jc = 6\n\
              S1 = 20\n\
              S2 = 5\n\
-             HeaderProtectionKey = cHVibGljLWtleQ==\n",
+             HeaderProtectionKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
         )
         .unwrap();
 
@@ -785,5 +846,68 @@ mod tests {
 
         let err = result.err().expect("HP key with S2=5 must fail");
         assert!(err.to_string().contains("S1..S4 >= 12"), "err: {err}");
+    }
+
+    #[test]
+    fn u16_range_wire_packs_lo_hi() {
+        // A single value is a degenerate range [v, v].
+        assert_eq!(u16_range_wire("120").unwrap(), (120u32 << 16) | 120);
+        assert_eq!(u16_range_wire("110-130").unwrap(), (130u32 << 16) | 110);
+        assert_eq!(u16_range_wire(" 5 - 25 ").unwrap(), (25u32 << 16) | 5);
+        assert_eq!(u16_range_wire("0-65535").unwrap(), 0xFFFF_0000);
+
+        assert!(u16_range_wire("").is_err());
+        assert!(u16_range_wire("bad").is_err());
+        assert!(u16_range_wire("10-5").is_err());
+        assert!(u16_range_wire("65536").is_err());
+        assert!(u16_range_wire("1-2-3").is_err());
+    }
+
+    #[test]
+    fn parse_header_protection_key_requires_32_bytes() {
+        assert!(parse_header_protection_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok());
+        assert!(parse_header_protection_key("cHVibGljLWtleQ==").is_err()); // 10 bytes
+        assert!(parse_header_protection_key("!!!not-base64!!!").is_err());
+    }
+
+    #[test]
+    fn from_file_rejects_invalid_awg30_specs() {
+        // HP key that decodes to 10 bytes instead of 32.
+        let path = std::env::temp_dir().join("fcore-awg30badkey-test.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\n\
+             PrivateKey = priv\n\
+             Address = 10.0.0.1/24\n\
+             ListenPort = 51820\n\
+             Jc = 6\n\
+             S1 = 20\n\
+             S2 = 20\n\
+             S3 = 20\n\
+             S4 = 20\n\
+             HeaderProtectionKey = cHVibGljLWtleQ==\n",
+        )
+        .unwrap();
+        let result = AmneziaWgServerConfig::from_file(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        let err = result.err().expect("10-byte HP key must fail");
+        assert!(err.to_string().contains("32 bytes"), "err: {err}");
+
+        // Malformed timing range.
+        let path = std::env::temp_dir().join("fcore-awg30badrange-test.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\n\
+             PrivateKey = priv\n\
+             Address = 10.0.0.1/24\n\
+             ListenPort = 51820\n\
+             Jc = 6\n\
+             RekeyAfterTime = 130-110\n",
+        )
+        .unwrap();
+        let result = AmneziaWgServerConfig::from_file(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        let err = result.err().expect("lo > hi range must fail");
+        assert!(err.to_string().contains("u16 range"), "err: {err}");
     }
 }

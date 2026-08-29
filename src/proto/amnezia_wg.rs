@@ -181,6 +181,65 @@ impl AwgInterface {
             attributes.push(AmneziaWireguardAttribute::I5(params.i5.clone()));
         }
 
+        // AmneziaWG 3.0 device attributes (genl family version 3). Unlike
+        // the magic headers there is no legacy wire format for these: an
+        // old kernel module would silently ignore the unknown attributes,
+        // so fail fast instead of pretending the params were applied.
+        let has_awg30 = params.header_protection_key.is_some()
+            || params.content_padding_addition.is_some()
+            || params.rekey_after_time.is_some()
+            || params.rekey_timeout.is_some()
+            || params.reject_after_time.is_some()
+            || params.keepalive_timeout.is_some()
+            || params.max_handshake_attempts.is_some();
+        if has_awg30 {
+            if self.family_version < 3 {
+                return Err(Error::Custom(
+                    "AWG 3.0 params require the AmneziaWG 3.0+ kernel module".into(),
+                ));
+            }
+
+            if let Some(key) = &params.header_protection_key {
+                attributes.push(AmneziaWireguardAttribute::HeaderProtectionKey(
+                    crate::config::amnezia_wg::parse_header_protection_key(key)?,
+                ));
+            }
+
+            // Timing/padding values travel as a u16 range packed into u32
+            // (lo | hi << 16); the kernel randomizes within the range.
+            let timers: [(&Option<String>, fn(u32) -> AmneziaWireguardAttribute); 6] = [
+                (
+                    &params.content_padding_addition,
+                    AmneziaWireguardAttribute::ContentPaddingAddition,
+                ),
+                (
+                    &params.rekey_after_time,
+                    AmneziaWireguardAttribute::RekeyAfterTime,
+                ),
+                (
+                    &params.rekey_timeout,
+                    AmneziaWireguardAttribute::RekeyTimeout,
+                ),
+                (
+                    &params.reject_after_time,
+                    AmneziaWireguardAttribute::RejectAfterTime,
+                ),
+                (
+                    &params.keepalive_timeout,
+                    AmneziaWireguardAttribute::KeepaliveTimeout,
+                ),
+                (
+                    &params.max_handshake_attempts,
+                    AmneziaWireguardAttribute::MaxHandshakeAttempts,
+                ),
+            ];
+            for (spec, make_attr) in timers {
+                if let Some(spec) = spec {
+                    attributes.push(make_attr(crate::config::amnezia_wg::u16_range_wire(spec)?));
+                }
+            }
+        }
+
         // AmneziaWG 3.1 device flags. Sent only when explicitly configured;
         // the kernel module must be 3.1+ (the genl family version is still
         // 3, so support cannot be probed — an older module will reject the
