@@ -337,6 +337,32 @@ I5 = {}
                     if obf.disable_cookies == Some(true) {
                         config.push_str("DisableCookies = on\n");
                     }
+
+                    // AWG 3.0 params: emitted only when set on the node.
+                    // HeaderProtectionKey is validated at parse time
+                    // (requires S1..S4 >= 12); timings/padding are ranges
+                    // like "110-130" and pass through verbatim.
+                    if let Some(v) = &obf.header_protection_key {
+                        config.push_str(&format!("HeaderProtectionKey = {}\n", v));
+                    }
+                    if let Some(v) = &obf.content_padding_addition {
+                        config.push_str(&format!("ContentPaddingAddition = {}\n", v));
+                    }
+                    if let Some(v) = &obf.rekey_after_time {
+                        config.push_str(&format!("RekeyAfterTime = {}\n", v));
+                    }
+                    if let Some(v) = &obf.rekey_timeout {
+                        config.push_str(&format!("RekeyTimeout = {}\n", v));
+                    }
+                    if let Some(v) = &obf.reject_after_time {
+                        config.push_str(&format!("RejectAfterTime = {}\n", v));
+                    }
+                    if let Some(v) = &obf.keepalive_timeout {
+                        config.push_str(&format!("KeepaliveTimeout = {}\n", v));
+                    }
+                    if let Some(v) = &obf.max_handshake_attempts {
+                        config.push_str(&format!("MaxHandshakeAttempts = {}\n", v));
+                    }
                 }
 
                 let keepalive = awg.keepalive.unwrap_or(25);
@@ -746,6 +772,13 @@ mod tests {
             i5: "0".into(),
             random_trailers,
             disable_cookies,
+            header_protection_key: None,
+            content_padding_addition: None,
+            rekey_after_time: None,
+            rekey_timeout: None,
+            reject_after_time: None,
+            keepalive_timeout: None,
+            max_handshake_attempts: None,
         }
     }
 
@@ -805,6 +838,45 @@ mod tests {
             assert!(!config.contains("RandomTrailers"), "config: {config}");
             assert!(!config.contains("DisableCookies"), "config: {config}");
         }
+    }
+
+    #[test]
+    fn test_awg30_params_rendered_only_when_set() {
+        let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        // Unset: nothing leaks into the client config.
+        let inbound = awg_inbound(Some(awg_obfuscation(None, None)));
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+        for key in [
+            "HeaderProtectionKey",
+            "ContentPaddingAddition",
+            "RekeyAfterTime",
+            "RekeyTimeout",
+            "RejectAfterTime",
+            "KeepaliveTimeout",
+            "MaxHandshakeAttempts",
+        ] {
+            assert!(!config.contains(key), "config has {key}: {config}");
+        }
+
+        // Set: rendered verbatim (ranges and all).
+        let mut obf = awg_obfuscation(None, None);
+        obf.header_protection_key = Some("cHVibGljLWtleQ==".into());
+        obf.content_padding_addition = Some("5-25".into());
+        obf.rekey_after_time = Some("110-130".into());
+        obf.max_handshake_attempts = Some("18".into());
+        let inbound = awg_inbound(Some(obf));
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+
+        assert!(config.contains("HeaderProtectionKey = cHVibGljLWtleQ==\n"), "config: {config}");
+        assert!(config.contains("ContentPaddingAddition = 5-25\n"), "config: {config}");
+        assert!(config.contains("RekeyAfterTime = 110-130\n"), "config: {config}");
+        assert!(config.contains("MaxHandshakeAttempts = 18\n"), "config: {config}");
+        assert!(!config.contains("RekeyTimeout"), "config: {config}");
     }
 
     #[test]
