@@ -107,6 +107,12 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(get_nodes_handler);
 
+        let get_status_route = warp::get()
+            .and(warp::path("status"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and_then(get_nodes_status_handler);
+
         let get_node_route = warp::path!("node" / Uuid)
             .and(warp::get())
             .and(mgmt_auth.clone())
@@ -863,6 +869,7 @@ where
             .or(put_subscription_route)
             // Node
             .or(get_nodes_route)
+            .or(get_status_route)
             .or(get_node_route)
             .or(delete_node_route)
             .or(post_node_register_route)
