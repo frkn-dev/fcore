@@ -142,6 +142,11 @@ where
             .and(with_param_string(params.subscription_title.clone()))
             .and(with_param_string(params.base_url.clone()))
             .and(with_param_string(params.support_contact.clone()))
+            .and(with_param_bool(params.traffic_mode_enabled))
+            .and(warp::any().map({
+                let metered = params.metered_conns.clone();
+                move || metered.clone()
+            }))
             .and_then(subscription_link_handler);
 
         let get_subscription_info_route = warp::get()
@@ -175,6 +180,7 @@ where
             .and(mgmt_auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.traffic_mode_enabled))
             .and_then(post_subscription_traffic_handler);
 
         // Admin routes
@@ -462,18 +468,21 @@ where
             .and(warp::get())
             .and(warp::query::<ConnectionInfoRequest>())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.traffic_mode_enabled))
             .and_then(wireguard_connections_handler);
 
         let get_awg_connections_info_route = warp::path!("info" / "connections" / "amneziawg")
             .and(warp::get())
             .and(warp::query::<ConnectionInfoRequest>())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.traffic_mode_enabled))
             .and_then(amnezia_wireguard_connections_handler);
 
         let get_mtproto_connections_info_route = warp::path!("info" / "connections" / "mtproto")
             .and(warp::get())
             .and(warp::query::<ConnectionInfoRequest>())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.traffic_mode_enabled))
             .and_then(mtproto_connections_handler);
 
         let post_connections_sync_route = warp::path("connections")
@@ -497,6 +506,11 @@ where
             .and(warp::any().map({
                 let net = params.amnezia_wireguard_mobile_network.clone();
                 move || net.clone()
+            }))
+            .and(with_param_bool(params.traffic_mode_enabled))
+            .and(warp::any().map({
+                let metered = params.metered_conns.clone();
+                move || metered.clone()
             }))
             .and_then(create_connection_handler);
 
@@ -574,13 +588,21 @@ where
             .and(crypto::with_agw_decryption::<GatewayServicesRequest>(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
             .and(with_labels.clone())
+            .and(with_param_bool(params.traffic_mode_enabled))
+            .and(warp::any().map({
+                let metered = params.metered_conns.clone();
+                move || metered.clone()
+            }))
             .and_then(
                 |req: GatewayServicesRequest,
                  ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
-                 labels: GatewayLabels|
-                 async move {
-                    let response = gateway_services_handler(req, sync, labels).await?;
+                 labels: GatewayLabels,
+                 traffic_mode_enabled: bool,
+                 metered_conns: Vec<String>| async move {
+                    let response =
+                        gateway_services_handler(req, sync, labels, traffic_mode_enabled, metered_conns)
+                            .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
@@ -591,12 +613,14 @@ where
             .and(warp::path::end())
             .and(crypto::with_agw_decryption::<GatewayAccountInfoRequest>(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.traffic_mode_enabled))
             .and_then(
                 |req: GatewayAccountInfoRequest,
                  ctx: Option<AesContext>,
-                 sync: MemSync<N, C, S>|
-                 async move {
-                    let response = gateway_account_info_handler(req, sync).await?;
+                 sync: MemSync<N, C, S>,
+                 traffic_mode_enabled: bool| async move {
+                    let response =
+                        gateway_account_info_handler(req, sync, traffic_mode_enabled).await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
@@ -607,12 +631,20 @@ where
             .and(warp::path::end())
             .and(crypto::with_agw_decryption::<GatewayConfigRequest>(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.traffic_mode_enabled))
+            .and(warp::any().map({
+                let metered = params.metered_conns.clone();
+                move || metered.clone()
+            }))
             .and_then(
                 |req: GatewayConfigRequest,
                  ctx: Option<AesContext>,
-                 sync: MemSync<N, C, S>|
-                 async move {
-                    let response = gateway_config_handler(req, sync).await?;
+                 sync: MemSync<N, C, S>,
+                 traffic_mode_enabled: bool,
+                 metered_conns: Vec<String>| async move {
+                    let response =
+                        gateway_config_handler(req, sync, traffic_mode_enabled, metered_conns)
+                            .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );

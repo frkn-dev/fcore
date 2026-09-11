@@ -31,6 +31,7 @@ use super::super::{
     request::EnvFilter,
     request::{AddTrafficReq, FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
+use super::{resolve_serving_access, serving_access, ServingAccess};
 
 #[derive(Debug, Deserialize)]
 pub struct TrafficHistoryQuery {
@@ -441,7 +442,8 @@ where
         }
     }
 
-    let limit_bytes = sub.limit_bytes().unwrap_or(0);
+    let limit = sub.limit_bytes();
+    let limit_bytes = limit.unwrap_or(0);
     let plan_kind = sub.plan_kind();
     let created_at = sub.created_at();
     let sub_id = sub.id();
@@ -526,6 +528,7 @@ where
         limit_bytes,
         plan_kind,
         used_bytes,
+        remaining_bytes: limit.map(|l| l - used_bytes),
         env_traffic,
     };
 
@@ -634,6 +637,8 @@ pub async fn subscription_link_handler<N, C, S>(
     title: String,
     base_url: String,
     support_contact: String,
+    traffic_mode_enabled: bool,
+    metered_conns: Vec<String>,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -661,13 +666,25 @@ where
     // -------------------------
     // Subscription lookup
     // -------------------------
-    let sub = match mem.subscriptions.find_by_id(&req.id) {
-        Some(sub) if sub.is_active() => sub,
-        Some(_) => {
-            return Ok(Box::new(http::not_found(&format!(
-                "Subscription {} is expired",
-                req.id
-            ))));
+    let (sub, traffic_mode) = match mem.subscriptions.find_by_id(&req.id) {
+        Some(sub) => {
+            let access = resolve_serving_access(
+                &memory.db,
+                req.id,
+                serving_access(sub, traffic_mode_enabled),
+            )
+            .await;
+            match access {
+                ServingAccess::Expired => {
+                    return Ok(Box::new(http::not_found(&format!(
+                        "Subscription {} is expired",
+                        req.id
+                    ))));
+                }
+                ServingAccess::TrafficMode => (sub, true),
+                ServingAccess::Full => (sub, false),
+                ServingAccess::CheckBalance(_) => unreachable!("resolved above"),
+            }
         }
         None => {
             return Ok(Box::new(http::not_found(&format!(
@@ -693,6 +710,11 @@ where
         .into_iter()
         .filter(|(_, conn)| {
             if conn.get_deleted() {
+                return false;
+            }
+
+            // Traffic mode: uncounted protocols would burn the balance for free.
+            if traffic_mode && !conn.get_proto().proto().is_metered(&metered_conns) {
                 return false;
             }
 
@@ -1018,12 +1040,15 @@ where
 }
 
 /// POST /subscription/<id>/traffic
-/// Traffic top-up for lite subscriptions, idempotent by trace_id: a repeat
-/// with the same trace_id answers 200 with the current limit, no double-add.
+/// Traffic top-up, idempotent by trace_id: a repeat with the same trace_id
+/// answers 200 with the current limit, no double-add. Allowed for lite
+/// subscriptions and, with traffic mode on, for standard subscriptions whose
+/// paid time has expired.
 pub async fn post_subscription_traffic_handler<N, C, S>(
     subscription_id: uuid::Uuid,
     req: AddTrafficReq,
     memory: MemSync<N, C, S>,
+    traffic_mode_enabled: bool,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1047,10 +1072,16 @@ where
                     StatusCode::NOT_FOUND,
                 )));
             }
-            Some(sub) if sub.plan_kind() != PlanKind::Lite => {
-                return Ok(Box::new(http::bad_request(
-                    "Traffic top-up is only allowed for lite subscriptions",
-                )));
+            Some(sub) if !sub.top_up_allowed(traffic_mode_enabled) => {
+                let msg = if traffic_mode_enabled
+                    && sub.plan_kind() == PlanKind::Standard
+                    && !sub.time_expired()
+                {
+                    "Traffic top-up is not allowed: subscription is active"
+                } else {
+                    "Traffic top-up is only allowed for lite subscriptions"
+                };
+                return Ok(Box::new(http::bad_request(msg)));
             }
             _ => {}
         }

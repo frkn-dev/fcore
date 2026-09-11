@@ -1,4 +1,5 @@
 use crate::sync::MemSync;
+use super::{resolve_serving_access, serving_access, ServingAccess};
 use base64::Engine;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -851,6 +852,8 @@ pub async fn gateway_services_handler<N, C, S>(
     req: GatewayServicesRequest,
     memory: MemSync<N, C, S>,
     labels: GatewayLabels,
+    traffic_mode_enabled: bool,
+    metered_conns: Vec<String>,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -872,9 +875,17 @@ where
     let sub = sub_id.and_then(|sub_id| mem.subscriptions.find_by_id(&sub_id));
 
     // Expired/revoked subscription: paywall signal, same as /v1/config.
-    if let Some(ref sub) = sub {
-        if !sub.is_active() {
-            return Ok(subscription_expired_response(sub.expires_at()));
+    let mut traffic_mode = false;
+    if let (Some(sub), Some(sub_id)) = (sub, sub_id) {
+        match resolve_serving_access(&memory.db, sub_id, serving_access(sub, traffic_mode_enabled))
+            .await
+        {
+            ServingAccess::Expired => {
+                return Ok(subscription_expired_response(sub.expires_at()));
+            }
+            ServingAccess::TrafficMode => traffic_mode = true,
+            ServingAccess::Full => {}
+            ServingAccess::CheckBalance(_) => unreachable!("resolved above"),
         }
     }
 
@@ -890,7 +901,10 @@ where
     // One merged service: the client must not offer a protocol choice at purchase.
     let mut connections = vless_connections;
     connections.extend(awg_connections);
-    connections.extend(connections_for_protocol(&mem.nodes, "hysteria2", conns_slice));
+    // Hysteria2 has no per-connection traffic accounting: hidden in traffic mode.
+    if !traffic_mode || Tag::Hysteria2.is_metered(&metered_conns) {
+        connections.extend(connections_for_protocol(&mem.nodes, "hysteria2", conns_slice));
+    }
     connections.extend(connections_for_protocol(&mem.nodes, "awg-mobile", conns_slice));
     connections.extend(connections_for_protocol(&mem.nodes, "wireguard", conns_slice));
     let countries = available_countries_from_connections(&connections);
@@ -931,6 +945,7 @@ where
 pub async fn gateway_account_info_handler<N, C, S>(
     req: GatewayAccountInfoRequest,
     memory: MemSync<N, C, S>,
+    traffic_mode_enabled: bool,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -963,7 +978,11 @@ where
         None => return Ok(http::not_found("Subscription not found").into_response()),
     };
 
-    if !sub.is_active() {
+    // Informational endpoint: traffic mode counts as active, only expired blocks.
+    let access =
+        resolve_serving_access(&memory.db, sub_id, serving_access(sub, traffic_mode_enabled))
+            .await;
+    if access == ServingAccess::Expired {
         return Ok(http::not_found("Subscription expired").into_response());
     }
 
@@ -1080,6 +1099,8 @@ pub async fn build_gateway_config_response<N, C, S>(
     memory: &MemSync<N, C, S>,
     sub_id: &uuid::Uuid,
     params: &GatewayConfigParams<'_>,
+    traffic_mode_enabled: bool,
+    metered_conns: &[String],
 ) -> Result<GatewayConfigResponse, warp::reply::Response>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1101,9 +1122,17 @@ where
         None => return Err(http::not_found("Subscription not found").into_response()),
     };
 
-    if !sub.is_active() {
-        return Err(subscription_expired_response(sub.expires_at()));
-    }
+    let access =
+        resolve_serving_access(&memory.db, *sub_id, serving_access(sub, traffic_mode_enabled))
+            .await;
+    let traffic_mode = match access {
+        ServingAccess::Expired => {
+            return Err(subscription_expired_response(sub.expires_at()));
+        }
+        ServingAccess::TrafficMode => true,
+        ServingAccess::Full => false,
+        ServingAccess::CheckBalance(_) => unreachable!("resolved above"),
+    };
 
     let conns = match mem.connections.get_by_subscription_id(sub_id) {
         Some(c) => c,
@@ -1125,6 +1154,10 @@ where
             continue;
         }
         let conn_tag = conn.get_proto().proto();
+        // Traffic mode: protocols without per-connection accounting are unservable.
+        if traffic_mode && !conn_tag.is_metered(metered_conns) {
+            continue;
+        }
         // An explicitly requested connection decides its own protocol — the
         // merged "FRKN Premium" card carries connections of both protocols.
         if let Some(requested_id) = params.connection_id {
@@ -1311,6 +1344,8 @@ where
 pub async fn gateway_config_handler<N, C, S>(
     req: GatewayConfigRequest,
     memory: MemSync<N, C, S>,
+    traffic_mode_enabled: bool,
+    metered_conns: Vec<String>,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1345,7 +1380,15 @@ where
         node_id: req.node_id,
     };
 
-    match build_gateway_config_response(&memory, &sub_id, &params).await {
+    match build_gateway_config_response(
+        &memory,
+        &sub_id,
+        &params,
+        traffic_mode_enabled,
+        &metered_conns,
+    )
+    .await
+    {
         Ok(response) => Ok(warp::reply::json(&response).into_response()),
         Err(response) => Ok(response),
     }

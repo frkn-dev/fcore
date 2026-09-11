@@ -105,6 +105,7 @@ where
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
+        metered_conns: Option<&[String]>,
     ) -> SyncResult<Vec<uuid::Uuid>>;
 }
 
@@ -394,6 +395,7 @@ where
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
+        metered_conns: Option<&[String]>,
     ) -> SyncResult<Vec<uuid::Uuid>>
     where
         N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -484,6 +486,26 @@ where
                 restorable
             })
             .collect();
+
+        // Traffic mode: only metered protocols come back — protocols without
+        // per-connection traffic accounting would burn the balance uncounted.
+        let conns_to_restore: Vec<(uuid::Uuid, Connection)> = match metered_conns {
+            Some(metered) => conns_to_restore
+                .into_iter()
+                .filter(|(conn_id, conn)| {
+                    let proto = conn.get_proto().proto();
+                    let allowed = proto.is_metered(metered);
+                    if !allowed {
+                        warn!(
+                            "Connection {} ({}) not restored: protocol unavailable in traffic mode",
+                            conn_id, proto
+                        );
+                    }
+                    allowed
+                })
+                .collect(),
+            None => conns_to_restore,
+        };
 
         if conns_to_restore.is_empty() {
             return Ok(vec![]);
@@ -799,7 +821,9 @@ where
                         sub_id
                     );
 
-                    match self.restore_connections_by_subscription(sub_id).await {
+                    // The subscription just got paid time, so it is not in
+                    // traffic mode: revive all restorable connections.
+                    match self.restore_connections_by_subscription(sub_id, None).await {
                         Ok(restored) => {
                             debug!(
                                 "Post-update restore: {} connections restored for {}",

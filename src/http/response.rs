@@ -51,6 +51,9 @@ pub struct SubscriptionResponse {
     pub plan_kind: PlanKind,
     /// Lifetime traffic (uplink + downlink) persisted for the subscription.
     pub used_bytes: i64,
+    /// Bytes left on the traffic balance; null when the subscription has no
+    /// traffic limit.
+    pub remaining_bytes: Option<i64>,
     pub env_traffic: Vec<EnvTrafficInfo>,
 }
 

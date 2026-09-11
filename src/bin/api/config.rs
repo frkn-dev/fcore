@@ -81,6 +81,22 @@ fn default_log_level() -> String {
     "debug".to_string()
 }
 
+/// Protocols with per-connection traffic accounting; the only ones allowed
+/// while a subscription runs on its traffic balance (traffic mode).
+fn default_metered_conns() -> Vec<String> {
+    [
+        "Wireguard",
+        "AmneziaWg",
+        "AmneziaWgMobile",
+        "VlessTcpReality",
+        "VlessGrpcReality",
+        "VlessXhttpCdn",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceConfig {
     #[serde(default = "default_listen_address")]
@@ -126,6 +142,14 @@ pub struct ServiceConfig {
     pub gateway_price_label: Option<String>,
     #[serde(default)]
     pub gateway_speed_label: Option<String>,
+    /// Master switch for the traffic-balance model (beta): a subscription
+    /// with a traffic limit stays active while it has bytes left, even after
+    /// its paid time has expired. Default off = legacy behavior.
+    #[serde(default)]
+    pub traffic_mode_enabled: bool,
+    /// Protocol tags allowed while a subscription is in traffic mode.
+    #[serde(default = "default_metered_conns")]
+    pub metered_conns: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

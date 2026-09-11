@@ -23,6 +23,7 @@ use super::super::{
     param::ConnQueryParam,
     request::{ConnCreateRequest, ConnectionInfoRequest},
 };
+use super::{resolve_serving_access, serving_access, ServingAccess};
 
 /// Handler get connection
 // POST /connections/sync
@@ -318,6 +319,8 @@ pub async fn create_connection_handler<N, C, S>(
     wg_network: IpAddrMask,
     awg_network: IpAddrMask,
     awg_mobile_network: Option<IpAddrMask>,
+    traffic_mode_enabled: bool,
+    metered_conns: Vec<String>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -334,6 +337,53 @@ where
 {
     if let Err(e) = conn_req.validate() {
         return Ok(http::bad_request(&e.to_string()));
+    }
+
+    // Traffic mode: a subscription living on its traffic balance may use only
+    // metered protocols — the rest would burn the balance uncounted.
+    if traffic_mode_enabled && !conn_req.proto.is_metered(&metered_conns) {
+        if let Some(sub_id) = conn_req.subscription_id {
+            let needs_check = {
+                let mem = memory.memory.read().await;
+                mem.subscriptions
+                    .find_by_id(&sub_id)
+                    .map(|s| s.time_expired() && s.limit_bytes().is_some())
+                    .unwrap_or(false)
+            };
+
+            if needs_check {
+                let used_bytes = match memory.db.traffic().total_for_subscription(sub_id).await {
+                    Ok((uplink, downlink)) => Some(uplink + downlink),
+                    Err(e) => {
+                        // Fail open: a traffic-DB hiccup must not block
+                        // connection creation.
+                        tracing::warn!(
+                            "Failed to load total traffic for subscription {}: {}",
+                            sub_id,
+                            e
+                        );
+                        None
+                    }
+                };
+
+                if let Some(used) = used_bytes {
+                    let in_traffic_mode = {
+                        let mem = memory.memory.read().await;
+                        mem.subscriptions
+                            .find_by_id(&sub_id)
+                            .map(|s| s.traffic_mode(true, used))
+                            .unwrap_or(false)
+                    };
+
+                    if in_traffic_mode {
+                        return Ok(http::bad_request(&format!(
+                            "protocol unavailable in traffic mode: {}",
+                            conn_req.proto
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     match create_connection_inner(
@@ -462,6 +512,7 @@ where
 pub async fn wireguard_connections_handler<N, C, S>(
     req: ConnectionInfoRequest,
     memory: MemSync<N, C, S>,
+    traffic_mode_enabled: bool,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -483,7 +534,11 @@ where
     let mem = memory.memory.read().await;
 
     if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
-        if !sub.is_active() {
+        // Wireguard is metered: traffic mode serves it the same as Full.
+        let access =
+            resolve_serving_access(&memory.db, req.id, serving_access(sub, traffic_mode_enabled))
+                .await;
+        if access == ServingAccess::Expired {
             return Ok(Box::new(http::not_found(&format!(
                 "Subscription {} is expired",
                 req.id
@@ -544,6 +599,7 @@ where
 pub async fn amnezia_wireguard_connections_handler<N, C, S>(
     req: ConnectionInfoRequest,
     memory: MemSync<N, C, S>,
+    traffic_mode_enabled: bool,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -565,7 +621,11 @@ where
     let mem = memory.memory.read().await;
 
     if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
-        if !sub.is_active() {
+        // AmneziaWG (incl. mobile) is metered: traffic mode serves it as Full.
+        let access =
+            resolve_serving_access(&memory.db, req.id, serving_access(sub, traffic_mode_enabled))
+                .await;
+        if access == ServingAccess::Expired {
             return Ok(Box::new(http::not_found(&format!(
                 "Subscription {} is expired",
                 req.id
@@ -627,6 +687,7 @@ where
 pub async fn mtproto_connections_handler<N, C, S>(
     req: ConnectionInfoRequest,
     memory: MemSync<N, C, S>,
+    traffic_mode_enabled: bool,
 ) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -648,11 +709,24 @@ where
     let mem = memory.memory.read().await;
 
     if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
-        if !sub.is_active() {
-            return Ok(Box::new(http::not_found(&format!(
-                "Subscription {} is expired",
-                req.id
-            ))));
+        let access =
+            resolve_serving_access(&memory.db, req.id, serving_access(sub, traffic_mode_enabled))
+                .await;
+        match access {
+            ServingAccess::Full => {}
+            // Mtproto has no per-connection traffic accounting.
+            ServingAccess::TrafficMode => {
+                return Ok(Box::new(http::not_found(
+                    "Mtproto is unavailable in traffic mode",
+                )));
+            }
+            ServingAccess::Expired => {
+                return Ok(Box::new(http::not_found(&format!(
+                    "Subscription {} is expired",
+                    req.id
+                ))));
+            }
+            ServingAccess::CheckBalance(_) => unreachable!("resolved above"),
         }
     }
 

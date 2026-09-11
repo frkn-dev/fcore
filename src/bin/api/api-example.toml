@@ -29,6 +29,11 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # the client formats them itself. Defaults shown.
 # gateway_price_label = "500"
 # gateway_speed_label = "1000"
+# Traffic mode (beta): an expired subscription with a traffic limit stays
+# active while it has bytes left, and traffic top-ups are allowed on expired
+# standard subscriptions. Only metered protocols work in traffic mode.
+# traffic_mode_enabled = false
+# metered_conns = ["Wireguard", "AmneziaWg", "AmneziaWgMobile", "VlessTcpReality", "VlessGrpcReality", "VlessXhttpCdn"]
 
 # App Store IAP (POST /v1/subscriptions). Without this section the endpoint answers 503.
 # [service.apple]

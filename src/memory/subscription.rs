@@ -232,6 +232,67 @@ pub trait Operations {
 
     fn premium_token(&self) -> Option<&str>;
     fn set_premium_token(&mut self, token: String);
+
+    /// Bytes left on the traffic balance. None when the subscription has no
+    /// traffic limit at all.
+    fn remaining_bytes(&self, used_bytes: i64) -> Option<i64> {
+        self.limit_bytes().map(|limit| limit - used_bytes)
+    }
+
+    /// The paid time has run out. A lite subscription (expires_at NULL) is
+    /// never time-expired — it lives on its traffic balance.
+    fn time_expired(&self) -> bool {
+        self.expires_at()
+            .map(|expires_at| expires_at <= Utc::now())
+            .unwrap_or(false)
+    }
+
+    /// Traffic mode: the paid time is over and the subscription lives on its
+    /// remaining traffic balance. Always false when the feature flag is off.
+    fn traffic_mode(&self, traffic_mode_enabled: bool, used_bytes: i64) -> bool {
+        traffic_mode_enabled
+            && self.time_expired()
+            && self
+                .remaining_bytes(used_bytes)
+                .map(|remaining| remaining > 0)
+                .unwrap_or(false)
+    }
+
+    /// is_active extended with the traffic balance: with the feature flag on
+    /// a subscription is active while it has paid time left OR bytes left.
+    /// With the flag off this is exactly `is_active`.
+    fn is_active_with_traffic(&self, traffic_mode_enabled: bool, used_bytes: i64) -> bool {
+        if !traffic_mode_enabled {
+            return self.is_active();
+        }
+        if self.is_deleted() {
+            return false;
+        }
+        if self
+            .expires_at()
+            .map(|expires_at| expires_at > Utc::now())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        match self.remaining_bytes(used_bytes) {
+            Some(remaining) => remaining > 0,
+            // Lite (expires_at NULL) without a limit keeps the legacy
+            // NULL-means-active semantics.
+            None => self.expires_at().is_none(),
+        }
+    }
+
+    /// Whether a traffic top-up is allowed: always for lite subscriptions;
+    /// for standard ones only in traffic mode once the paid time has expired
+    /// (buying traffic on an active standard subscription is rejected).
+    fn top_up_allowed(&self, traffic_mode_enabled: bool) -> bool {
+        match self.plan_kind() {
+            PlanKind::Lite => true,
+            PlanKind::Standard => traffic_mode_enabled && self.time_expired(),
+            PlanKind::Premium => false,
+        }
+    }
 }
 
 impl Operations for Subscription {
@@ -388,5 +449,118 @@ mod tests {
         // A lite sub with expires_at NULL is active: it lives while it has
         // traffic, so the cleanup task must never treat it as expired.
         assert!(sub.is_active());
+    }
+
+    fn sub_with(expires_at: Option<DateTime<Utc>>, limit_bytes: Option<i64>) -> Subscription {
+        Subscription::new(uuid::Uuid::new_v4(), "ref".to_string(), expires_at, limit_bytes)
+    }
+
+    #[test]
+    fn test_remaining_bytes() {
+        let sub = sub_with(None, Some(1000));
+        assert_eq!(sub.remaining_bytes(400), Some(600));
+        assert_eq!(sub.remaining_bytes(1000), Some(0));
+        // Overdraft is reported as negative, not clamped.
+        assert_eq!(sub.remaining_bytes(1200), Some(-200));
+
+        let no_limit = sub_with(None, None);
+        assert_eq!(no_limit.remaining_bytes(0), None);
+    }
+
+    #[test]
+    fn test_time_expired() {
+        let future = sub_with(Some(Utc::now() + chrono::Duration::days(1)), None);
+        assert!(!future.time_expired());
+
+        let past = sub_with(Some(Utc::now() - chrono::Duration::days(1)), None);
+        assert!(past.time_expired());
+
+        // Lite (expires_at NULL) is never time-expired.
+        let lite = sub_with(None, Some(100));
+        assert!(!lite.time_expired());
+    }
+
+    #[test]
+    fn test_traffic_mode() {
+        let expired_with_balance =
+            sub_with(Some(Utc::now() - chrono::Duration::days(1)), Some(1000));
+
+        // Flag off: never in traffic mode.
+        assert!(!expired_with_balance.traffic_mode(false, 100));
+        // Flag on, expired, balance left: traffic mode.
+        assert!(expired_with_balance.traffic_mode(true, 100));
+        // No balance left: not in traffic mode.
+        assert!(!expired_with_balance.traffic_mode(true, 1000));
+        // Active paid time: not traffic mode even with a limit.
+        let active_with_limit =
+            sub_with(Some(Utc::now() + chrono::Duration::days(1)), Some(1000));
+        assert!(!active_with_limit.traffic_mode(true, 0));
+        // Lite (expires_at NULL) is not "traffic mode" — it has no paid time.
+        let lite = sub_with(None, Some(1000));
+        assert!(!lite.traffic_mode(true, 0));
+    }
+
+    #[test]
+    fn test_is_active_with_traffic_flag_off_matches_legacy() {
+        let expired = sub_with(Some(Utc::now() - chrono::Duration::days(1)), Some(1000));
+        assert!(!expired.is_active());
+        assert!(!expired.is_active_with_traffic(false, 0));
+
+        let lite = sub_with(None, Some(100));
+        assert!(lite.is_active());
+        assert!(lite.is_active_with_traffic(false, 100));
+
+        let active = sub_with(Some(Utc::now() + chrono::Duration::days(1)), None);
+        assert!(active.is_active());
+        assert!(active.is_active_with_traffic(false, 0));
+    }
+
+    #[test]
+    fn test_is_active_with_traffic_flag_on() {
+        // Expired but has balance: active.
+        let expired = sub_with(Some(Utc::now() - chrono::Duration::days(1)), Some(1000));
+        assert!(expired.is_active_with_traffic(true, 100));
+        // Expired and exhausted: inactive.
+        assert!(!expired.is_active_with_traffic(true, 1000));
+        // Expired without a limit: inactive (nothing to live on).
+        let expired_no_limit = sub_with(Some(Utc::now() - chrono::Duration::days(1)), None);
+        assert!(!expired_no_limit.is_active_with_traffic(true, 0));
+        // Active paid time: active even over the limit (balance is for later).
+        let active = sub_with(Some(Utc::now() + chrono::Duration::days(1)), Some(100));
+        assert!(active.is_active_with_traffic(true, 1000));
+        // Lite lives while it has traffic.
+        let lite = sub_with(None, Some(100));
+        assert!(lite.is_active_with_traffic(true, 99));
+        assert!(!lite.is_active_with_traffic(true, 100));
+        // Lite without a limit keeps legacy NULL-means-active semantics.
+        let lite_no_limit = sub_with(None, None);
+        assert!(lite_no_limit.is_active_with_traffic(true, 0));
+        // Deleted stays deleted.
+        let mut deleted = sub_with(None, Some(100));
+        deleted.mark_deleted();
+        assert!(!deleted.is_active_with_traffic(true, 0));
+    }
+
+    #[test]
+    fn test_top_up_allowed() {
+        // Lite: always allowed, flag on or off.
+        let lite = Subscription::new_lite(uuid::Uuid::new_v4(), "ref".to_string(), 100);
+        assert!(lite.top_up_allowed(false));
+        assert!(lite.top_up_allowed(true));
+
+        let active_standard = sub_with(Some(Utc::now() + chrono::Duration::days(1)), None);
+        let expired_standard = sub_with(Some(Utc::now() - chrono::Duration::days(1)), None);
+
+        // Flag off: standard never eligible (legacy behavior).
+        assert!(!active_standard.top_up_allowed(false));
+        assert!(!expired_standard.top_up_allowed(false));
+
+        // Flag on: only an expired standard sub may buy traffic.
+        assert!(!active_standard.top_up_allowed(true));
+        assert!(expired_standard.top_up_allowed(true));
+
+        let mut premium = sub_with(Some(Utc::now() - chrono::Duration::days(1)), None);
+        premium.plan_kind = PlanKind::Premium;
+        assert!(!premium.top_up_allowed(true));
     }
 }

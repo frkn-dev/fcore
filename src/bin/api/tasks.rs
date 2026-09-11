@@ -135,6 +135,8 @@ where
             interval.tick().await;
             debug!("Run cleanup subscriptions task");
 
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
+
             let expired_subs: Vec<uuid::Uuid> = {
                 let mem = self.sync.memory.read().await;
                 mem.subscriptions
@@ -144,6 +146,39 @@ where
             };
 
             for sub_id in expired_subs {
+                // Traffic mode: a subscription with bytes left on the balance
+                // is not expired — keep its connections.
+                if traffic_mode_enabled {
+                    let check = {
+                        let mem = self.sync.memory.read().await;
+                        mem.subscriptions.find_by_id(&sub_id).map(|s| {
+                            (s.is_deleted(), s.limit_bytes(), s.time_expired())
+                        })
+                    };
+                    if let Some((false, Some(_), true)) = check {
+                        match self.sync.db.traffic().total_for_subscription(sub_id).await {
+                            Ok((uplink, downlink)) => {
+                                let remaining = check
+                                    .and_then(|(_, limit, _)| limit)
+                                    .map(|limit| limit - (uplink + downlink));
+                                if remaining.map(|r| r > 0).unwrap_or(false) {
+                                    debug!(
+                                        "Subscription {} is expired but has traffic balance left, skipping cleanup",
+                                        sub_id
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to load traffic total for subscription {}: {}",
+                                    sub_id, e
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let (expires_at, conns_to_delete): (
                     Option<chrono::DateTime<Utc>>,
                     Vec<(uuid::Uuid, Connection)>,
@@ -209,16 +244,57 @@ where
             interval.tick().await;
             debug!("Run restore subscriptions task");
 
-            let active_subs: Vec<uuid::Uuid> = {
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
+            let metered_conns = self.settings.service.metered_conns.clone();
+
+            // (sub_id, needs balance check): subscriptions expired by time
+            // revive only while they still have traffic balance, and only
+            // connections of metered protocols (traffic mode).
+            let active_subs: Vec<(uuid::Uuid, bool)> = {
                 let mem = self.sync.memory.read().await;
                 mem.subscriptions
                     .iter()
-                    .filter_map(|(id, sub)| if sub.is_active() { Some(*id) } else { None })
+                    .filter_map(|(id, sub)| {
+                        if sub.is_active() {
+                            Some((*id, false))
+                        } else if traffic_mode_enabled && !sub.is_deleted() && sub.time_expired()
+                        {
+                            Some((*id, true))
+                        } else {
+                            None
+                        }
+                    })
                     .collect()
             };
 
-            for sub_id in active_subs {
-                match SyncOp::restore_connections_by_subscription(&self.sync, &sub_id).await {
+            for (sub_id, balance_check) in active_subs {
+                let metered = if balance_check {
+                    match self.sync.db.traffic().total_for_subscription(sub_id).await {
+                        Ok((uplink, downlink)) => {
+                            let remaining = {
+                                let mem = self.sync.memory.read().await;
+                                mem.subscriptions
+                                    .find_by_id(&sub_id)
+                                    .and_then(|s| s.remaining_bytes(uplink + downlink))
+                            };
+                            match remaining {
+                                Some(r) if r > 0 => Some(metered_conns.clone()),
+                                _ => continue,
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to load traffic total for subscription {}: {}",
+                                sub_id, e
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                match SyncOp::restore_connections_by_subscription(&self.sync, &sub_id, metered.as_deref()).await {
                     Ok(restored) => {
                         if !restored.is_empty() {
                             info!(
@@ -243,16 +319,26 @@ where
             interval.tick().await;
             debug!("Run enforce traffic limits task");
 
-            // Lite subscriptions with a traffic limit that still have at
-            // least one live connection. The live-connection guard doubles
-            // as the notification guard: an already-exhausted sub has all
-            // connections deleted and must not re-notify every tick.
+            // Subscriptions with a traffic limit that still have at least one
+            // live connection. With traffic mode off only lite subscriptions
+            // are enforced (legacy). With traffic mode on, subscriptions
+            // whose paid time has expired are enforced too — they live on the
+            // balance; a standard subscription with active paid time is never
+            // limited, even over the limit (the balance is for later).
+            // The live-connection guard doubles as the notification guard: an
+            // already-exhausted sub has all connections deleted and must not
+            // re-notify every tick.
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
             let lite_subs: Vec<(uuid::Uuid, i64, Vec<(uuid::Uuid, Connection)>)> = {
                 let mem = self.sync.memory.read().await;
                 mem.subscriptions
                     .iter()
                     .filter(|(_, sub)| {
-                        sub.plan_kind() == PlanKind::Lite && sub.limit_bytes().is_some()
+                        if sub.limit_bytes().is_none() {
+                            return false;
+                        }
+                        sub.plan_kind() == PlanKind::Lite
+                            || (traffic_mode_enabled && sub.time_expired())
                     })
                     .filter_map(|(sub_id, sub)| {
                         let conns: Vec<(uuid::Uuid, Connection)> = mem
@@ -295,7 +381,7 @@ where
                 }
 
                 info!(
-                    "Lite subscription {} exhausted its traffic limit ({} >= {} bytes), deleting {} connections",
+                    "Subscription {} exhausted its traffic limit ({} >= {} bytes), deleting {} connections",
                     sub_id,
                     used_bytes,
                     limit_bytes,
