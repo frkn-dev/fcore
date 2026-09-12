@@ -327,15 +327,52 @@ I5 = {}
                         obf.i4,
                         obf.i5,
                     ));
+
+                    // AWG 3.1 flags are emitted only when enabled: clients
+                    // older than 3.1 reject unknown config keys, and "off"
+                    // is the default anyway.
+                    if obf.random_trailers == Some(true) {
+                        config.push_str("RandomTrailers = on\n");
+                    }
+                    if obf.disable_cookies == Some(true) {
+                        config.push_str("DisableCookies = on\n");
+                    }
+
+                    // AWG 3.0 params: emitted only when set on the node.
+                    // HeaderProtectionKey is validated at parse time
+                    // (requires S1..S4 >= 12); timings/padding are ranges
+                    // like "110-130" and pass through verbatim.
+                    if let Some(v) = &obf.header_protection_key {
+                        config.push_str(&format!("HeaderProtectionKey = {}\n", v));
+                    }
+                    if let Some(v) = &obf.content_padding_addition {
+                        config.push_str(&format!("ContentPaddingAddition = {}\n", v));
+                    }
+                    if let Some(v) = &obf.rekey_after_time {
+                        config.push_str(&format!("RekeyAfterTime = {}\n", v));
+                    }
+                    if let Some(v) = &obf.rekey_timeout {
+                        config.push_str(&format!("RekeyTimeout = {}\n", v));
+                    }
+                    if let Some(v) = &obf.reject_after_time {
+                        config.push_str(&format!("RejectAfterTime = {}\n", v));
+                    }
+                    if let Some(v) = &obf.keepalive_timeout {
+                        config.push_str(&format!("KeepaliveTimeout = {}\n", v));
+                    }
+                    if let Some(v) = &obf.max_handshake_attempts {
+                        config.push_str(&format!("MaxHandshakeAttempts = {}\n", v));
+                    }
                 }
 
+                let keepalive = awg.keepalive.unwrap_or(25);
                 config.push_str(&format!(
                     r#"
 [Peer]
 PublicKey = {server_pubkey}
 Endpoint = {host}:{port}
 AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
+PersistentKeepalive = {keepalive}
 "#
                 ));
 
@@ -374,6 +411,8 @@ PersistentKeepalive = 25
                     .collect::<Vec<_>>()
                     .join(",");
 
+                let keepalive = wg.keepalive.unwrap_or(25);
+
                 let config = format!(
                     r#"
     [Interface]
@@ -385,7 +424,7 @@ PersistentKeepalive = 25
     PublicKey           = {server_pubkey}
     Endpoint            = {host}:{port}
     AllowedIPs          = 0.0.0.0/0, ::/0
-    PersistentKeepalive = 25
+    PersistentKeepalive = {keepalive}
 
     # {label} — conn_id: {conn_id}
     "#
@@ -685,6 +724,160 @@ PersistentKeepalive = 25
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::amnezia_wg::{AwgInterfaceConfig, AwgObfuscationParams};
+    use crate::memory::connection::proto::Proto;
+    use crate::memory::connection::wireguard::{Keys as WgKeys, Param as WgParam};
+    use crate::memory::env::Env;
+
+    fn awg_inbound(obfuscation: Option<AwgObfuscationParams>) -> Inbound {
+        Inbound {
+            tag: Tag::AmneziaWg,
+            port: 51820,
+            stream_settings: None,
+            wg: None,
+            awg: Some(AmneziaWgSettings {
+                interface: AwgInterfaceConfig {
+                    interface: "awg0".into(),
+                    address: "10.0.0.1/24".parse().unwrap(),
+                    listen_port: 51820,
+                    mtu: None,
+                    private_key: WgKeys::default(),
+                    dns: vec![],
+                },
+                obfuscation,
+                keepalive: None,
+            }),
+            h2: None,
+            mtproto_secret: None,
+        }
+    }
+
+    fn awg_obfuscation(random_trailers: Option<bool>, disable_cookies: Option<bool>) -> AwgObfuscationParams {
+        AwgObfuscationParams {
+            jc: 4,
+            jmin: 56,
+            jmax: 134,
+            s1: 70,
+            s2: 55,
+            s3: 11,
+            s4: 12,
+            h1: "100000-200000".into(),
+            h2: "300000-400000".into(),
+            h3: "500000-600000".into(),
+            h4: "700000-800000".into(),
+            i1: "<r 128>".into(),
+            i2: "0".into(),
+            i3: "0".into(),
+            i4: "0".into(),
+            i5: "0".into(),
+            random_trailers,
+            disable_cookies,
+            header_protection_key: None,
+            content_padding_addition: None,
+            rekey_after_time: None,
+            rekey_timeout: None,
+            reject_after_time: None,
+            keepalive_timeout: None,
+            max_handshake_attempts: None,
+        }
+    }
+
+    fn awg_conn() -> Connection {
+        Connection::new(
+            &Env::Dev,
+            None,
+            Proto::AmneziaWg {
+                param: WgParam::new("100.64.0.4/32".parse().unwrap()),
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn test_awg31_flags_rendered_when_enabled() {
+        let inbound = awg_inbound(Some(awg_obfuscation(Some(true), Some(true))));
+        let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+
+        assert!(config.contains("RandomTrailers = on\n"), "config: {config}");
+        assert!(config.contains("DisableCookies = on\n"), "config: {config}");
+    }
+
+    #[test]
+    fn test_keepalive_rendered_from_settings() {
+        let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        // Unset: default 25.
+        let inbound = awg_inbound(None);
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+        assert!(config.contains("PersistentKeepalive = 25\n"), "config: {config}");
+
+        // Set on the inbound: rendered as-is.
+        let mut inbound = awg_inbound(None);
+        inbound.awg.as_mut().unwrap().keepalive = Some(10);
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+        assert!(config.contains("PersistentKeepalive = 10\n"), "config: {config}");
+    }
+
+    #[test]
+    fn test_awg31_flags_not_rendered_when_unset_or_off() {
+        for (rt, dc) in [(None, None), (Some(false), Some(false)), (Some(false), None)] {
+            let inbound = awg_inbound(Some(awg_obfuscation(rt, dc)));
+            let conn_id =
+                uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+            let config = inbound
+                .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+                .unwrap();
+
+            assert!(!config.contains("RandomTrailers"), "config: {config}");
+            assert!(!config.contains("DisableCookies"), "config: {config}");
+        }
+    }
+
+    #[test]
+    fn test_awg30_params_rendered_only_when_set() {
+        let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        // Unset: nothing leaks into the client config.
+        let inbound = awg_inbound(Some(awg_obfuscation(None, None)));
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+        for key in [
+            "HeaderProtectionKey",
+            "ContentPaddingAddition",
+            "RekeyAfterTime",
+            "RekeyTimeout",
+            "RejectAfterTime",
+            "KeepaliveTimeout",
+            "MaxHandshakeAttempts",
+        ] {
+            assert!(!config.contains(key), "config has {key}: {config}");
+        }
+
+        // Set: rendered verbatim (ranges and all).
+        let mut obf = awg_obfuscation(None, None);
+        obf.header_protection_key = Some("cHVibGljLWtleQ==".into());
+        obf.content_padding_addition = Some("5-25".into());
+        obf.rekey_after_time = Some("110-130".into());
+        obf.max_handshake_attempts = Some("18".into());
+        let inbound = awg_inbound(Some(obf));
+        let config = inbound
+            .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
+            .unwrap();
+
+        assert!(config.contains("HeaderProtectionKey = cHVibGljLWtleQ==\n"), "config: {config}");
+        assert!(config.contains("ContentPaddingAddition = 5-25\n"), "config: {config}");
+        assert!(config.contains("RekeyAfterTime = 110-130\n"), "config: {config}");
+        assert!(config.contains("MaxHandshakeAttempts = 18\n"), "config: {config}");
+        assert!(!config.contains("RekeyTimeout"), "config: {config}");
+    }
 
     #[test]
     fn test_vless_xhttp_cdn_link() {

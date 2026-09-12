@@ -57,6 +57,9 @@ where
             db.iap().ensure_table().await?;
         }
 
+        // Share tokens: idempotent DDL (own table + connections.issued_via).
+        db.share().ensure_table().await?;
+
         let mem = Arc::new(RwLock::new(Cache::new()));
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;
         let mem_sync = MemSync::new(mem.clone(), db.clone(), publisher);

@@ -28,6 +28,10 @@ pub struct NodeRequest {
     pub country: String,
     pub r#type: NodeType,
     pub cluster: Option<String>,
+    /// Extra entry IPs (node_ips[0] == address); None = single-address
+    /// node. Old api binaries ignore the unknown field.
+    #[serde(default)]
+    pub node_ips: Option<Vec<Ipv4Addr>>,
 }
 
 #[async_trait]
@@ -144,6 +148,7 @@ where
             country: node.country,
             r#type: node.r#type,
             cluster: node.cluster.clone(),
+            node_ips: node.node_ips.clone(),
         };
 
         let res = HttpClient::new()

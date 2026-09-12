@@ -44,6 +44,9 @@ pub struct NodeConfig {
     pub country: String,
     pub r#type: Type,
     pub cluster: Option<String>,
+    /// Extra entry IPs of the node (node_ips[0] == `address`); None =
+    /// single-address node.
+    pub node_ips: Option<Vec<Ipv4Addr>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -59,6 +62,10 @@ pub struct NodeConfigRaw {
     pub r#type: String,
     #[serde(default)]
     pub cluster: Option<String>,
+    /// Extra entry IPs: the first must equal `address` (primary first);
+    /// all IPs share the same ports/keys/inbounds. Absent = single address.
+    #[serde(default)]
+    pub node_ips: Option<Vec<Ipv4Addr>>,
 }
 
 impl NodeConfig {
@@ -87,6 +94,7 @@ impl NodeConfig {
             country: raw.country,
             r#type: raw.r#type.parse().unwrap_or(Type::Node),
             cluster: raw.cluster,
+            node_ips: raw.node_ips,
         })
     }
 }

@@ -16,7 +16,7 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, iap::*, key::*,
-        metrics::*, node::*, premium::*, subscription::*,
+        metrics::*, node::*, premium::*, share::*, subscription::*,
     },
     param::*,
     rejection,
@@ -63,6 +63,13 @@ where
         );
 
         let params = &self.settings.service;
+        // Public base URL of THIS api (feed links). Falls back to base_url
+        // (the site URL) when unset — but then feed links point at the site
+        // host, which is almost never what you want; set api_url in config.
+        let api_base = params
+            .api_url
+            .clone()
+            .unwrap_or_else(|| params.base_url.clone());
         let cors_origins = params.cors_origins.clone();
 
         let mut cors_builder = warp::cors()
@@ -96,12 +103,20 @@ where
         let get_nodes_route = warp::get()
             .and(warp::path("nodes"))
             .and(warp::path::end())
+            .and(mgmt_auth.clone())
             .and(warp::query::<NodesQueryParams>())
             .and(with_sync(self.sync.clone()))
             .and_then(get_nodes_handler);
 
+        let get_status_route = warp::get()
+            .and(warp::path("status"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and_then(get_nodes_status_handler);
+
         let get_node_route = warp::path!("node" / Uuid)
             .and(warp::get())
+            .and(mgmt_auth.clone())
             .and(with_sync(self.sync.clone()))
             .and(with_metrics(self.metrics.clone()))
             .and_then(get_node_handler);
@@ -154,6 +169,7 @@ where
             .and(warp::path::end())
             .and(with_sync(self.sync.clone()))
             .and(with_metrics(self.metrics.clone()))
+            .and(with_param_string(api_base.clone()))
             .and_then(get_subscription_info_json);
 
         let get_subscription_by_ref_code_route = warp::get()
@@ -522,6 +538,34 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(delete_connection_handler);
 
+        // Share token management (service token auth — the site's mrkting
+        // proxy calls these; the app uses the AGW /v1/share* routes).
+        let post_share_mgmt_route = warp::post()
+            .and(warp::path("share"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<MgmtShareMintRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_string(api_base.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
+            .and_then(mgmt_share_mint_handler);
+
+        let post_share_revoke_mgmt_route = warp::post()
+            .and(warp::path("share"))
+            .and(warp::path("revoke"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<MgmtShareRevokeRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(mgmt_share_revoke_handler);
+
         // Keys Routes
         let get_key_validation_route = warp::get()
             .and(warp::path("key"))
@@ -625,6 +669,18 @@ where
                 },
             );
 
+        // Share tokens (/v1/share*, share branch of /v1/config): per-IP
+        // rate limit against token enumeration, same params as mrkting.
+        let share_rate_limiter = Arc::new(RateLimiter::new(10, std::time::Duration::from_secs(60)));
+        let with_share_limiter = {
+            let limiter = share_rate_limiter.clone();
+            warp::any().map(move || limiter.clone())
+        };
+        // The public per-share feed (GET /sub/<token>) gets polled by
+        // clients — a more generous budget than mint.
+        let share_feed_rate_limiter =
+            Arc::new(RateLimiter::new(30, std::time::Duration::from_secs(60)));
+
         let post_amnezia_config_route = warp::post()
             .and(warp::path("v1"))
             .and(warp::path("config"))
@@ -636,18 +692,147 @@ where
                 let metered = params.metered_conns.clone();
                 move || metered.clone()
             }))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(with_share_limiter.clone())
             .and_then(
                 |req: GatewayConfigRequest,
                  ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
                  traffic_mode_enabled: bool,
-                 metered_conns: Vec<String>| async move {
-                    let response =
-                        gateway_config_handler(req, sync, traffic_mode_enabled, metered_conns)
+                 metered_conns: Vec<String>,
+                 remote: Option<std::net::SocketAddr>,
+                 x_forwarded_for: Option<String>,
+                 rate_limiter: Arc<RateLimiter>| async move {
+                    let response = gateway_config_handler(
+                        req,
+                        sync,
+                        traffic_mode_enabled,
+                        metered_conns,
+                        remote,
+                        x_forwarded_for,
+                        rate_limiter,
+                    )
                             .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
+
+        let post_share_mint_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("share"))
+            .and(warp::path::end())
+            .and(crypto::with_agw_decryption::<ShareMintRequest>(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(with_share_limiter.clone())
+            .and(with_param_string(api_base.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
+            .and_then(
+                |req: ShareMintRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 remote: Option<std::net::SocketAddr>,
+                 x_forwarded_for: Option<String>,
+                 rate_limiter: Arc<RateLimiter>,
+                 base_url: String,
+                 wg_network: fcore::IpAddrMask,
+                 awg_network: fcore::IpAddrMask,
+                 awg_mobile_network: Option<fcore::IpAddrMask>| async move {
+                    let response = gateway_share_mint_handler(
+                        req,
+                        sync,
+                        remote,
+                        x_forwarded_for,
+                        rate_limiter,
+                        base_url,
+                        wg_network,
+                        awg_network,
+                        awg_mobile_network,
+                    )
+                    .await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
+
+        let post_shares_list_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("shares"))
+            .and(warp::path::end())
+            .and(crypto::with_agw_decryption::<ShareListRequest>(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(with_share_limiter.clone())
+            .and_then(
+                |req: ShareListRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 remote: Option<std::net::SocketAddr>,
+                 x_forwarded_for: Option<String>,
+                 rate_limiter: Arc<RateLimiter>| async move {
+                    let response =
+                        gateway_shares_list_handler(req, sync, remote, x_forwarded_for, rate_limiter)
+                            .await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
+
+        let post_share_revoke_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("share"))
+            .and(warp::path("revoke"))
+            .and(warp::path::end())
+            .and(crypto::with_agw_decryption::<ShareRevokeRequest>(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(with_share_limiter.clone())
+            .and_then(
+                |req: ShareRevokeRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 remote: Option<std::net::SocketAddr>,
+                 x_forwarded_for: Option<String>,
+                 rate_limiter: Arc<RateLimiter>| async move {
+                    let response = gateway_share_revoke_handler(
+                        req,
+                        sync,
+                        remote,
+                        x_forwarded_for,
+                        rate_limiter,
+                    )
+                    .await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
+
+        // Public per-share feed for third-party clients (Happ/Streisand/
+        // Clash). The token in the path is the whole credential; plain HTTP
+        // like the owner's /sub route. The existing query route keeps
+        // matching path::end() right after "sub", this one takes the param.
+        let get_share_feed_route = warp::get()
+            .and(warp::path("sub"))
+            .and(warp::path::param::<String>())
+            .and(warp::path::end())
+            .and(warp::query::<ShareFeedQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
+            .and(with_param_string(params.subscription_title.clone()))
+            .and(with_param_string(api_base.clone()))
+            .and(with_param_string(params.support_contact.clone()))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(warp::any().map(move || share_feed_rate_limiter.clone()))
+            .and_then(share_feed_handler);
 
         // App Store IAP: the client is optional — without [service.apple] the
         // route stays mounted and answers 503.
@@ -730,6 +915,7 @@ where
         let routes = get_healthcheck_route
             // Subscription
             .or(get_subscription_route)
+            .or(get_share_feed_route)
             .or(get_subscription_info_route)
             .or(get_subscription_by_ref_code_route)
             .or(get_subscription_traffic_route)
@@ -738,6 +924,7 @@ where
             .or(post_subscription_traffic_route)
             // Node
             .or(get_nodes_route)
+            .or(get_status_route)
             .or(get_node_route)
             .or(delete_node_route)
             .or(post_node_register_route)
@@ -752,6 +939,9 @@ where
             .or(get_wg_connections_info_route)
             .or(get_awg_connections_info_route)
             .or(get_a_connection_route)
+            // Share (mgmt)
+            .or(post_share_mgmt_route)
+            .or(post_share_revoke_mgmt_route)
             // Key
             .or(get_key_validation_route)
             .or(post_key_route)
@@ -761,6 +951,10 @@ where
             .or(post_amnezia_account_route)
             .or(post_amnezia_config_route)
             .or(post_amnezia_subscriptions_route)
+            // Share tokens
+            .or(post_share_mint_route)
+            .or(post_shares_list_route)
+            .or(post_share_revoke_route)
             // Admin
             .or(admin_routes)
             // Premium

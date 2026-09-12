@@ -78,7 +78,13 @@ where
 {
     async fn add_node(&self, node_id: &uuid::Uuid, node: Node) -> SyncResult<Status>;
     async fn delete_node(&self, uuid: &uuid::Uuid) -> SyncResult<Status>;
-    async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status>;
+    async fn add_conn(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: Connection,
+        label: Option<String>,
+        node_id: Option<uuid::Uuid>,
+    ) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
     async fn delete_connection(
         &self,
@@ -264,14 +270,25 @@ where
         }
     }
 
-    async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status> {
+    async fn add_conn(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: Connection,
+        label: Option<String>,
+        node_id: Option<uuid::Uuid>,
+    ) -> SyncResult<Status> {
         info!("Adding connection: {}", conn_id);
 
         // Validate input
         conn.validate()?;
 
-        // Create database row
-        let conn_row: ConnRow = (*conn_id, conn.clone()).into();
+        // Create database row. The label and the node pin are PG-only
+        // (connections.label / connections.node_id): they are persisted
+        // here and mirrored into the api-side conn_labels/conn_nodes side
+        // maps, but never become part of the rkyv payload to nodes.
+        let mut conn_row: ConnRow = (*conn_id, conn.clone()).into();
+        conn_row.label = label.clone();
+        conn_row.node_id = node_id;
 
         // Insert into database first
         if let Err(e) = self.db.conn().insert(conn_row).await {
@@ -285,6 +302,12 @@ where
         // Insert into memory
         let result = {
             let mut memory = self.memory.write().await;
+            if let Some(label) = label {
+                memory.conn_labels.insert(*conn_id, label);
+            }
+            if let Some(node_id) = node_id {
+                memory.conn_nodes.insert(*conn_id, node_id);
+            }
             ConnectionStorageApiOperations::add(
                 &mut memory.connections,
                 conn_id,
@@ -352,8 +375,24 @@ where
         debug!("Connection {} successfully removed from database", conn_id);
 
         let msg = vec![conn.as_delete_message(conn_id)];
+
+        // Read the node pin before it is removed from the side map below:
+        // on a node Action::Create and Action::Update are handled
+        // identically, so a pinned conn's delete must go to the pin's Init
+        // topic, never to the env-wide Updates broadcast.
+        let pin = {
+            let memory = self.memory.read().await;
+            memory.conn_nodes.get(conn_id).copied()
+        };
+
         let topic = if conn.get_token().is_some() {
+            // H2 token conns stay on Auth; pinning is never exposed for H2.
             Topic::Auth
+        } else if !conn.get_proto().is_mtproto() {
+            match pin {
+                Some(pin) => Topic::Init(pin),
+                None => conn.get_env().into(),
+            }
         } else {
             conn.get_env().into()
         };
@@ -386,6 +425,14 @@ where
                     conn_id
                 );
             }
+            // The label is per-device; a deleted device drops it from the
+            // side map (PG keeps the column, so a full reload or a restore
+            // followed by a periodic sync re-populates it).
+            memory.conn_labels.remove(conn_id);
+            // The pin is per-device too; a deleted device drops it.
+            memory.conn_nodes.remove(conn_id);
+            // A deleted share child leaves the hidden set as well.
+            memory.share_conns.remove(conn_id);
         }
 
         info!("Successfully completed deletion flow for: {}", conn_id);
@@ -409,14 +456,14 @@ where
             + PartialEq,
         Connection: From<C>,
     {
-        let conns_to_restore: Vec<(uuid::Uuid, Connection)> = {
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = {
             let mem = self.memory.read().await;
 
             match mem.connections.get_by_subscription_id(sub_id) {
                 Some(conns) => conns
                     .iter()
                     .filter(|(_, c)| c.get_deleted())
-                    .map(|(id, c)| (*id, c.clone().into()))
+                    .map(|(id, c)| (*id, c.clone().into(), mem.conn_nodes.get(id).copied()))
                     .collect(),
                 None => Vec::new(),
             }
@@ -453,7 +500,7 @@ where
                 .and_then(|s| s.limit_bytes())
         };
 
-        let needs_used_bytes = conns_to_restore.iter().any(|(id, _)| {
+        let needs_used_bytes = conns_to_restore.iter().any(|(id, _, _)| {
             reasons.get(id).and_then(|r| r.as_deref()) == Some(DELETE_REASON_TRAFFIC_EXHAUSTED)
         });
 
@@ -472,9 +519,9 @@ where
             0
         };
 
-        let conns_to_restore: Vec<(uuid::Uuid, Connection)> = conns_to_restore
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = conns_to_restore
             .into_iter()
-            .filter(|(conn_id, _)| {
+            .filter(|(conn_id, _, _)| {
                 let reason = reasons.get(conn_id).and_then(|r| r.as_deref());
                 let restorable = connection_restorable(reason, used_bytes, limit_bytes);
                 if !restorable {
@@ -489,10 +536,10 @@ where
 
         // Traffic mode: only metered protocols come back — protocols without
         // per-connection traffic accounting would burn the balance uncounted.
-        let conns_to_restore: Vec<(uuid::Uuid, Connection)> = match metered_conns {
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = match metered_conns {
             Some(metered) => conns_to_restore
                 .into_iter()
-                .filter(|(conn_id, conn)| {
+                .filter(|(conn_id, conn, _)| {
                     let proto = conn.get_proto().proto();
                     let allowed = proto.is_metered(metered);
                     if !allowed {
@@ -513,7 +560,7 @@ where
 
         let this = self.clone();
 
-        let tasks = conns_to_restore.into_iter().map(|(conn_id, conn)| {
+        let tasks = conns_to_restore.into_iter().map(|(conn_id, conn, pin)| {
             let this = this.clone();
             async move {
                 let msg = vec![conn.as_update_message(&conn_id)];
@@ -526,8 +573,16 @@ where
                     }
                 };
 
+                // A node treats Action::Update like Action::Create, so a
+                // pinned conn's restore must go to the pin's Init topic,
+                // not to the env-wide Updates broadcast.
                 let topic = if conn.get_token().is_some() {
                     Topic::Auth
+                } else if !conn.get_proto().is_mtproto() {
+                    match pin {
+                        Some(pin) => Topic::Init(pin),
+                        None => conn.get_env().into(),
+                    }
                 } else {
                     conn.get_env().into()
                 };

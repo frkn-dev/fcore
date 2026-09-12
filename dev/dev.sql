@@ -263,3 +263,66 @@ CREATE TABLE IF NOT EXISTS traffic_topups (
 -- Known reasons: 'expired', 'manual', 'traffic_exhausted', 'device_kick'.
 ALTER TABLE connections
     ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+
+
+-- Named devices: user-facing label for extra named connections a user
+-- creates on their subscription (e.g. "Мама Андроид"). NULL means a
+-- system/default connection created by the backend. PG-only on purpose:
+-- the label never crosses the rkyv wire to the nodes (same precedent as
+-- deleted_reason); the api keeps it in an in-memory conn_id -> label side
+-- map rebuilt from this column.
+ALTER TABLE connections
+    ADD COLUMN IF NOT EXISTS label TEXT;
+
+
+-- Share tokens (frkn://conn/<token>): a scoped credential that lets a
+-- recipient import exactly one server. At mint time the backend creates a
+-- "child" connection on the same subscription (own UUID/keys, same env and
+-- proto as the source connection) and flags it issued_via = 'share'. The
+-- flag is PG-only like `label`: the api mirrors it into an in-memory set so
+-- share children stay hidden from every owner-facing listing (/v1/services,
+-- account info device count, the site device list, the whole-sub feed).
+ALTER TABLE connections
+    ADD COLUMN IF NOT EXISTS issued_via TEXT;
+
+-- Applied automatically at api startup; kept here for fresh environments.
+-- token: Crockford base32, 16 chars (80 bits), stored contiguous lowercase.
+-- No TTL: a token lives until explicit revoke. connection_id is the child
+-- connection created at mint; node_id pins the config to one node.
+CREATE TABLE IF NOT EXISTS share_tokens (
+    token TEXT PRIMARY KEY,
+    subscription_id UUID NOT NULL,
+    connection_id UUID NOT NULL,
+    node_id UUID NOT NULL,
+    source_connection_id UUID NOT NULL,
+    label TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+
+-- Idempotent mint: a repeat request for the same (source, node, label)
+-- triple returns the existing live token instead of duplicating the child.
+CREATE UNIQUE INDEX IF NOT EXISTS share_tokens_active_triple
+    ON share_tokens (source_connection_id, node_id, label)
+    WHERE revoked_at IS NULL;
+
+-- Node-pinned connections ("named devices"): the pin is the node's uuid
+-- (nodes.uuid), not the row id. The column existed historically and was
+-- dropped above (line 122) — re-added here. NULL = env-wide (current
+-- behavior); only named devices created with a node pin set it. PG-only,
+-- like label/issued_via: the api mirrors it into an in-memory side map.
+alter table connections add column node_id uuid;
+
+-- Extra entry IPs of a node (anti IP-blocking). TEXT[], not INET[]:
+-- values are validated as Ipv4Addr at the API boundary, so no
+-- tokio-postgres type plumbing is needed. The first element is the
+-- primary (== nodes.address); NULL = single-address node.
+alter table nodes add column node_ips text[];
+
+-- Per-inbound PersistentKeepalive (seconds) injected into client WG/AWG
+-- configs. Set from the node's config.toml ([wg]/[awg]/[awg_mobile]
+-- keepalive); it cannot live in the interface .conf because wg-quick/awg
+-- refuse to start with a keepalive in [Interface]. NULL = clients get the
+-- default 25.
+alter table inbounds add column keepalive integer;

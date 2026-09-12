@@ -14,6 +14,9 @@ updates_endpoint_zmq = "tcp://*:3001"
 subscription_title = "FRKN Subscription"
 support_contact = "https://t.me/frkn_support"
 base_url = "https://frkn.org"
+# Public base URL of this api instance — used for machine-facing links
+# (share feed /sub/<token>). Defaults to base_url when unset.
+api_url = "https://api.frkn.org"
 admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"

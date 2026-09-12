@@ -79,6 +79,10 @@ pub struct WireguardSettings {
     pub port: u16,
     pub keys: WgKeys,
     pub dns: Vec<Ipv4Addr>,
+    /// PersistentKeepalive (seconds) for client configs, set from the node's
+    /// config.toml ([wg] keepalive). None = clients get the default 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive: Option<u16>,
 }
 
 impl std::fmt::Display for WireguardSettings {
@@ -126,6 +130,7 @@ impl TryFrom<WireguardServerConfig> for WireguardSettings {
             address,
             port: cfg.port,
             dns,
+            keepalive: None,
         })
     }
 }

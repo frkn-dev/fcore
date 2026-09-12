@@ -2031,8 +2031,8 @@ dependencies = [
 
 [[package]]
 name = "netlink-packet-amnezia-wireguard"
-version = "0.2.0"
-source = "git+https://github.com/frkn-dev/netlink-packet-amnezia-wireguard?branch=main#1b1220dd739cc5c68707f98534f714ef70359d04"
+version = "0.2.1"
+source = "git+https://github.com/frkn-dev/netlink-packet-amnezia-wireguard?branch=main#b8b5fcc75adbc0c63cac0a9b30fdecbe783efd6c"
 dependencies = [
  "libc",
  "log",

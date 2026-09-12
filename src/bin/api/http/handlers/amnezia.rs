@@ -13,6 +13,9 @@ use std::collections::HashMap;
 use std::io::Write;
 use warp::Reply;
 
+use super::connection::pinned_to;
+use super::share;
+
 // ============================================================================
 // DTOs
 // ============================================================================
@@ -108,6 +111,10 @@ pub struct GatewayConnection {
     pub env: String,
     #[serde(rename = "connection_label")]
     pub connection_label: String,
+    /// All entry IPs of the node as plain IP strings (first = primary).
+    /// Absent for single-address nodes so old clients see the old shape.
+    #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
+    pub node_ips: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,10 +200,13 @@ pub struct GatewayConfigRequest {
     pub user_country_code: Option<String>,
     #[serde(rename = "server_country_code")]
     pub server_country_code: Option<String>,
+    // Optional: meaningless under share_token auth (the token's child
+    // connection determines everything). The owner branch below still
+    // requires both fields with an explicit 400.
     #[serde(rename = "service_type")]
-    pub service_type: String,
+    pub service_type: Option<String>,
     #[serde(rename = "service_protocol")]
-    pub service_protocol: String,
+    pub service_protocol: Option<String>,
     #[serde(rename = "auth_data")]
     pub auth_data: serde_json::Value,
     #[serde(rename = "public_key")]
@@ -216,6 +226,23 @@ pub struct GatewayConfigResponse {
     pub service_info: serde_json::Value,
     #[serde(rename = "api_config")]
     pub api_config: serde_json::Value,
+    // Display fields set only under share_token auth: the recipient has no
+    // /v1/services access to learn them from.
+    #[serde(rename = "share_label", skip_serializing_if = "Option::is_none")]
+    pub share_label: Option<String>,
+    #[serde(rename = "country_code", skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(rename = "country_name", skip_serializing_if = "Option::is_none")]
+    pub country_name: Option<String>,
+    #[serde(rename = "service_protocol", skip_serializing_if = "Option::is_none")]
+    pub service_protocol: Option<String>,
+    #[serde(rename = "service_type", skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<String>,
+    /// All entry IPs of the chosen node as plain IP strings (first =
+    /// primary); the client picks/rotates addresses itself. Absent for
+    /// single-address nodes so old clients see the old shape.
+    #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
+    pub node_ips: Option<Vec<String>>,
 }
 
 // ============================================================================
@@ -223,7 +250,7 @@ pub struct GatewayConfigResponse {
 // ============================================================================
 
 /// Extracts subscription_id from auth_data.
-fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> {
+pub(crate) fn extract_subscription_id(auth_data: &serde_json::Value) -> Option<uuid::Uuid> {
     auth_data
         .get("id")
         .and_then(|v| v.as_str())
@@ -279,8 +306,10 @@ fn inbound_label(tag: Tag) -> &'static str {
 
 /// Returns the list of connections for the given protocol.
 /// For each online node with the required inbound, finds a matching connection of the subscription.
+/// A node-pinned conn (`conn_nodes`) matches only its own node.
 fn connections_for_protocol<N, C>(
     nodes: &N,
+    conn_nodes: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
     protocol: &str,
     conns: Option<&[(uuid::Uuid, C)]>,
 ) -> Vec<GatewayConnection>
@@ -297,6 +326,10 @@ where
         if let Some(cs) = conns {
             for (conn_id, conn) in cs {
                 if conn.get_deleted() {
+                    continue;
+                }
+                // A node-pinned conn exists only on its node.
+                if !pinned_to(conn_nodes, conn_id, &node.uuid) {
                     continue;
                 }
                 let tag = conn.get_proto().proto();
@@ -323,6 +356,10 @@ where
                     service_protocol: proto_label(tag).to_string(),
                     env: conn.get_env().to_string(),
                     connection_label: label,
+                    node_ips: node
+                        .node_ips
+                        .as_ref()
+                        .map(|ips| ips.iter().map(|ip| ip.to_string()).collect()),
                 });
             }
         }
@@ -336,6 +373,7 @@ where
             service_protocol: String::new(),
             env: String::new(),
             connection_label: "All countries".to_string(),
+            node_ips: None,
         }];
     }
     result
@@ -381,7 +419,7 @@ fn build_awg_server_config(
     let mtu = ini.get("MTU").unwrap_or(&"1420");
     let server_pub_key = ini.get("PublicKey").unwrap_or(&"");
     let psk_key = ini.get("PresharedKey").unwrap_or(&"");
-    let persistent_keepalive = "25";
+    let persistent_keepalive = ini.get("PersistentKeepalive").unwrap_or(&"25");
 
     let jc = ini.get("Jc").unwrap_or(&"4");
     let jmin = ini.get("Jmin").unwrap_or(&"40");
@@ -463,6 +501,7 @@ fn build_wg_server_config(
     let client_ip = param.address.address.to_string();
     // Real server-generated private key (AGW envelope is encrypted).
     let client_priv_key = &param.keys.privkey;
+    let keepalive = wg.keepalive.unwrap_or(25);
 
     let ini = format!(
         r#"[Interface]
@@ -475,7 +514,7 @@ MTU = 1420
 PublicKey = {server_pub_key}
 AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = {host}:{port}
-PersistentKeepalive = 25
+PersistentKeepalive = {keepalive}
 "#,
         address = param.address,
         server_pub_key = server_pub_key,
@@ -492,7 +531,7 @@ PersistentKeepalive = 25
         "hostName": host,
         "port": inbound.port,
         "mtu": "1420",
-        "persistent_keep_alive": "25",
+        "persistent_keep_alive": keepalive.to_string(),
     });
 
     Ok(serde_json::json!({
@@ -868,6 +907,15 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
+    // A share token authorizes /v1/config and nothing else.
+    if req
+        .auth_data
+        .as_ref()
+        .is_some_and(share::auth_data_has_share_token)
+    {
+        return Ok(share::forbidden("share_token is only valid for /v1/config"));
+    }
+
     let mem = memory.memory.read().await;
 
     // If subscription_id is provided, use the real subscription end_date and its connections.
@@ -892,21 +940,28 @@ where
     let end_date = sub
         .as_ref()
         .and_then(|sub| sub.expires_at().map(|d| d.to_rfc3339()));
-    let conns = sub_id.and_then(|sub_id| mem.connections.get_by_subscription_id(&sub_id));
+    let conns = sub_id
+        .and_then(|sub_id| mem.connections.get_by_subscription_id(&sub_id))
+        .map(|cs| {
+            // Share-issued child connections are not the owner's devices.
+            cs.into_iter()
+                .filter(|(conn_id, _)| !share::is_share_connection(&mem.share_conns, conn_id))
+                .collect::<Vec<_>>()
+        });
     let conns_slice = conns.as_deref();
 
-    let vless_connections = connections_for_protocol(&mem.nodes, "vless", conns_slice);
-    let awg_connections = connections_for_protocol(&mem.nodes, "awg", conns_slice);
+    let vless_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, "vless", conns_slice);
+    let awg_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, "awg", conns_slice);
 
     // One merged service: the client must not offer a protocol choice at purchase.
     let mut connections = vless_connections;
     connections.extend(awg_connections);
     // Hysteria2 has no per-connection traffic accounting: hidden in traffic mode.
     if !traffic_mode || Tag::Hysteria2.is_metered(&metered_conns) {
-        connections.extend(connections_for_protocol(&mem.nodes, "hysteria2", conns_slice));
+        connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "hysteria2", conns_slice));
     }
-    connections.extend(connections_for_protocol(&mem.nodes, "awg-mobile", conns_slice));
-    connections.extend(connections_for_protocol(&mem.nodes, "wireguard", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "awg-mobile", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "wireguard", conns_slice));
     let countries = available_countries_from_connections(&connections);
 
     let info = GatewayServiceInfo {
@@ -960,6 +1015,11 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
+    // A share token authorizes /v1/config and nothing else.
+    if share::auth_data_has_share_token(&req.auth_data) {
+        return Ok(share::forbidden("share_token is only valid for /v1/config"));
+    }
+
     let sub_id = match extract_subscription_id(&req.auth_data) {
         Some(id) => id,
         None => {
@@ -987,7 +1047,15 @@ where
     }
 
     let conns = mem.connections.get_by_subscription_id(&sub_id);
-    let active_devices = conns.as_ref().map(|c| c.len() as i64).unwrap_or(0);
+    // Share-issued child connections are not the owner's devices.
+    let active_devices = conns
+        .as_ref()
+        .map(|cs| {
+            cs.iter()
+                .filter(|(conn_id, _)| !share::is_share_connection(&mem.share_conns, conn_id))
+                .count() as i64
+        })
+        .unwrap_or(0);
 
     // Build issued_configs from real connections.
     let issued_configs: Vec<GatewayIssuedConfig> = conns
@@ -1170,6 +1238,11 @@ where
 
         if let Some(nodes) = mem.nodes.get_by_env(&conn.get_env()) {
             for node in nodes {
+                // A node-pinned conn exists only on its node: never render
+                // its config for another node where the peer is absent.
+                if !pinned_to(&mem.conn_nodes, &conn_id, &node.uuid) {
+                    continue;
+                }
                 // A pinned node_id selects exactly that node; a mismatch is
                 // an explicit error, not a silent fallback to another node.
                 if let Some(wanted) = params.node_id {
@@ -1338,6 +1411,15 @@ where
             "user_country_code": params.user_country_code.unwrap_or(""),
             "server_country_code": params.server_country_code
         }),
+        share_label: None,
+        country_code: None,
+        country_name: None,
+        service_protocol: None,
+        service_type: None,
+        node_ips: node
+            .node_ips
+            .as_ref()
+            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect()),
     })
 }
 
@@ -1346,6 +1428,9 @@ pub async fn gateway_config_handler<N, C, S>(
     memory: MemSync<N, C, S>,
     traffic_mode_enabled: bool,
     metered_conns: Vec<String>,
+    remote: Option<std::net::SocketAddr>,
+    x_forwarded_for: Option<String>,
+    rate_limiter: std::sync::Arc<share::RateLimiter>,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1360,6 +1445,21 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
+    // Share-token auth is a separate, tightly scoped branch: the config is
+    // pinned to the token's child connection and nothing else.
+    if let Some(raw_token) = req.auth_data.get("share_token").and_then(|v| v.as_str()) {
+        let raw_token = raw_token.to_string();
+        return Ok(share::gateway_share_config_handler(
+            req,
+            &raw_token,
+            memory,
+            remote,
+            x_forwarded_for,
+            rate_limiter,
+        )
+        .await);
+    }
+
     let sub_id = match extract_subscription_id(&req.auth_data) {
         Some(id) => id,
         None => {
@@ -1371,9 +1471,22 @@ where
         }
     };
 
+    // Owner path: both fields are required (share_token auth returns above
+    // and never needs them).
+    let (Some(service_type), Some(service_protocol)) = (
+        req.service_type.as_deref(),
+        req.service_protocol.as_deref(),
+    ) else {
+        return Ok(warp::reply::with_status(
+            "Missing service_type/service_protocol",
+            warp::http::StatusCode::BAD_REQUEST,
+        )
+        .into_response());
+    };
+
     let params = GatewayConfigParams {
-        service_protocol: &req.service_protocol,
-        service_type: &req.service_type,
+        service_protocol,
+        service_type,
         user_country_code: req.user_country_code.as_deref(),
         server_country_code: req.server_country_code.as_deref(),
         connection_id: req.connection_id,
@@ -1435,6 +1548,7 @@ mod tests {
                 port: 51820,
                 keys: WgKeys::default(),
                 dns: vec![],
+                keepalive: None,
             }),
             awg: None,
             mtproto_secret: None,
@@ -1522,6 +1636,110 @@ mod tests {
         assert_eq!(tls["alpn"], serde_json::json!(["h3"]));
         assert_eq!(tls["allowInsecure"], false);
         assert_eq!(ob["streamSettings"]["network"], "udp");
+    }
+
+    #[test]
+    fn share_config_request_may_omit_service_fields() {
+        // Regression: the app's share import sends only auth_data +
+        // installation_uuid + public_key — no service_type/service_protocol.
+        let body = serde_json::json!({
+            "os_version": "linux",
+            "app_version": "4.8.14.33",
+            "app_language": "ru",
+            "installation_uuid": "11111111-2222-3333-4444-555555555555",
+            "auth_data": {"share_token": "skcvac6pt2z0hh51"},
+            "public_key": "abc"
+        });
+        let req: GatewayConfigRequest = serde_json::from_value(body).unwrap();
+        assert!(req.service_type.is_none());
+        assert!(req.service_protocol.is_none());
+        assert!(share::auth_data_has_share_token(&req.auth_data));
+    }
+
+    #[test]
+    fn gateway_connection_node_ips_serialization() {
+        let base = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "FI".to_string(),
+            country_name: "FI".to_string(),
+            service_protocol: "awg".to_string(),
+            env: "ru".to_string(),
+            connection_label: "Moscow · AmneziaWG".to_string(),
+            node_ips: None,
+        };
+        // Single-address node: the field is omitted entirely (old shape).
+        let v = serde_json::to_value(&base).unwrap();
+        assert!(v.get("node_ips").is_none());
+
+        let multi = GatewayConnection {
+            node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
+            ..base
+        };
+        let v = serde_json::to_value(&multi).unwrap();
+        assert_eq!(
+            v["node_ips"],
+            serde_json::json!(["78.17.28.66", "78.17.28.67"])
+        );
+    }
+
+    #[test]
+    fn share_config_response_carries_display_fields() {
+        // The share recipient has no /v1/services access: the config response
+        // must carry share_label/country/service_protocol/service_type.
+        let resp = GatewayConfigResponse {
+            config: "Y2Zn".to_string(),
+            supported_protocols: vec!["awg".to_string()],
+            service_info: serde_json::json!({"name": "Moscow", "type": share::SHARE_SERVICE_TYPE}),
+            api_config: serde_json::json!({
+                "service_type": share::SHARE_SERVICE_TYPE,
+                "service_protocol": "awg",
+                "user_country_code": "",
+                "server_country_code": null
+            }),
+            share_label: Some("Android Mama".to_string()),
+            country_code: Some("FI".to_string()),
+            country_name: Some("FI".to_string()),
+            service_protocol: Some("awg".to_string()),
+            service_type: Some(share::SHARE_SERVICE_TYPE.to_string()),
+            node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["share_label"], "Android Mama");
+        assert_eq!(v["country_code"], "FI");
+        assert_eq!(v["country_name"], "FI");
+        assert_eq!(v["service_protocol"], "awg");
+        assert_eq!(v["service_type"], "amnezia-premium");
+        assert_eq!(v["api_config"]["service_type"], "amnezia-premium");
+        assert_eq!(
+            v["node_ips"],
+            serde_json::json!(["78.17.28.66", "78.17.28.67"])
+        );
+
+        // Owner branch: display fields are omitted entirely.
+        let owner = GatewayConfigResponse {
+            config: resp.config.clone(),
+            supported_protocols: resp.supported_protocols.clone(),
+            service_info: resp.service_info.clone(),
+            api_config: resp.api_config.clone(),
+            share_label: None,
+            country_code: None,
+            country_name: None,
+            service_protocol: None,
+            service_type: None,
+            node_ips: None,
+        };
+        let v = serde_json::to_value(&owner).unwrap();
+        for field in [
+            "share_label",
+            "country_code",
+            "country_name",
+            "service_protocol",
+            "service_type",
+            "node_ips",
+        ] {
+            assert!(v.get(field).is_none(), "{} must be omitted", field);
+        }
     }
 }
 

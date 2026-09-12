@@ -127,7 +127,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     #[cfg(feature = "wireguard")]
     let (wg_client, wg_config) = if settings.wg.enabled {
         let row_config = WireguardServerConfig::from_file(&settings.wg.path)?;
-        let wg: WireguardSettings = row_config.try_into()?;
+        let mut wg: WireguardSettings = row_config.try_into()?;
+        wg.keepalive = settings.wg.keepalive;
         debug!("{:?}", wg);
         let client = match WgApi::new(&wg.interface) {
             Ok(c) => c,
@@ -144,7 +145,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     #[cfg(feature = "amnezia-wg")]
     let (awg_client, awg_config) = if settings.awg.enabled {
         let raw_config = AmneziaWgServerConfig::from_file(&settings.awg.path)?;
-        let awg: AmneziaWgSettings = raw_config.try_into()?;
+        let mut awg: AmneziaWgSettings = raw_config.try_into()?;
+        awg.keepalive = settings.awg.keepalive;
 
         debug!("{:?}", awg);
 
@@ -171,7 +173,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     #[cfg(feature = "amnezia-wg")]
     let (awg_mobile_client, awg_mobile_config) = if settings.awg_mobile.enabled {
         let raw_config = AmneziaWgServerConfig::from_file(&settings.awg_mobile.path)?;
-        let awg: AmneziaWgSettings = raw_config.try_into()?;
+        let mut awg: AmneziaWgSettings = raw_config.try_into()?;
+        awg.keepalive = settings.awg_mobile.keepalive;
 
         debug!("{:?}", awg);
 

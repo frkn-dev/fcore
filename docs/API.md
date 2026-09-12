@@ -26,7 +26,7 @@
 | **Service token** | Управление подписками, нодами, ключами, подключениями | `Authorization: Bearer <settings.service.token>` |
 | **Admin token** | Admin API и страница `/admin` | `Authorization: Bearer <settings.service.admin_token>` (API) или `?token=<admin_token>` (страница) |
 | **Premium token** | Premium panel | `Authorization: Bearer <subscription.premium_token>` |
-| **Без auth** | Публичные endpoint'ы: `/healthcheck`, `/sub`, `/subscription/*`, `/nodes`, `/node/{id}`, `/clusters/*`, `/info/connections/*`, `/key/validate`, `/key/activate`, `/trial`, `/v1/*` | — |
+| **Без auth** | Публичные endpoint'ы: `/healthcheck`, `/sub`, `/subscription/*`, `/status`, `/clusters/*`, `/info/connections/*`, `/key/validate`, `/key/activate`, `/trial`, `/v1/*` | — |
 
 ---
 
@@ -263,15 +263,39 @@
 
 ## Управление нодами
 
-### `GET /nodes?env={env}`
+### `GET /status`
+
+Публичный санитизированный статус нод (для status.frkn.org): без инбаундов, тегов, UUID и метрик; `ports` — дедуплицированный список портов ноды для проверок доступности.
 
 - **Auth:** нет
+- **Response:** `200 OK`
+  ```json
+  {
+    "status": 200,
+    "message": "List of node statuses",
+    "response": [
+      {
+        "hostname": "node1.example.com",
+        "address": "10.0.0.1",
+        "label": "FRA-01",
+        "country": "DE",
+        "status": "Online",
+        "type": "Node",
+        "ports": [443, 8443]
+      }
+    ]
+  }
+  ```
+
+### `GET /nodes?env={env}`
+
+- **Auth:** service token
 - **Query:** `env` — опциональный фильтр
 - **Response:** `200 OK` с обёрткой `ResponseMessage<Option<Vec<NodeResponse>>>`
 
 ### `GET /node/{id}`
 
-- **Auth:** нет
+- **Auth:** service token
 - **Response:** `200 OK`
   ```json
   {
