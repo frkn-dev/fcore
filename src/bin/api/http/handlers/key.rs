@@ -33,7 +33,7 @@ fn key_success_response(msg: String, key: &Key) -> warp::reply::WithStatus<warp:
     let body = serde_json::json!({
         "status": warp::http::StatusCode::OK.as_u16(),
         "message": msg,
-        "response": { "id": key.id, "instance": key_instance_json(key) },
+        "response": { "id": key.id, "instance": { "Key": key_instance_json(key) } },
     });
     warp::reply::with_status(warp::reply::json(&body), warp::http::StatusCode::OK)
 }
