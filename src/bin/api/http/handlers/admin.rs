@@ -10,7 +10,10 @@ use fcore::{
     NodeStatus, NodeStorageOperations, Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
-use crate::sync::{tasks::SyncOp, MemSync};
+use crate::sync::{
+    tasks::{SyncOp, DELETE_REASON_MANUAL},
+    MemSync,
+};
 
 const ADMIN_HTML: &str = include_str!("../admin.html");
 
@@ -898,7 +901,7 @@ where
             mem.connections.get(&conn_id).cloned()
         };
         if let Some(conn) = conn_opt {
-            if let Err(e) = SyncOp::delete_connection(&memory, &conn_id, &conn).await {
+            if let Err(e) = SyncOp::delete_connection(&memory, &conn_id, &conn, Some(DELETE_REASON_MANUAL)).await {
                 error!("Failed to delete connection {} for subscription {}: {:?}", conn_id, subscription_id, e);
             }
         }
@@ -983,7 +986,7 @@ where
         )));
     }
 
-    match SyncOp::delete_connection(&memory, &connection_id, &conn).await {
+    match SyncOp::delete_connection(&memory, &connection_id, &conn, Some(DELETE_REASON_MANUAL)).await {
         Ok(Status::Ok(_)) => Ok(Box::new(warp::reply::json(
             &serde_json::json!({"id": connection_id, "deleted": true}),
         ))),

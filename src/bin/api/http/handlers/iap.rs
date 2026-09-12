@@ -199,7 +199,9 @@ where
     }
 
     if was_inactive {
-        match SyncOp::restore_connections_by_subscription(memory, sub_id).await {
+        // IAP renewal extends the paid time, so the subscription is not in
+        // traffic mode: revive all restorable connections.
+        match SyncOp::restore_connections_by_subscription(memory, sub_id, None).await {
             Ok(restored) => {
                 tracing::debug!(
                     "IAP: {} connections restored for {}",
@@ -446,7 +448,9 @@ where
         node_id: None,
     };
 
-    match build_gateway_config_response(&memory, &sub_id, &params).await {
+    // Freshly renewed: the subscription has paid time, so serving access is
+    // Full regardless of the traffic-mode flag — no need to plumb it here.
+    match build_gateway_config_response(&memory, &sub_id, &params, false, &[]).await {
         Ok(response) => Ok(warp::reply::json(&response).into_response()),
         Err(resp) => Ok(resp),
     }

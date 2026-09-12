@@ -90,6 +90,23 @@ impl TagReq {
             TagReq::Mtproto => vec![Tag::Mtproto],
         }
     }
+
+    /// The feed proto selector covering exactly this connection tag — used
+    /// for the scoped per-share feed, where the client cannot pick a proto.
+    pub fn for_tag(tag: Tag) -> TagReq {
+        match tag {
+            Tag::VlessTcpReality => TagReq::VlessTcpReality,
+            Tag::VlessGrpcReality => TagReq::VlessGrpcReality,
+            Tag::VlessXhttpReality => TagReq::VlessXhttpReality,
+            Tag::VlessXhttpCdn => TagReq::VlessXhttpCdn,
+            // No dedicated selectors for these — the xray group covers them.
+            Tag::Vmess | Tag::Shadowsocks => TagReq::Xray,
+            Tag::Hysteria2 => TagReq::Hysteria2,
+            Tag::Wireguard => TagReq::Wireguard,
+            Tag::AmneziaWg | Tag::AmneziaWgMobile => TagReq::AmneziaWg,
+            Tag::Mtproto => TagReq::Mtproto,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,9 +141,35 @@ pub struct NodeRequest {
     pub r#type: Option<NodeType>,
     #[serde(default)]
     pub cluster: Option<String>,
+    /// Extra entry IPs sent by the node at registration: node_ips[0] is the
+    /// primary and must equal `address`; absent = single-address node
+    /// (old node binaries simply omit the field).
+    #[serde(default)]
+    pub node_ips: Option<Vec<Ipv4Addr>>,
 }
 
 impl NodeRequest {
+    /// Consistency rule for the entry-IP list: when present it must be
+    /// non-empty and start with the primary address, so old clients that
+    /// only read `address` stay correct.
+    pub fn validate(&self) -> Result<(), Error> {
+        if let Some(node_ips) = &self.node_ips {
+            match node_ips.first() {
+                None => {
+                    return Err(Error::Custom(
+                        "node_ips must be non-empty when present".into(),
+                    ));
+                }
+                Some(primary) if *primary != self.address => {
+                    return Err(Error::Custom(
+                        "node_ips[0] must equal the node address".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
     pub fn as_node(&self) -> Node {
         let now = Utc::now();
 
@@ -151,6 +194,7 @@ impl NodeRequest {
             country: self.country.clone(),
             r#type: t,
             cluster: self.cluster.clone(),
+            node_ips: self.node_ips.clone(),
         }
     }
 }
@@ -161,10 +205,38 @@ pub struct ConnCreateRequest {
     pub subscription_id: Option<uuid::Uuid>,
     pub proto: Tag,
     pub days: Option<u16>,
+    /// Optional user-facing name for a "named device" connection
+    /// (e.g. "Мама Андроид"). None = system/default connection.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Optional pin of a named-device connection to a single node
+    /// (nodes.uuid): the peer exists only on that node. None = env-wide
+    /// (current behavior).
+    #[serde(default)]
+    pub node_id: Option<uuid::Uuid>,
 }
 
 impl ConnCreateRequest {
+    /// Trimmed label, or None when it is absent or blank. Used both for
+    /// validation and for persistence so the two never disagree.
+    pub fn normalized_label(&self) -> Option<String> {
+        self.label
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
+        if let Some(label) = self.normalized_label() {
+            // A non-empty trimmed label is at least 1 char, so only the
+            // upper bound can fail here. Counted in chars, not bytes:
+            // labels are user-facing names and may be Cyrillic.
+            if label.chars().count() > 64 {
+                return Err(Error::Custom("label must be 1..=64 characters".into()));
+            }
+        }
+
         Ok(())
     }
 }
@@ -173,6 +245,18 @@ impl ConnCreateRequest {
 pub struct KeyReq {
     pub days: i16,
     pub distributor: Option<String>,
+    /// Key kind: absent/"standard" keeps the v1 days behavior, "lite"
+    /// creates a traffic-only key and requires traffic_gib.
+    pub kind: Option<String>,
+    pub traffic_gib: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddTrafficReq {
+    /// Bytes to add to the subscription limit; must be positive.
+    pub add_bytes: i64,
+    /// Idempotency key: a repeated top-up with the same trace_id is a no-op.
+    pub trace_id: uuid::Uuid,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -180,6 +264,9 @@ pub struct ActivateKeyReq {
     pub code: String,
     pub subscription_id: Option<uuid::Uuid>,
     pub limit_bytes: Option<i64>,
+    /// Required for lite keys: fcore binds it to the subscription via
+    /// mrkting's POST /account. Ignored for standard keys.
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -211,6 +298,27 @@ pub struct SubscriptionInfoRequest {
     pub format: FormatReq,
     pub env: EnvFilter,
     pub proto: TagReq,
+    #[serde(default)]
+    pub app: Option<String>,
+    /// Optional single-connection (named device) scope: the feed contains
+    /// only links of this connection. The connection must belong to the
+    /// subscription, otherwise the handler answers 404.
+    #[serde(default)]
+    pub conn: Option<uuid::Uuid>,
+}
+
+fn default_share_feed_format() -> FormatReq {
+    FormatReq::Base64
+}
+
+/// Query for the public per-share feed (GET /sub/<token>): the same knobs
+/// as the subscription feed minus id/env/proto, which are pinned by the
+/// token. Unlike SubscriptionInfoRequest, `format` is optional —
+/// third-party clients (Happ/Streisand) fetch the bare URL.
+#[derive(Debug, Deserialize)]
+pub struct ShareFeedQuery {
+    #[serde(default = "default_share_feed_format")]
+    pub format: FormatReq,
     #[serde(default)]
     pub app: Option<String>,
 }
@@ -257,10 +365,184 @@ pub struct RefCodeQuery {
 pub struct ConnectionInfoRequest {
     pub id: uuid::Uuid,
     pub env: Env,
+    /// Optional single-connection (named device) scope: only this
+    /// connection's configs are returned.
+    #[serde(default)]
+    pub conn: Option<uuid::Uuid>,
 }
 
 impl ConnectionInfoRequest {
     pub fn validate(&self) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_req_standard_without_kind() {
+        let req: KeyReq = serde_json::from_str(r#"{"days": 30}"#).unwrap();
+
+        assert_eq!(req.days, 30);
+        assert!(req.kind.is_none());
+        assert!(req.traffic_gib.is_none());
+    }
+
+    #[test]
+    fn test_key_req_lite() {
+        let req: KeyReq =
+            serde_json::from_str(r#"{"days": 0, "kind": "lite", "traffic_gib": 5}"#).unwrap();
+
+        assert_eq!(req.kind.as_deref(), Some("lite"));
+        assert_eq!(req.traffic_gib, Some(5));
+    }
+
+    #[test]
+    fn test_key_req_requires_days() {
+        let parsed: Result<KeyReq, _> = serde_json::from_str(r#"{"kind": "lite"}"#);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn test_activate_key_req_email_optional() {
+        let req: ActivateKeyReq = serde_json::from_str(r#"{"code": "XXXX"}"#).unwrap();
+        assert!(req.email.is_none());
+
+        let req: ActivateKeyReq =
+            serde_json::from_str(r#"{"code": "XXXX", "email": "a@b.c"}"#).unwrap();
+        assert_eq!(req.email.as_deref(), Some("a@b.c"));
+    }
+
+    fn req_with_label(label: Option<&str>) -> ConnCreateRequest {
+        ConnCreateRequest {
+            env: Env::Ru,
+            subscription_id: None,
+            proto: Tag::Wireguard,
+            days: None,
+            label: label.map(str::to_string),
+            node_id: None,
+        }
+    }
+
+    #[test]
+    fn test_label_absent_is_valid() {
+        let req = req_with_label(None);
+        assert!(req.validate().is_ok());
+        assert_eq!(req.normalized_label(), None);
+    }
+
+    #[test]
+    fn test_label_blank_becomes_none() {
+        for blank in ["", "   ", "\t \n"] {
+            let req = req_with_label(Some(blank));
+            assert!(req.validate().is_ok());
+            assert_eq!(req.normalized_label(), None);
+        }
+    }
+
+    #[test]
+    fn test_label_is_trimmed() {
+        let req = req_with_label(Some("  Мама Андроид  "));
+        assert!(req.validate().is_ok());
+        assert_eq!(req.normalized_label().as_deref(), Some("Мама Андроид"));
+    }
+
+    #[test]
+    fn test_label_max_length_ok() {
+        let label = "я".repeat(64);
+        let req = req_with_label(Some(&label));
+        assert!(req.validate().is_ok());
+        assert_eq!(req.normalized_label().as_deref(), Some(label.as_str()));
+    }
+
+    #[test]
+    fn test_label_too_long_rejected() {
+        // 65 Cyrillic chars = 130 bytes: the limit counts characters.
+        let label = "я".repeat(65);
+        let req = req_with_label(Some(&label));
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_subscription_info_conn_param() {
+        let id = uuid::Uuid::new_v4();
+        let conn = uuid::Uuid::new_v4();
+
+        let qs = format!("id={}&format=txt&env=all&proto=proxy&conn={}", id, conn);
+        let req: SubscriptionInfoRequest = serde_urlencoded::from_str(&qs).unwrap();
+        assert_eq!(req.id, id);
+        assert_eq!(req.conn, Some(conn));
+
+        // Absent conn — whole-subscription feed, as before.
+        let qs = format!("id={}&format=txt&env=all&proto=proxy", id);
+        let req: SubscriptionInfoRequest = serde_urlencoded::from_str(&qs).unwrap();
+        assert_eq!(req.conn, None);
+    }
+
+    fn node_request_json(extra: &str) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "env": "ru",
+            "hostname": "node-1",
+            "address": "78.17.28.66",
+            "inbounds": {},
+            "uuid": uuid::Uuid::new_v4(),
+            "label": "Node",
+            "interface": "eth0",
+            "cores": 4,
+            "max_bandwidth_bps": 1000000000i64,
+            "country": "RU",
+            "type": "Node"
+        });
+        if !extra.is_empty() {
+            let extra: serde_json::Value = serde_json::from_str(extra).unwrap();
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        }
+        v
+    }
+
+    #[test]
+    fn test_node_request_without_node_ips_backward_compat() {
+        // Old node binaries send no node_ips field at all.
+        let req: NodeRequest = serde_json::from_value(node_request_json("")).unwrap();
+        assert!(req.node_ips.is_none());
+        assert!(req.validate().is_ok());
+        assert!(req.as_node().node_ips.is_none());
+    }
+
+    #[test]
+    fn test_node_request_node_ips_passthrough() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"node_ips": ["78.17.28.66", "78.17.28.67"]}"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_ok());
+        let node = req.as_node();
+        assert_eq!(
+            node.node_ips,
+            Some(vec![
+                "78.17.28.66".parse::<Ipv4Addr>().unwrap(),
+                "78.17.28.67".parse::<Ipv4Addr>().unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_node_request_node_ips_primary_mismatch_rejected() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"node_ips": ["78.17.28.67", "78.17.28.66"]}"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_node_request_node_ips_empty_rejected() {
+        let req: NodeRequest =
+            serde_json::from_value(node_request_json(r#"{"node_ips": []}"#)).unwrap();
+        assert!(req.validate().is_err());
     }
 }

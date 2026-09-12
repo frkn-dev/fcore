@@ -32,12 +32,19 @@ impl PgNode {
 
         let address: IpAddr = IpAddr::V4(node.address);
 
+        // TEXT[] of plain IP strings; the values were validated as
+        // Ipv4Addr at the API boundary. None -> NULL (single-address node).
+        let node_ips: Option<Vec<String>> = node
+            .node_ips
+            .as_ref()
+            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect());
+
         let node_query = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16
         )
         ON CONFLICT (id) DO UPDATE SET
             uuid = EXCLUDED.uuid,
@@ -52,7 +59,8 @@ impl PgNode {
             max_bandwidth_bps = EXCLUDED.max_bandwidth_bps,
             country = EXCLUDED.country,
             node_type = EXCLUDED.node_type,
-            cluster = EXCLUDED.cluster
+            cluster = EXCLUDED.cluster,
+            node_ips = EXCLUDED.node_ips
     ";
 
         tx.execute(
@@ -73,6 +81,7 @@ impl PgNode {
                 &node.country,
                 &node.r#type,
                 &node.cluster,
+                &node_ips,
             ],
         )
         .await?;
@@ -81,13 +90,15 @@ impl PgNode {
         INSERT INTO inbounds (
             id, node_id, tag, port, stream_settings,
             wg_privkey, wg_interface, wg_address, dns, h2, mtproto_secret,
-            awg_privkey, awg_interface, awg_address, awg_dns, awg_mtu, awg_obfuscation
+            awg_privkey, awg_interface, awg_address, awg_dns, awg_mtu, awg_obfuscation,
+            keepalive
         )
         VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8,
             $9, $10, $11,
-            $12, $13, $14, $15, $16, $17
+            $12, $13, $14, $15, $16, $17,
+            $18
         )
         ON CONFLICT (node_id, tag) DO UPDATE SET
             port = EXCLUDED.port,
@@ -103,13 +114,23 @@ impl PgNode {
             awg_address = EXCLUDED.awg_address,
             awg_dns = EXCLUDED.awg_dns,
             awg_mtu = EXCLUDED.awg_mtu,
-            awg_obfuscation = EXCLUDED.awg_obfuscation
+            awg_obfuscation = EXCLUDED.awg_obfuscation,
+            keepalive = EXCLUDED.keepalive
     ";
 
         for inbound in node.inbounds.values() {
             let inbound_id = uuid::Uuid::new_v4();
             let stream_settings = serde_json::to_value(&inbound.stream_settings)?;
             let h2_settings = serde_json::to_value(&inbound.h2)?;
+
+            // Per-inbound client keepalive: comes from the wg or awg settings,
+            // whichever this inbound carries.
+            let keepalive = inbound
+                .wg
+                .as_ref()
+                .and_then(|wg| wg.keepalive)
+                .or_else(|| inbound.awg.as_ref().and_then(|awg| awg.keepalive))
+                .map(|k| k as i32);
 
             let (wg_privkey, wg_interface, wg_address, dns) = inbound
                 .wg
@@ -173,6 +194,7 @@ impl PgNode {
                     &awg_dns,
                     &awg_mtu,
                     &awg_obfuscation,
+                    &keepalive,
                 ],
             )
             .await?;
@@ -204,6 +226,7 @@ impl PgNode {
                       n.country,
                       n.node_type,
                       n.cluster,
+                      n.node_ips,
 
                       i.id AS inbound_id,
                       i.tag,
@@ -223,7 +246,8 @@ impl PgNode {
                       i.awg_obfuscation,
 
                       i.h2,
-                      i.mtproto_secret
+                      i.mtproto_secret,
+                      i.keepalive
                  FROM nodes n
                  LEFT JOIN inbounds i ON n.id = i.node_id",
                 &[],
@@ -249,6 +273,22 @@ impl PgNode {
             let r#type: NodeType = row.get("node_type");
             let cluster: Option<String> = row.get("cluster");
 
+            // Stored as TEXT[]; parse each entry back into Ipv4Addr.
+            // Unparseable entries are skipped with a warning rather than
+            // failing the whole node.
+            let node_ips: Option<Vec<Ipv4Addr>> =
+                row.get::<_, Option<Vec<String>>>("node_ips").map(|ips| {
+                    ips.into_iter()
+                        .filter_map(|s| match s.parse::<Ipv4Addr>() {
+                            Ok(ip) => Some(ip),
+                            Err(e) => {
+                                warn!("Skipping unparseable node_ips entry {:?}: {}", s, e);
+                                None
+                            }
+                        })
+                        .collect()
+                });
+
             let wg_address: Option<IpAddrMask> = row
                 .get::<_, Option<String>>("wg_address")
                 .and_then(|s| s.parse().ok());
@@ -270,6 +310,9 @@ impl PgNode {
             let awg_obfuscation: Option<AwgObfuscationParams> = row
                 .get::<_, Option<serde_json::Value>>("awg_obfuscation")
                 .and_then(|v| serde_json::from_value(v).ok());
+
+            let keepalive: Option<u16> =
+                row.get::<_, Option<i32>>("keepalive").map(|k| k as u16);
 
             let dns: Option<Vec<Ipv4Addr>> = row.get::<_, Option<Vec<IpAddr>>>("dns").map(|ips| {
                 ips.into_iter()
@@ -302,6 +345,7 @@ impl PgNode {
                     country,
                     r#type,
                     cluster: cluster.clone(),
+                    node_ips: node_ips.clone(),
                 });
 
                 if let Some(_inbound_id) = inbound_id {
@@ -318,6 +362,7 @@ impl PgNode {
                                 address,
                                 port: row.get::<_, i32>("port") as u16,
                                 dns,
+                                keepalive,
                             })
                         }
                         _ => None,
@@ -342,6 +387,7 @@ impl PgNode {
                                     dns,
                                 },
                                 obfuscation: awg_obfuscation,
+                                keepalive,
                             })
                         }
                         _ => None,

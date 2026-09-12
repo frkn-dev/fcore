@@ -81,6 +81,21 @@ where
     pub connections: Connections<C>,
     pub subscriptions: Subscriptions<S>,
     pub nodes: T,
+    /// User-facing labels of named connections ("devices"), keyed by
+    /// conn_id. Loaded from the PG-only `connections.label` column (never
+    /// part of the rkyv payload) and maintained on create/delete/full
+    /// reload. Absent entry = system/default connection.
+    pub conn_labels: std::collections::HashMap<uuid::Uuid, String>,
+    /// Ids of share-issued child connections (connections.issued_via =
+    /// 'share'), maintained like `conn_labels`. These are credentials
+    /// minted for share token recipients, not the owner's devices: every
+    /// owner-facing listing filters them out.
+    pub share_conns: std::collections::HashSet<uuid::Uuid>,
+    /// Node pins of named-device connections, keyed by conn_id; the value
+    /// is the node's uuid (nodes.uuid). Loaded from the PG-only
+    /// `connections.node_id` column and maintained on create/delete/full
+    /// reload. Absent entry = env-wide connection (current behavior).
+    pub conn_nodes: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
 }
 
 impl<T: Default, C, S: Default + PartialEq> Default for Cache<T, C, S>
@@ -117,6 +132,9 @@ where
             nodes: T::default(),
             connections: Connections::default(),
             subscriptions: Subscriptions::default(),
+            conn_labels: std::collections::HashMap::new(),
+            share_conns: std::collections::HashSet::new(),
+            conn_nodes: std::collections::HashMap::new(),
         }
     }
 }

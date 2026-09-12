@@ -55,12 +55,13 @@ impl PgSubscription {
         let ref_code = new_sub.refer_code.clone();
 
         let scope_env: Option<String> = new_sub.scope_env.as_ref().map(|e| e.to_string());
+        let plan_kind = new_sub.plan_kind.to_string();
         let row = client
             .query_one(
                 r#"
             INSERT INTO subscriptions
-            (id, expires_at, refer_code, parent_id, scope_env, premium_token)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (id, expires_at, refer_code, parent_id, scope_env, premium_token, plan_kind, limit_bytes)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             "#,
                 &[
@@ -70,6 +71,8 @@ impl PgSubscription {
                     &new_sub.parent_id,
                     &scope_env,
                     &new_sub.premium_token,
+                    &plan_kind,
+                    &new_sub.limit_bytes,
                 ],
             )
             .await?;
@@ -183,6 +186,55 @@ impl PgSubscription {
         );
 
         Ok(Subscription::from(updated_row))
+    }
+
+    /// Atomically records a traffic top-up and increments limit_bytes.
+    /// Idempotent by trace_id: Ok(None) means this trace_id was already
+    /// applied (no double-add), Ok(Some(limit)) is the new limit.
+    pub async fn add_limit_bytes(
+        &self,
+        sub_id: &uuid::Uuid,
+        trace_id: &uuid::Uuid,
+        bytes: i64,
+    ) -> Result<Option<i64>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let tx = client.transaction().await?;
+
+        let recorded = tx
+            .query_opt(
+                r#"
+                INSERT INTO traffic_topups (trace_id, subscription_id, bytes)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (trace_id) DO NOTHING
+                RETURNING trace_id
+                "#,
+                &[trace_id, sub_id, &bytes],
+            )
+            .await?;
+
+        let new_limit = match recorded {
+            None => None,
+            Some(_) => {
+                let row = tx
+                    .query_one(
+                        r#"
+                        UPDATE subscriptions
+                        SET limit_bytes = COALESCE(limit_bytes, 0) + $1,
+                            updated_at = $2
+                        WHERE id = $3
+                        RETURNING limit_bytes
+                        "#,
+                        &[&bytes, &chrono::Utc::now(), sub_id],
+                    )
+                    .await?;
+                Some(row.get::<_, i64>("limit_bytes"))
+            }
+        };
+
+        tx.commit().await?;
+        Ok(new_limit)
     }
 
     pub async fn set_premium_fields(

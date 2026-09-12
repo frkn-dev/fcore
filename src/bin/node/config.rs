@@ -73,6 +73,11 @@ pub struct WgConfig {
     #[serde(default = "default_disabled")]
     pub enabled: bool,
     pub path: String,
+    /// PersistentKeepalive (seconds) injected into client configs. Cannot
+    /// live in the interface .conf: wg/awg refuse to start with a keepalive
+    /// in [Interface]. None = clients get the default 25.
+    #[serde(default)]
+    pub keepalive: Option<u16>,
 }
 
 #[cfg(feature = "amnezia-wg")]
@@ -81,6 +86,11 @@ pub struct AmneziaWgConfig {
     #[serde(default = "default_disabled")]
     pub enabled: bool,
     pub path: String,
+    /// PersistentKeepalive (seconds) injected into client configs. Cannot
+    /// live in the interface .conf: wg/awg refuse to start with a keepalive
+    /// in [Interface]. None = clients get the default 25.
+    #[serde(default)]
+    pub keepalive: Option<u16>,
 }
 
 #[derive(Clone, Default, Debug, Deserialize)]

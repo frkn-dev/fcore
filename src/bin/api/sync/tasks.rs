@@ -1,5 +1,6 @@
 use chrono::{Duration, Utc};
 use futures::future::join_all;
+use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
 use fcore::{
@@ -16,6 +17,33 @@ use super::super::{
 use super::MemSync;
 
 type SyncResult<T> = std::result::Result<T, SyncError>;
+
+/// Why a connection was soft-deleted (`connections.deleted_reason`). NULL
+/// means a legacy row (pre-column) and is treated like `DELETE_REASON_EXPIRED`
+/// by the restore flow.
+pub const DELETE_REASON_EXPIRED: &str = "expired";
+pub const DELETE_REASON_MANUAL: &str = "manual";
+pub const DELETE_REASON_TRAFFIC_EXHAUSTED: &str = "traffic_exhausted";
+pub const DELETE_REASON_DEVICE_KICK: &str = "device_kick";
+
+/// Whether a soft-deleted connection may be revived by the restore flow.
+/// Legacy (NULL) and expired connections revive as before; a lite connection
+/// killed for traffic exhaustion revives only once the subscription is back
+/// under its limit (top-up); a device-kicked connection never revives — the
+/// device worker issues a replacement instead.
+pub(crate) fn connection_restorable(
+    deleted_reason: Option<&str>,
+    used_bytes: i64,
+    limit_bytes: Option<i64>,
+) -> bool {
+    match deleted_reason {
+        None | Some(DELETE_REASON_EXPIRED) => true,
+        Some(DELETE_REASON_TRAFFIC_EXHAUSTED) => {
+            limit_bytes.map(|limit| used_bytes < limit).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
 
 // Input validation traits
 trait Validate {
@@ -50,9 +78,20 @@ where
 {
     async fn add_node(&self, node_id: &uuid::Uuid, node: Node) -> SyncResult<Status>;
     async fn delete_node(&self, uuid: &uuid::Uuid) -> SyncResult<Status>;
-    async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status>;
+    async fn add_conn(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: Connection,
+        label: Option<String>,
+        node_id: Option<uuid::Uuid>,
+    ) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
-    async fn delete_connection(&self, conn_id: &uuid::Uuid, conn: &C) -> SyncResult<Status>;
+    async fn delete_connection(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: &C,
+        reason: Option<&str>,
+    ) -> SyncResult<Status>;
     async fn restore_connection(&self, conn_id: &uuid::Uuid) -> SyncResult<Status>;
     async fn update_node_status(
         &self,
@@ -63,9 +102,16 @@ where
     async fn update_sub(&self, sub_id: &uuid::Uuid, sub_req: SubReq) -> SyncResult<Status>;
     async fn add_days(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
     async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status>;
+    async fn add_limit_bytes(
+        &self,
+        sub_id: &uuid::Uuid,
+        bytes: i64,
+        trace_id: &uuid::Uuid,
+    ) -> SyncResult<Status>;
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
+        metered_conns: Option<&[String]>,
     ) -> SyncResult<Vec<uuid::Uuid>>;
 }
 
@@ -224,14 +270,25 @@ where
         }
     }
 
-    async fn add_conn(&self, conn_id: &uuid::Uuid, conn: Connection) -> SyncResult<Status> {
+    async fn add_conn(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: Connection,
+        label: Option<String>,
+        node_id: Option<uuid::Uuid>,
+    ) -> SyncResult<Status> {
         info!("Adding connection: {}", conn_id);
 
         // Validate input
         conn.validate()?;
 
-        // Create database row
-        let conn_row: ConnRow = (*conn_id, conn.clone()).into();
+        // Create database row. The label and the node pin are PG-only
+        // (connections.label / connections.node_id): they are persisted
+        // here and mirrored into the api-side conn_labels/conn_nodes side
+        // maps, but never become part of the rkyv payload to nodes.
+        let mut conn_row: ConnRow = (*conn_id, conn.clone()).into();
+        conn_row.label = label.clone();
+        conn_row.node_id = node_id;
 
         // Insert into database first
         if let Err(e) = self.db.conn().insert(conn_row).await {
@@ -245,6 +302,12 @@ where
         // Insert into memory
         let result = {
             let mut memory = self.memory.write().await;
+            if let Some(label) = label {
+                memory.conn_labels.insert(*conn_id, label);
+            }
+            if let Some(node_id) = node_id {
+                memory.conn_nodes.insert(*conn_id, node_id);
+            }
             ConnectionStorageApiOperations::add(
                 &mut memory.connections,
                 conn_id,
@@ -278,8 +341,16 @@ where
         }
     }
 
-    async fn delete_connection(&self, conn_id: &uuid::Uuid, conn: &C) -> SyncResult<Status> {
-        info!("Starting deletion process for connection: {}", conn_id);
+    async fn delete_connection(
+        &self,
+        conn_id: &uuid::Uuid,
+        conn: &C,
+        reason: Option<&str>,
+    ) -> SyncResult<Status> {
+        info!(
+            "Starting deletion process for connection: {} (reason: {:?})",
+            conn_id, reason
+        );
 
         {
             let memory = self.memory.read().await;
@@ -294,7 +365,7 @@ where
             }
         }
 
-        if let Err(e) = self.db.conn().delete(conn_id).await {
+        if let Err(e) = self.db.conn().delete(conn_id, reason).await {
             error!(
                 "CRITICAL: Failed to delete connection {} from DB: {}",
                 conn_id, e
@@ -304,8 +375,24 @@ where
         debug!("Connection {} successfully removed from database", conn_id);
 
         let msg = vec![conn.as_delete_message(conn_id)];
+
+        // Read the node pin before it is removed from the side map below:
+        // on a node Action::Create and Action::Update are handled
+        // identically, so a pinned conn's delete must go to the pin's Init
+        // topic, never to the env-wide Updates broadcast.
+        let pin = {
+            let memory = self.memory.read().await;
+            memory.conn_nodes.get(conn_id).copied()
+        };
+
         let topic = if conn.get_token().is_some() {
+            // H2 token conns stay on Auth; pinning is never exposed for H2.
             Topic::Auth
+        } else if !conn.get_proto().is_mtproto() {
+            match pin {
+                Some(pin) => Topic::Init(pin),
+                None => conn.get_env().into(),
+            }
         } else {
             conn.get_env().into()
         };
@@ -338,6 +425,14 @@ where
                     conn_id
                 );
             }
+            // The label is per-device; a deleted device drops it from the
+            // side map (PG keeps the column, so a full reload or a restore
+            // followed by a periodic sync re-populates it).
+            memory.conn_labels.remove(conn_id);
+            // The pin is per-device too; a deleted device drops it.
+            memory.conn_nodes.remove(conn_id);
+            // A deleted share child leaves the hidden set as well.
+            memory.share_conns.remove(conn_id);
         }
 
         info!("Successfully completed deletion flow for: {}", conn_id);
@@ -347,6 +442,7 @@ where
     async fn restore_connections_by_subscription(
         &self,
         sub_id: &uuid::Uuid,
+        metered_conns: Option<&[String]>,
     ) -> SyncResult<Vec<uuid::Uuid>>
     where
         N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -360,14 +456,14 @@ where
             + PartialEq,
         Connection: From<C>,
     {
-        let conns_to_restore: Vec<(uuid::Uuid, Connection)> = {
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = {
             let mem = self.memory.read().await;
 
             match mem.connections.get_by_subscription_id(sub_id) {
                 Some(conns) => conns
                     .iter()
                     .filter(|(_, c)| c.get_deleted())
-                    .map(|(id, c)| (*id, c.clone().into()))
+                    .map(|(id, c)| (*id, c.clone().into(), mem.conn_nodes.get(id).copied()))
                     .collect(),
                 None => Vec::new(),
             }
@@ -377,9 +473,94 @@ where
             return Ok(vec![]);
         }
 
+        // Gate revivals on the soft-deletion reason persisted in PG: expired
+        // (and legacy NULL) connections revive as before, traffic-exhausted
+        // lite connections revive only when the subscription is back under
+        // its limit, device-kicked ones never do.
+        let reasons: HashMap<uuid::Uuid, Option<String>> = match self
+            .db
+            .conn()
+            .deleted_reasons_for_subscription(sub_id)
+            .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                error!(
+                    "Failed to load deletion reasons for subscription {}: {}",
+                    sub_id, e
+                );
+                return Err(SyncError::Database(e));
+            }
+        };
+
+        let limit_bytes = {
+            let mem = self.memory.read().await;
+            mem.subscriptions
+                .find_by_id(sub_id)
+                .and_then(|s| s.limit_bytes())
+        };
+
+        let needs_used_bytes = conns_to_restore.iter().any(|(id, _, _)| {
+            reasons.get(id).and_then(|r| r.as_deref()) == Some(DELETE_REASON_TRAFFIC_EXHAUSTED)
+        });
+
+        let used_bytes = if needs_used_bytes {
+            match self.db.traffic().total_for_subscription(*sub_id).await {
+                Ok((uplink, downlink)) => uplink + downlink,
+                Err(e) => {
+                    error!(
+                        "Failed to load traffic total for subscription {}: {}",
+                        sub_id, e
+                    );
+                    return Err(SyncError::Database(e));
+                }
+            }
+        } else {
+            0
+        };
+
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = conns_to_restore
+            .into_iter()
+            .filter(|(conn_id, _, _)| {
+                let reason = reasons.get(conn_id).and_then(|r| r.as_deref());
+                let restorable = connection_restorable(reason, used_bytes, limit_bytes);
+                if !restorable {
+                    debug!(
+                        "Connection {} not restored (reason: {:?})",
+                        conn_id, reason
+                    );
+                }
+                restorable
+            })
+            .collect();
+
+        // Traffic mode: only metered protocols come back — protocols without
+        // per-connection traffic accounting would burn the balance uncounted.
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = match metered_conns {
+            Some(metered) => conns_to_restore
+                .into_iter()
+                .filter(|(conn_id, conn, _)| {
+                    let proto = conn.get_proto().proto();
+                    let allowed = proto.is_metered(metered);
+                    if !allowed {
+                        warn!(
+                            "Connection {} ({}) not restored: protocol unavailable in traffic mode",
+                            conn_id, proto
+                        );
+                    }
+                    allowed
+                })
+                .collect(),
+            None => conns_to_restore,
+        };
+
+        if conns_to_restore.is_empty() {
+            return Ok(vec![]);
+        }
+
         let this = self.clone();
 
-        let tasks = conns_to_restore.into_iter().map(|(conn_id, conn)| {
+        let tasks = conns_to_restore.into_iter().map(|(conn_id, conn, pin)| {
             let this = this.clone();
             async move {
                 let msg = vec![conn.as_update_message(&conn_id)];
@@ -392,8 +573,16 @@ where
                     }
                 };
 
+                // A node treats Action::Update like Action::Create, so a
+                // pinned conn's restore must go to the pin's Init topic,
+                // not to the env-wide Updates broadcast.
                 let topic = if conn.get_token().is_some() {
                     Topic::Auth
+                } else if !conn.get_proto().is_mtproto() {
+                    match pin {
+                        Some(pin) => Topic::Init(pin),
+                        None => conn.get_env().into(),
+                    }
                 } else {
                     conn.get_env().into()
                 };
@@ -585,6 +774,58 @@ where
         Ok(status)
     }
 
+    async fn add_limit_bytes(
+        &self,
+        sub_id: &uuid::Uuid,
+        bytes: i64,
+        trace_id: &uuid::Uuid,
+    ) -> SyncResult<Status> {
+        info!(
+            "Adding {} limit bytes to subscription {} (trace {})",
+            bytes, sub_id, trace_id
+        );
+
+        // DB first: traffic_topups.trace_id is the idempotency key — a
+        // repeated top-up with the same trace_id must not add twice.
+        let new_limit = match self.db.sub().add_limit_bytes(sub_id, trace_id, bytes).await {
+            Ok(new_limit) => new_limit,
+            Err(e) => {
+                error!(
+                    "Failed to add limit bytes for subscription {}: {}",
+                    sub_id, e
+                );
+                return Err(SyncError::Database(e));
+            }
+        };
+
+        let Some(new_limit) = new_limit else {
+            info!(
+                "Traffic top-up {} for subscription {} already applied",
+                trace_id, sub_id
+            );
+            return Ok(Status::AlreadyExist(*sub_id));
+        };
+
+        {
+            let mut mem = self.memory.write().await;
+            match mem.subscriptions.find_by_id_mut(sub_id) {
+                Some(sub) => sub.set_limit_bytes(new_limit),
+                None => {
+                    warn!(
+                        "Subscription {} not found in memory (limit {} already persisted)",
+                        sub_id, new_limit
+                    );
+                }
+            }
+        }
+
+        info!(
+            "Subscription {} limit updated to {} bytes",
+            sub_id, new_limit
+        );
+        Ok(Status::Updated(*sub_id))
+    }
+
     async fn add_days_inner(&self, sub_id: &uuid::Uuid, days: i64) -> SyncResult<Status> {
         let sub_db = self.db.sub();
 
@@ -635,7 +876,9 @@ where
                         sub_id
                     );
 
-                    match self.restore_connections_by_subscription(sub_id).await {
+                    // The subscription just got paid time, so it is not in
+                    // traffic mode: revive all restorable connections.
+                    match self.restore_connections_by_subscription(sub_id, None).await {
                         Ok(restored) => {
                             debug!(
                                 "Post-update restore: {} connections restored for {}",
@@ -654,4 +897,64 @@ where
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_restorable_legacy_and_expired() {
+        // Legacy rows (NULL) and expired connections revive regardless of
+        // traffic — this preserves the pre-reason restore semantics.
+        assert!(connection_restorable(None, 0, None));
+        assert!(connection_restorable(None, 100, Some(10)));
+        assert!(connection_restorable(Some(DELETE_REASON_EXPIRED), 0, None));
+        assert!(connection_restorable(
+            Some(DELETE_REASON_EXPIRED),
+            100,
+            Some(10)
+        ));
+    }
+
+    #[test]
+    fn test_connection_restorable_traffic_exhausted() {
+        let limit = Some(100);
+        // Over or at the limit: stays deleted.
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            100,
+            limit
+        ));
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            150,
+            limit
+        ));
+        // Topped up back under the limit: revives.
+        assert!(connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            99,
+            limit
+        ));
+        // No limit recorded: cannot prove it is under the limit, stay deleted.
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+            0,
+            None
+        ));
+    }
+
+    #[test]
+    fn test_connection_restorable_device_kick_and_unknown() {
+        // Device-kicked connections never revive; unknown reasons are
+        // treated conservatively the same way.
+        assert!(!connection_restorable(Some(DELETE_REASON_DEVICE_KICK), 0, None));
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_DEVICE_KICK),
+            0,
+            Some(100)
+        ));
+        assert!(!connection_restorable(Some("something_else"), 0, None));
+    }
 }

@@ -1,10 +1,13 @@
+use std::net::Ipv4Addr;
 use std::sync::Arc;
+use serde::Serialize;
 use warp::http::StatusCode;
 
 use fcore::{
     http::{IdResponse, ResponseMessage},
     Connection, ConnectionApiOperations, ConnectionBaseOperations, MetricStorage, NodeMetricInfo,
-    NodeResponse, NodeStatus, NodeStorageOperations, Status, Subscription, SubscriptionOperations,
+    NodeResponse, NodeStatus, NodeStorageOperations, NodeType, Status, Subscription,
+    SubscriptionOperations,
 };
 
 use super::super::{
@@ -33,6 +36,17 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
     tracing::debug!("Received node request: {:?}", node_req);
+
+    if let Err(e) = node_req.validate() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+                status: StatusCode::BAD_REQUEST.as_u16(),
+                message: e.to_string(),
+                response: None,
+            }),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
 
     let node = node_req.clone().as_node();
     let node_id = node_req.uuid;
@@ -141,6 +155,74 @@ where
             ))
         }
     }
+}
+
+/// Public node status: no inbounds, tags, UUIDs or metrics — only what the
+/// status page needs to render and probe nodes. `ports` is a deduplicated
+/// list of listen ports for connectivity checks, without protocol tags.
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeStatusPublic {
+    pub hostname: String,
+    pub address: Ipv4Addr,
+    pub label: String,
+    pub country: String,
+    pub status: NodeStatus,
+    pub r#type: NodeType,
+    pub ports: Vec<u16>,
+}
+
+/// Public list of node statuses handler
+// GET /status
+pub async fn get_nodes_status_handler<N, C, S>(
+    memory: MemSync<N, C, S>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static,
+{
+    let mem = memory.memory.read().await;
+
+    let nodes: Vec<NodeStatusPublic> = mem
+        .nodes
+        .all()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|node| {
+            let res = node.as_node_response();
+            let mut ports: Vec<u16> = res.inbounds.iter().map(|i| i.port).collect();
+            ports.sort_unstable();
+            ports.dedup();
+            NodeStatusPublic {
+                hostname: res.hostname,
+                address: res.address,
+                label: res.label,
+                country: res.country,
+                status: res.status,
+                r#type: res.r#type,
+                ports,
+            }
+        })
+        .collect();
+
+    let response = ResponseMessage {
+        status: StatusCode::OK.as_u16(),
+        message: "List of node statuses".to_string(),
+        response: Some(nodes),
+    };
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&response),
+        StatusCode::OK,
+    ))
 }
 
 /// Get single node handler

@@ -15,16 +15,22 @@ path = "/opt/hysteria/config.yaml"
 [wg]
 enabled = false
 path = "/etc/wireguard/utun7.conf"
+# Optional: PersistentKeepalive (seconds) injected into client configs.
+# Do NOT put PersistentKeepalive into the interface .conf — wg-quick/awg
+# refuse to start with it in [Interface]. Default when unset: 25.
+# keepalive = 25
 
 [awg]
 enabled = false
 path = "/etc/amnezia-wg/awg.conf"
+# keepalive = 25
 
 # Second AmneziaWG interface (awg1) for AmneziaWgMobile connections with the
 # dedicated address pool. Config file has the same format as [awg].
 [awg_mobile]
 enabled = false
 path = "/etc/amnezia-wg/awg1.conf"
+# keepalive = 25
 
 [mtproto]
 enabled = false
@@ -42,6 +48,11 @@ country = "RU"
 type = "common"
 # Optional cluster FQDN. When set, client configs use this domain instead of the node IP.
 # cluster = "node-cdn.example.com"
+# Optional extra entry IPs for one node (anti IP-blocking). The first IP is
+# the primary and MUST equal `address` above; all IPs share the same
+# ports/keys/inbounds — only the entry address differs. Clients pick/rotate
+# addresses themselves. Omit for a single-address node.
+# node_ips = ["192.168.1.100", "192.168.1.101"]
 
 [api]
 endpoint = "http://127.0.0.1:3000"

@@ -91,6 +91,14 @@ impl ProtoTag {
     pub fn is_mtproto(&self) -> bool {
         *self == ProtoTag::Mtproto
     }
+
+    /// Whether the protocol is allowed while a subscription runs on its
+    /// traffic balance (traffic mode): only protocols with per-connection
+    /// traffic accounting are metered. `metered_conns` holds tag names as in
+    /// the config ("Wireguard", "VlessTcpReality", ...).
+    pub fn is_metered(&self, metered_conns: &[String]) -> bool {
+        metered_conns.iter().any(|t| t == &self.to_string())
+    }
 }
 
 impl std::str::FromStr for ProtoTag {
@@ -111,5 +119,55 @@ impl std::str::FromStr for ProtoTag {
             "Mtproto" => Ok(ProtoTag::Mtproto),
             _ => Err(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metered() -> Vec<String> {
+        [
+            "Wireguard",
+            "AmneziaWg",
+            "AmneziaWgMobile",
+            "VlessTcpReality",
+            "VlessGrpcReality",
+            "VlessXhttpCdn",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    #[test]
+    fn test_is_metered_default_set() {
+        let metered = metered();
+
+        for tag in [
+            ProtoTag::Wireguard,
+            ProtoTag::AmneziaWg,
+            ProtoTag::AmneziaWgMobile,
+            ProtoTag::VlessTcpReality,
+            ProtoTag::VlessGrpcReality,
+            ProtoTag::VlessXhttpCdn,
+        ] {
+            assert!(tag.is_metered(&metered), "{} should be metered", tag);
+        }
+
+        // Protocols without per-connection traffic accounting are not metered.
+        for tag in [ProtoTag::Hysteria2, ProtoTag::Mtproto] {
+            assert!(!tag.is_metered(&metered), "{} should not be metered", tag);
+        }
+    }
+
+    #[test]
+    fn test_is_metered_custom_list() {
+        let only_h2 = vec!["Hysteria2".to_string()];
+        assert!(ProtoTag::Hysteria2.is_metered(&only_h2));
+        assert!(!ProtoTag::Wireguard.is_metered(&only_h2));
+
+        let empty: Vec<String> = vec![];
+        assert!(!ProtoTag::Wireguard.is_metered(&empty));
     }
 }

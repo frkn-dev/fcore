@@ -14,6 +14,17 @@ use crate::memory::connection::wireguard::IpAddrMask;
 /// `jc/jmin/jmax/s1/s2/s3/s4` are 16-bit values used by the kernel.
 /// `h1..h4` and `i1..i5` are string descriptors (single values or ranges)
 /// as accepted by the AmneziaWG 2.0 kernel module.
+///
+/// `random_trailers`/`disable_cookies` are AmneziaWG 3.1 device flags.
+/// They are optional: when unset, nothing is sent over netlink and nothing
+/// is emitted into client configs, so nodes running older kernel modules
+/// keep working. Setting them requires the 3.1+ kernel module on the node.
+///
+/// AmneziaWG 3.0 additions (all optional strings, ranges like "110-130"
+/// allowed): `header_protection_key` (server-side, requires s1..s4 >= 12),
+/// `content_padding_addition`, `rekey_after_time`, `rekey_timeout`,
+/// `reject_after_time`, `keepalive_timeout`, `max_handshake_attempts`.
+/// They are emitted into client configs only when set on the node.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct AwgObfuscationParams {
     pub jc: u16,
@@ -35,6 +46,27 @@ pub struct AwgObfuscationParams {
     pub i3: String,
     pub i4: String,
     pub i5: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub random_trailers: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_cookies: Option<bool>,
+
+    // ===== AWG 3.0 =====
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_protection_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_padding_addition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rekey_after_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rekey_timeout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reject_after_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keepalive_timeout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_handshake_attempts: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +81,73 @@ enum U16OrString {
 enum StringOrNum {
     Str(String),
     Num(i64),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BoolOrString {
+    Bool(bool),
+    Str(String),
+}
+
+/// Packs a `u16` range spec (`"120"` or `"110-130"`) into the `u32` wire
+/// value the AmneziaWG 3.0 kernel module expects for the timing/padding
+/// attributes: `lo | hi << 16`. The kernel picks a random value in the
+/// range at use time (`u16_range_pick_one`), so the range is sent as-is
+/// rather than resolved here. Distinct from the `u64` `u32`-range packing
+/// used for the H1..H4 magic headers.
+pub(crate) fn u16_range_wire(spec: &str) -> Result<u32, Error> {
+    let invalid = || Error::Custom(format!("invalid u16 range spec: {spec:?}"));
+
+    let mut parts = spec.splitn(2, '-');
+    let lo: u16 = parts
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(invalid)?;
+    let hi: u16 = match parts.next() {
+        Some(s) => s.trim().parse().map_err(|_| invalid())?,
+        None => lo,
+    };
+    if lo > hi {
+        return Err(invalid());
+    }
+    Ok(((hi as u32) << 16) | (lo as u32))
+}
+
+/// Parses an AWG 3.0 HeaderProtectionKey: base64 decoding to exactly
+/// 32 bytes (the kernel expects `WG_KEY_LEN`).
+pub(crate) fn parse_header_protection_key(key: &str) -> Result<[u8; 32], Error> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let bytes = general_purpose::STANDARD
+        .decode(key.trim())
+        .map_err(|e| Error::Custom(format!("bad HeaderProtectionKey base64: {e}")))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::Custom("HeaderProtectionKey must decode to 32 bytes".into()))
+}
+
+/// Parses an AmneziaWG-style bool: `on`/`off`, `true`/`false`, `1`/`0`.
+fn parse_awg_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_bool_field<'de, V>(map: &mut V) -> Result<Option<bool>, V::Error>
+where
+    V: de::MapAccess<'de>,
+{
+    match map.next_value::<Option<BoolOrString>>()? {
+        None => Ok(None),
+        Some(BoolOrString::Bool(b)) => Ok(Some(b)),
+        Some(BoolOrString::Str(s)) => parse_awg_bool(&s)
+            .map(Some)
+            .ok_or_else(|| de::Error::custom(format!("invalid bool value: {s:?}"))),
+    }
 }
 
 fn parse_u16_field<'de, V>(map: &mut V) -> Result<u16, V::Error>
@@ -68,6 +167,17 @@ where
     match map.next_value::<StringOrNum>()? {
         StringOrNum::Str(s) => Ok(s),
         StringOrNum::Num(n) => Ok(n.to_string()),
+    }
+}
+
+fn parse_opt_string_field<'de, V>(map: &mut V) -> Result<Option<String>, V::Error>
+where
+    V: de::MapAccess<'de>,
+{
+    match map.next_value::<Option<StringOrNum>>()? {
+        None => Ok(None),
+        Some(StringOrNum::Str(s)) => Ok(Some(s)),
+        Some(StringOrNum::Num(n)) => Ok(Some(n.to_string())),
     }
 }
 
@@ -109,6 +219,17 @@ impl<'de> Deserialize<'de> for AwgObfuscationParams {
                 let mut i4 = None;
                 let mut i5 = None;
 
+                let mut random_trailers = None;
+                let mut disable_cookies = None;
+
+                let mut header_protection_key = None;
+                let mut content_padding_addition = None;
+                let mut rekey_after_time = None;
+                let mut rekey_timeout = None;
+                let mut reject_after_time = None;
+                let mut keepalive_timeout = None;
+                let mut max_handshake_attempts = None;
+
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "jc" => jc = Some(parse_u16_field(&mut map)?),
@@ -130,6 +251,35 @@ impl<'de> Deserialize<'de> for AwgObfuscationParams {
                         "i3" => i3 = Some(parse_string_field(&mut map)?),
                         "i4" => i4 = Some(parse_string_field(&mut map)?),
                         "i5" => i5 = Some(parse_string_field(&mut map)?),
+
+                        "random_trailers" => {
+                            random_trailers = parse_bool_field(&mut map)?;
+                        }
+                        "disable_cookies" => {
+                            disable_cookies = parse_bool_field(&mut map)?;
+                        }
+
+                        "header_protection_key" => {
+                            header_protection_key = parse_opt_string_field(&mut map)?;
+                        }
+                        "content_padding_addition" => {
+                            content_padding_addition = parse_opt_string_field(&mut map)?;
+                        }
+                        "rekey_after_time" => {
+                            rekey_after_time = parse_opt_string_field(&mut map)?;
+                        }
+                        "rekey_timeout" => {
+                            rekey_timeout = parse_opt_string_field(&mut map)?;
+                        }
+                        "reject_after_time" => {
+                            reject_after_time = parse_opt_string_field(&mut map)?;
+                        }
+                        "keepalive_timeout" => {
+                            keepalive_timeout = parse_opt_string_field(&mut map)?;
+                        }
+                        "max_handshake_attempts" => {
+                            max_handshake_attempts = parse_opt_string_field(&mut map)?;
+                        }
 
                         _ => {
                             // Ignore unknown fields to stay forward-compatible.
@@ -158,13 +308,26 @@ impl<'de> Deserialize<'de> for AwgObfuscationParams {
                     i3: i3.unwrap_or_default(),
                     i4: i4.unwrap_or_default(),
                     i5: i5.unwrap_or_default(),
+
+                    random_trailers,
+                    disable_cookies,
+
+                    header_protection_key,
+                    content_padding_addition,
+                    rekey_after_time,
+                    rekey_timeout,
+                    reject_after_time,
+                    keepalive_timeout,
+                    max_handshake_attempts,
                 })
             }
         }
 
         const FIELDS: &[&str] = &[
             "jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4", "i1", "i2", "i3",
-            "i4", "i5",
+            "i4", "i5", "random_trailers", "disable_cookies", "header_protection_key",
+            "content_padding_addition", "rekey_after_time", "rekey_timeout", "reject_after_time",
+            "keepalive_timeout", "max_handshake_attempts",
         ];
         deserializer.deserialize_struct("AwgObfuscationParams", FIELDS, AwgObfuscationParamsVisitor)
     }
@@ -192,6 +355,11 @@ pub struct AwgInterfaceConfig {
 pub struct AmneziaWgSettings {
     pub interface: AwgInterfaceConfig,
     pub obfuscation: Option<AwgObfuscationParams>,
+    /// PersistentKeepalive (seconds) for client configs, set from the node's
+    /// config.toml ([awg]/[awg_mobile] keepalive). None = clients get the
+    /// default 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive: Option<u16>,
 }
 
 // =====================
@@ -247,6 +415,15 @@ impl AmneziaWgServerConfig {
         let mut i3: Option<String> = None;
         let mut i4: Option<String> = None;
         let mut i5: Option<String> = None;
+        let mut random_trailers: Option<bool> = None;
+        let mut disable_cookies: Option<bool> = None;
+        let mut header_protection_key: Option<String> = None;
+        let mut content_padding_addition: Option<String> = None;
+        let mut rekey_after_time: Option<String> = None;
+        let mut rekey_timeout: Option<String> = None;
+        let mut reject_after_time: Option<String> = None;
+        let mut keepalive_timeout: Option<String> = None;
+        let mut max_handshake_attempts: Option<String> = None;
 
         for line in contents.lines() {
             let line = line.trim();
@@ -298,30 +475,92 @@ impl AmneziaWgServerConfig {
                 "I3" => i3 = Some(value.to_string()),
                 "I4" => i4 = Some(value.to_string()),
                 "I5" => i5 = Some(value.to_string()),
+                "RandomTrailers" => random_trailers = parse_awg_bool(value),
+                "DisableCookies" => disable_cookies = parse_awg_bool(value),
+
+                // ===== AWG 3.0 =====
+                "HeaderProtectionKey" => header_protection_key = Some(value.to_string()),
+                "ContentPaddingAddition" => {
+                    content_padding_addition = Some(value.to_string())
+                }
+                "RekeyAfterTime" => rekey_after_time = Some(value.to_string()),
+                "RekeyTimeout" => rekey_timeout = Some(value.to_string()),
+                "RejectAfterTime" => reject_after_time = Some(value.to_string()),
+                "KeepaliveTimeout" => keepalive_timeout = Some(value.to_string()),
+                "MaxHandshakeAttempts" => max_handshake_attempts = Some(value.to_string()),
 
                 _ => {}
             }
         }
 
         let obfuscation = match jc {
-            Some(jc_val) => Some(AwgObfuscationParams {
-                jc: jc_val,
-                jmin: jmin.unwrap_or(0),
-                jmax: jmax.unwrap_or(0),
-                s1: s1.unwrap_or(0),
-                s2: s2.unwrap_or(0),
-                s3: s3.unwrap_or(0),
-                s4: s4.unwrap_or(0),
-                h1: h1.unwrap_or_default(),
-                h2: h2.unwrap_or_default(),
-                h3: h3.unwrap_or_default(),
-                h4: h4.unwrap_or_default(),
-                i1: i1.unwrap_or_default(),
-                i2: i2.unwrap_or_default(),
-                i3: i3.unwrap_or_default(),
-                i4: i4.unwrap_or_default(),
-                i5: i5.unwrap_or_default(),
-            }),
+            Some(jc_val) => {
+                let (s1, s2, s3, s4) = (
+                    s1.unwrap_or(0),
+                    s2.unwrap_or(0),
+                    s3.unwrap_or(0),
+                    s4.unwrap_or(0),
+                );
+
+                // Header protection (AWG 3.0) encrypts packet headers using
+                // the first 12 bytes of the S-prefix as nonce — the kernel
+                // rejects the interface with EINVAL when any S < 12. Fail
+                // fast here so the misconfiguration is obvious.
+                if header_protection_key.is_some()
+                    && [s1, s2, s3, s4].iter().any(|s| *s < 12)
+                {
+                    return Err(Error::Custom(
+                        "HeaderProtectionKey requires S1..S4 >= 12".into(),
+                    ));
+                }
+                if let Some(key) = &header_protection_key {
+                    parse_header_protection_key(key)?;
+                }
+
+                // Timing/padding specs must be valid u16 ranges; catch typos
+                // at startup rather than at the netlink call.
+                for spec in [
+                    &content_padding_addition,
+                    &rekey_after_time,
+                    &rekey_timeout,
+                    &reject_after_time,
+                    &keepalive_timeout,
+                    &max_handshake_attempts,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    u16_range_wire(spec)?;
+                }
+
+                Some(AwgObfuscationParams {
+                    jc: jc_val,
+                    jmin: jmin.unwrap_or(0),
+                    jmax: jmax.unwrap_or(0),
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                    h1: h1.unwrap_or_default(),
+                    h2: h2.unwrap_or_default(),
+                    h3: h3.unwrap_or_default(),
+                    h4: h4.unwrap_or_default(),
+                    i1: i1.unwrap_or_default(),
+                    i2: i2.unwrap_or_default(),
+                    i3: i3.unwrap_or_default(),
+                    i4: i4.unwrap_or_default(),
+                    i5: i5.unwrap_or_default(),
+                    random_trailers,
+                    disable_cookies,
+                    header_protection_key,
+                    content_padding_addition,
+                    rekey_after_time,
+                    rekey_timeout,
+                    reject_after_time,
+                    keepalive_timeout,
+                    max_handshake_attempts,
+                })
+            }
             None => None,
         };
 
@@ -366,6 +605,7 @@ impl TryFrom<AmneziaWgServerConfig> for AmneziaWgSettings {
                 dns,
             },
             obfuscation: cfg.obfuscation,
+            keepalive: None,
         })
     }
 }
@@ -429,5 +669,245 @@ mod tests {
         assert_eq!(params.h1, "61220074-118999195");
         assert_eq!(params.i1, "<r 149>");
         assert_eq!(params.i5, "0");
+    }
+
+    #[test]
+    fn deserialize_missing_awg31_flags_default_to_none() {
+        let json = r#"{"jc": 6, "jmin": 76, "jmax": 169}"#;
+
+        let params: AwgObfuscationParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.random_trailers, None);
+        assert_eq!(params.disable_cookies, None);
+
+        // None flags are not serialized back, keeping stored JSON stable.
+        let serialized = serde_json::to_string(&params).unwrap();
+        assert!(!serialized.contains("random_trailers"));
+        assert!(!serialized.contains("disable_cookies"));
+    }
+
+    #[test]
+    fn deserialize_awg31_flags() {
+        let json = r#"{
+            "jc": 6,
+            "random_trailers": true,
+            "disable_cookies": "off"
+        }"#;
+
+        let params: AwgObfuscationParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.random_trailers, Some(true));
+        assert_eq!(params.disable_cookies, Some(false));
+
+        let serialized = serde_json::to_string(&params).unwrap();
+        assert!(serialized.contains("\"random_trailers\":true"));
+        assert!(serialized.contains("\"disable_cookies\":false"));
+    }
+
+    #[test]
+    fn from_file_parses_awg31_flags() {
+        let path = std::env::temp_dir().join("fcore-awg31-test.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\n\
+             PrivateKey = priv\n\
+             Address = 10.0.0.1/24\n\
+             ListenPort = 51820\n\
+             Jc = 6\n\
+             Jmin = 76\n\
+             Jmax = 169\n\
+             RandomTrailers = on\n\
+             DisableCookies = off\n",
+        )
+        .unwrap();
+
+        let cfg = AmneziaWgServerConfig::from_file(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let obf = cfg.obfuscation.unwrap();
+        assert_eq!(obf.random_trailers, Some(true));
+        assert_eq!(obf.disable_cookies, Some(false));
+    }
+
+    #[test]
+    fn from_file_without_awg31_flags_keeps_them_unset() {
+        let path = std::env::temp_dir().join("fcore-awg30-test.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\n\
+             PrivateKey = priv\n\
+             Address = 10.0.0.1/24\n\
+             ListenPort = 51820\n\
+             Jc = 6\n",
+        )
+        .unwrap();
+
+        let cfg = AmneziaWgServerConfig::from_file(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let obf = cfg.obfuscation.unwrap();
+        assert_eq!(obf.random_trailers, None);
+        assert_eq!(obf.disable_cookies, None);
+    }
+
+    #[test]
+    fn deserialize_awg30_params() {
+        let json = r#"{
+            "jc": 6,
+            "header_protection_key": "base64key",
+            "content_padding_addition": "5-25",
+            "rekey_after_time": "110-130",
+            "rekey_timeout": 5,
+            "reject_after_time": "170-190",
+            "keepalive_timeout": "8-12",
+            "max_handshake_attempts": 18
+        }"#;
+
+        let params: AwgObfuscationParams = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            params.header_protection_key.as_deref(),
+            Some("base64key")
+        );
+        assert_eq!(params.content_padding_addition.as_deref(), Some("5-25"));
+        assert_eq!(params.rekey_after_time.as_deref(), Some("110-130"));
+        assert_eq!(params.rekey_timeout.as_deref(), Some("5"));
+        assert_eq!(params.max_handshake_attempts.as_deref(), Some("18"));
+
+        let serialized = serde_json::to_string(&params).unwrap();
+        assert!(serialized.contains("\"rekey_after_time\":\"110-130\""));
+    }
+
+    #[test]
+    fn deserialize_missing_awg30_params_stay_absent() {
+        let json = r#"{"jc": 6}"#;
+
+        let params: AwgObfuscationParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.header_protection_key, None);
+        assert_eq!(params.rekey_after_time, None);
+
+        // Unset params are not serialized back, keeping stored JSON stable.
+        let serialized = serde_json::to_string(&params).unwrap();
+        assert!(!serialized.contains("header_protection_key"));
+        assert!(!serialized.contains("rekey_after_time"));
+    }
+
+    #[test]
+    fn from_file_parses_awg30_params() {
+        let path = std::env::temp_dir().join("fcore-awg30params-test.conf");
+        // 32-byte key (zeros), base64-encoded.
+        let hp_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        std::fs::write(
+            &path,
+            &format!(
+                "[Interface]\n\
+                 PrivateKey = priv\n\
+                 Address = 10.0.0.1/24\n\
+                 ListenPort = 51820\n\
+                 Jc = 6\n\
+                 S1 = 20\n\
+                 S2 = 30\n\
+                 S3 = 40\n\
+                 S4 = 50\n\
+                 HeaderProtectionKey = {hp_key}\n\
+                 ContentPaddingAddition = 5-25\n\
+                 RekeyAfterTime = 110-130\n\
+                 MaxHandshakeAttempts = 18\n"
+            ),
+        )
+        .unwrap();
+
+        let cfg = AmneziaWgServerConfig::from_file(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let obf = cfg.obfuscation.unwrap();
+        assert_eq!(obf.header_protection_key.as_deref(), Some(hp_key));
+        assert_eq!(obf.content_padding_addition.as_deref(), Some("5-25"));
+        assert_eq!(obf.rekey_after_time.as_deref(), Some("110-130"));
+        assert_eq!(obf.max_handshake_attempts.as_deref(), Some("18"));
+        assert_eq!(obf.rekey_timeout, None);
+    }
+
+    #[test]
+    fn from_file_rejects_header_protection_with_small_s() {
+        let path = std::env::temp_dir().join("fcore-awg30hp-test.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\n\
+             PrivateKey = priv\n\
+             Address = 10.0.0.1/24\n\
+             ListenPort = 51820\n\
+             Jc = 6\n\
+             S1 = 20\n\
+             S2 = 5\n\
+             HeaderProtectionKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
+        )
+        .unwrap();
+
+        let result = AmneziaWgServerConfig::from_file(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().expect("HP key with S2=5 must fail");
+        assert!(err.to_string().contains("S1..S4 >= 12"), "err: {err}");
+    }
+
+    #[test]
+    fn u16_range_wire_packs_lo_hi() {
+        // A single value is a degenerate range [v, v].
+        assert_eq!(u16_range_wire("120").unwrap(), (120u32 << 16) | 120);
+        assert_eq!(u16_range_wire("110-130").unwrap(), (130u32 << 16) | 110);
+        assert_eq!(u16_range_wire(" 5 - 25 ").unwrap(), (25u32 << 16) | 5);
+        assert_eq!(u16_range_wire("0-65535").unwrap(), 0xFFFF_0000);
+
+        assert!(u16_range_wire("").is_err());
+        assert!(u16_range_wire("bad").is_err());
+        assert!(u16_range_wire("10-5").is_err());
+        assert!(u16_range_wire("65536").is_err());
+        assert!(u16_range_wire("1-2-3").is_err());
+    }
+
+    #[test]
+    fn parse_header_protection_key_requires_32_bytes() {
+        assert!(parse_header_protection_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok());
+        assert!(parse_header_protection_key("cHVibGljLWtleQ==").is_err()); // 10 bytes
+        assert!(parse_header_protection_key("!!!not-base64!!!").is_err());
+    }
+
+    #[test]
+    fn from_file_rejects_invalid_awg30_specs() {
+        // HP key that decodes to 10 bytes instead of 32.
+        let path = std::env::temp_dir().join("fcore-awg30badkey-test.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\n\
+             PrivateKey = priv\n\
+             Address = 10.0.0.1/24\n\
+             ListenPort = 51820\n\
+             Jc = 6\n\
+             S1 = 20\n\
+             S2 = 20\n\
+             S3 = 20\n\
+             S4 = 20\n\
+             HeaderProtectionKey = cHVibGljLWtleQ==\n",
+        )
+        .unwrap();
+        let result = AmneziaWgServerConfig::from_file(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        let err = result.err().expect("10-byte HP key must fail");
+        assert!(err.to_string().contains("32 bytes"), "err: {err}");
+
+        // Malformed timing range.
+        let path = std::env::temp_dir().join("fcore-awg30badrange-test.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\n\
+             PrivateKey = priv\n\
+             Address = 10.0.0.1/24\n\
+             ListenPort = 51820\n\
+             Jc = 6\n\
+             RekeyAfterTime = 130-110\n",
+        )
+        .unwrap();
+        let result = AmneziaWgServerConfig::from_file(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        let err = result.err().expect("lo > hi range must fail");
+        assert!(err.to_string().contains("u16 range"), "err: {err}");
     }
 }

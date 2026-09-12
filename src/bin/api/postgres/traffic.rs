@@ -80,6 +80,41 @@ impl PgTraffic {
         Ok((row.get("uplink"), row.get("downlink")))
     }
 
+    /// Lifetime traffic per connection of a subscription (named devices view).
+    pub async fn per_connection_for_subscription(
+        &self,
+        subscription_id: uuid::Uuid,
+    ) -> Result<std::collections::HashMap<uuid::Uuid, (i64, i64)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT
+                    connection_id,
+                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
+                FROM connection_traffic
+                WHERE subscription_id = $1 AND period = 'day'
+                GROUP BY connection_id
+                "#,
+                &[&subscription_id],
+            )
+            .await
+            .map_err(Error::Database)?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<_, uuid::Uuid>("connection_id"),
+                    (r.get("uplink"), r.get("downlink")),
+                )
+            })
+            .collect())
+    }
+
     /// Sum of all persisted daily traffic per env for a subscription.
     pub async fn env_totals_for_subscription(
         &self,

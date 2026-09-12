@@ -81,6 +81,22 @@ fn default_log_level() -> String {
     "debug".to_string()
 }
 
+/// Protocols with per-connection traffic accounting; the only ones allowed
+/// while a subscription runs on its traffic balance (traffic mode).
+fn default_metered_conns() -> Vec<String> {
+    [
+        "Wireguard",
+        "AmneziaWg",
+        "AmneziaWgMobile",
+        "VlessTcpReality",
+        "VlessGrpcReality",
+        "VlessXhttpCdn",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceConfig {
     #[serde(default = "default_listen_address")]
@@ -101,12 +117,21 @@ pub struct ServiceConfig {
     pub amnezia_wireguard_mobile_network: Option<IpAddrMask>,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
+    /// Env that hosts lite (traffic-only) subscriptions: lite key activation
+    /// creates connections only in this env, picked from enabled_conns.
+    /// Without it lite activations create no connections (a warning is logged).
+    #[serde(default)]
+    pub lite_env: Option<String>,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     pub updates_endpoint_zmq: String,
     pub subscription_title: String,
     pub support_contact: String,
     pub base_url: String,
+    /// Public base URL of this api (feed links like /sub/<token>). Falls
+    /// back to base_url when unset.
+    #[serde(default)]
+    pub api_url: Option<String>,
     #[serde(default)]
     pub admin_enabled: bool,
     pub admin_token: Option<String>,
@@ -121,6 +146,14 @@ pub struct ServiceConfig {
     pub gateway_price_label: Option<String>,
     #[serde(default)]
     pub gateway_speed_label: Option<String>,
+    /// Master switch for the traffic-balance model (beta): a subscription
+    /// with a traffic limit stays active while it has bytes left, even after
+    /// its paid time has expired. Default off = legacy behavior.
+    #[serde(default)]
+    pub traffic_mode_enabled: bool,
+    /// Protocol tags allowed while a subscription is in traffic mode.
+    #[serde(default = "default_metered_conns")]
+    pub metered_conns: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -142,6 +175,17 @@ pub struct TasksConfig {
     pub heartbeat_node_offline_threshold_sec: u64,
     #[serde(default = "default_traffic_persist_interval_sec")]
     pub traffic_persist_interval_sec: u64,
+    /// How often lite subscriptions are checked against their traffic limit.
+    #[serde(default = "default_traffic_limit_interval_sec")]
+    pub traffic_limit_interval_sec: u64,
+    /// Reissue connections of lite subscriptions that stay above the
+    /// per-connection device limit for too many consecutive ticks.
+    #[serde(default)]
+    pub device_limit_enabled: bool,
+    #[serde(default = "default_device_limit_interval_sec")]
+    pub device_limit_interval_sec: u64,
+    #[serde(default = "default_device_limit_max_ticks")]
+    pub device_limit_max_ticks: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -200,4 +244,16 @@ pub struct MetricsRxConfig {
 
 fn default_traffic_persist_interval_sec() -> u64 {
     3600
+}
+
+fn default_traffic_limit_interval_sec() -> u64 {
+    300
+}
+
+fn default_device_limit_interval_sec() -> u64 {
+    60
+}
+
+fn default_device_limit_max_ticks() -> u32 {
+    3
 }

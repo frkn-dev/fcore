@@ -56,7 +56,7 @@ pub use memory::{
         Connections,
     },
     env::Env,
-    key::{Code, Distributor, Key},
+    key::{Code, Distributor, Key, KeyKind},
     node::{
         InboundStat, Node, NodeMetricInfo, NodeResponse, Status as NodeStatus, Type as NodeType,
     },
@@ -68,7 +68,7 @@ pub use memory::{
         node::Operations as NodeStorageOperations,
         subscription::Operations as SubscriptionStorageOperations, Status,
     },
-    subscription::{Operations as SubscriptionOperations, Subscription, Subscriptions},
+    subscription::{Operations as SubscriptionOperations, PlanKind, Subscription, Subscriptions},
     tag::ProtoTag as Tag,
 };
 

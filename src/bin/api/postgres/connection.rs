@@ -24,6 +24,19 @@ pub struct ConnRow {
     pub proto: Tag,
     pub token: Option<uuid::Uuid>,
     is_deleted: bool,
+    /// User-facing name of a "named device" connection. PG-only: never put
+    /// into `Connection`/`Conn` so it cannot cross the rkyv wire to nodes
+    /// (same precedent as `deleted_reason`).
+    pub label: Option<String>,
+    /// Provenance flag: Some("share") marks a child connection minted for a
+    /// share token recipient. PG-only like `label`; the api mirrors it into
+    /// an in-memory set to hide share children from owner-facing listings.
+    pub issued_via: Option<String>,
+    /// Pin of a "named device" connection to a single node (nodes.uuid).
+    /// PG-only like `label`; the api mirrors it into an in-memory map so
+    /// pinned peers are only published to/listed on their node. None =
+    /// env-wide (current behavior).
+    pub node_id: Option<uuid::Uuid>,
 }
 
 impl From<(uuid::Uuid, Connection)> for ConnRow {
@@ -41,6 +54,15 @@ impl From<(uuid::Uuid, Connection)> for ConnRow {
             proto: conn.get_proto().proto(),
             token: conn.get_token(),
             is_deleted: conn.is_deleted,
+            // The label never lives on `Connection`; callers that have one
+            // set it on the row explicitly (see SyncOp::add_conn).
+            label: None,
+            // Same for the share provenance flag: set post-insert by the
+            // share mint flow (PgConn::set_issued_via).
+            issued_via: None,
+            // Same for the node pin: callers that have one set it on the
+            // row explicitly (see SyncOp::add_conn).
+            node_id: None,
         }
     }
 }
@@ -140,7 +162,10 @@ impl PgConn {
             proto,
             wg_privkey,
             wg_address,
-            is_deleted
+            is_deleted,
+            label,
+            issued_via,
+            node_id
         FROM connections
     ";
 
@@ -164,6 +189,9 @@ impl PgConn {
                 let wg_privkey: Option<String> = row.get("wg_privkey");
                 let wg_address: Option<String> = row.get("wg_address");
                 let is_deleted: bool = row.get("is_deleted");
+                let label: Option<String> = row.get("label");
+                let issued_via: Option<String> = row.get("issued_via");
+                let node_id: Option<uuid::Uuid> = row.get("node_id");
 
                 let wg = match (wg_privkey, wg_address) {
                     (Some(privkey), Some(address)) => {
@@ -187,18 +215,22 @@ impl PgConn {
                     proto,
                     wg,
                     is_deleted,
+                    label,
+                    issued_via,
+                    node_id,
                 }
             })
             .collect()
     }
 
-    pub async fn delete(&self, conn_id: &uuid::Uuid) -> Result<()> {
+    pub async fn delete(&self, conn_id: &uuid::Uuid, reason: Option<&str>) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
-        let query = "UPDATE connections SET is_deleted = true WHERE id = $1";
+        let query =
+            "UPDATE connections SET is_deleted = true, deleted_reason = $2 WHERE id = $1";
 
-        client.execute(query, &[conn_id]).await?;
+        client.execute(query, &[conn_id, &reason]).await?;
 
         Ok(())
     }
@@ -207,9 +239,47 @@ impl PgConn {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
-        let query = "UPDATE connections SET is_deleted = false WHERE id = $1";
+        // The reason only matters while the connection is deleted; a revived
+        // connection starts clean so a later delete records a fresh reason.
+        let query =
+            "UPDATE connections SET is_deleted = false, deleted_reason = NULL WHERE id = $1";
 
         client.execute(query, &[conn_id]).await?;
+
+        Ok(())
+    }
+
+    /// Soft-deletion reasons of all currently deleted connections of a
+    /// subscription. The restore flow gates revivals on this.
+    pub async fn deleted_reasons_for_subscription(
+        &self,
+        subscription_id: &uuid::Uuid,
+    ) -> Result<Vec<(uuid::Uuid, Option<String>)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                "SELECT id, deleted_reason FROM connections WHERE subscription_id = $1 AND is_deleted",
+                &[subscription_id],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("id"), row.get("deleted_reason")))
+            .collect())
+    }
+
+    /// Sets the PG-only provenance flag (e.g. "share" for minted child
+    /// connections). Called post-insert by the share mint flow.
+    pub async fn set_issued_via(&self, conn_id: &uuid::Uuid, issued_via: &str) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let query = "UPDATE connections SET issued_via = $2 WHERE id = $1";
+
+        client.execute(query, &[conn_id, &issued_via]).await?;
 
         Ok(())
     }
@@ -231,11 +301,14 @@ impl PgConn {
             is_deleted,
             wg_privkey,
             wg_address,
-            token
+            token,
+            label,
+            issued_via,
+            node_id
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12
+            $11, $12, $13, $14, $15
         )
     ";
 
@@ -255,6 +328,9 @@ impl PgConn {
                     &conn.wg.as_ref().map(|w| &w.keys.privkey),
                     &conn.wg.as_ref().map(|w| w.address.to_string()),
                     &conn.token,
+                    &conn.label,
+                    &conn.issued_via,
+                    &conn.node_id,
                 ],
             )
             .await;

@@ -1,10 +1,11 @@
 use tracing::{error, Instrument};
+use std::str::FromStr;
 
 use fcore::{
     http::{helpers as http, response::Instance},
     utils::get_uuid_last_octet_simple,
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Distributor, Env, Error, Key,
-    NodeStorageOperations, Status, Subscription, SubscriptionOperations, Tag,
+    KeyKind, NodeStorageOperations, Status, Subscription, SubscriptionOperations, Tag,
 };
 
 use super::super::{
@@ -14,6 +15,28 @@ use super::super::{
     request::{ActivateKeyReq, KeyReq},
 };
 use super::connection::ensure_enabled_connections;
+
+/// Serializes a key for API responses, adding the traffic_gib view of
+/// traffic_bytes (null for standard keys) next to the raw key fields.
+fn key_instance_json(key: &Key) -> serde_json::Value {
+    let mut value = serde_json::to_value(key).unwrap_or_default();
+    if let Some(obj) = value.as_object_mut() {
+        let traffic_gib = key.traffic_bytes.map(|b| b / (1024 * 1024 * 1024));
+        obj.insert("traffic_gib".to_string(), serde_json::json!(traffic_gib));
+    }
+    value
+}
+
+/// Same envelope as http::success_response, but with the key instance
+/// carrying the extra traffic_gib field.
+fn key_success_response(msg: String, key: &Key) -> warp::reply::WithStatus<warp::reply::Json> {
+    let body = serde_json::json!({
+        "status": warp::http::StatusCode::OK.as_u16(),
+        "message": msg,
+        "response": { "id": key.id, "instance": { "Key": key_instance_json(key) } },
+    });
+    warp::reply::with_status(warp::reply::json(&body), warp::http::StatusCode::OK)
+}
 
 /// Get specific & validate key handler
 pub async fn get_key_validate_handler<N, C, S>(
@@ -36,26 +59,20 @@ where
     let code = params.key;
     let db = memory.db.key();
 
-    if !code.is_valid(&secret) {
+    if code.validate_payload(&secret).is_err() {
         return Ok(http::bad_request("Key is not valid"));
     }
 
     match db.get(code.as_str()).await {
         Some(key) => {
             if key.activated {
-                return Ok(http::success_response(
+                return Ok(key_success_response(
                     "Key is valid and already activated".to_string(),
-                    Some(key.id),
-                    Instance::Key(key.clone()),
+                    &key,
                 ));
             }
 
-            let instance = Instance::Key(key.clone());
-            Ok(http::success_response(
-                "Key is valid".to_string(),
-                Some(key.id),
-                instance,
-            ))
+            Ok(key_success_response("Key is valid".to_string(), &key))
         }
         None => Ok(http::not_found("Key is not found")),
     }
@@ -82,12 +99,27 @@ where
     const DEFAULT_DISTRIBUTOR: &str = "FRKN";
     let distributor_str = req.distributor.as_deref().unwrap_or(DEFAULT_DISTRIBUTOR);
 
-    let days = req.days;
+    let kind = match req.kind.as_deref().map(KeyKind::from_str) {
+        Some(Ok(kind)) => kind,
+        Some(Err(_)) => return Ok(http::bad_request("Unknown key kind")),
+        None => KeyKind::Standard,
+    };
+
     let distributor = Distributor::new(distributor_str)
         .map_err(|_| Error::Custom("invalid distributor".to_string()))?;
 
+    let key = match kind {
+        KeyKind::Standard => Key::new(req.days, &distributor, &secret),
+        KeyKind::Lite => {
+            let traffic_gib = match req.traffic_gib {
+                Some(gib) if gib > 0 => gib,
+                _ => return Ok(http::bad_request("traffic_gib must be greater than 0")),
+            };
+            Key::new_lite(traffic_gib, &distributor, &secret)
+        }
+    };
+
     let db = memory.db.key();
-    let key = Key::new(days, &distributor, &secret);
 
     match db.insert(&key).await {
         Ok(_) => {
@@ -105,9 +137,19 @@ where
     }
 }
 
+/// Basic sanity check for the lite activation email.
+fn is_valid_activation_email(email: Option<&str>) -> bool {
+    match email {
+        Some(e) => e.len() > 3 && e.contains('@'),
+        None => false,
+    }
+}
+
 /// Post activate key
 /// If subscription_id is not provided, a new subscription is created using the key's days
 /// and default connections are created for the configured envs/tags.
+/// Lite keys grant traffic instead of days: they require an email, create a
+/// subscription with expires_at NULL and connections only in the lite env.
 pub async fn post_activate_key_handler<N, C, S>(
     req: ActivateKeyReq,
     trace_id_header: Option<String>,
@@ -116,6 +158,7 @@ pub async fn post_activate_key_handler<N, C, S>(
     awg_network: fcore::IpAddrMask,
     awg_mobile_network: Option<fcore::IpAddrMask>,
     enabled_conns: Option<std::collections::HashMap<Env, Vec<Tag>>>,
+    lite_env: Option<Env>,
     mrkting: Option<crate::config::MrktingConfig>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -143,16 +186,30 @@ where
         return Ok(http::bad_request("Key already activated"));
     }
 
+    // Lite keys bind the new subscription to an account via mrkting, so an
+    // email is mandatory. Standard keys ignore the email field.
+    if key.kind == KeyKind::Lite && !is_valid_activation_email(req.email.as_deref()) {
+        return Ok(http::bad_request("email_required"));
+    }
+
     let sub_id = match req.subscription_id {
         Some(id) => id,
         None => {
             let sub_id = uuid::Uuid::new_v4();
             let ref_code = get_uuid_last_octet_simple(&sub_id);
-            // expires_at stays empty on purpose: the shared add_days call
-            // below grants the key's days exactly once. Setting it here too
-            // would double them (days in expires_at + days from add_days).
-            let expires_at = None;
-            let sub = Subscription::new(sub_id, ref_code, expires_at, req.limit_bytes);
+            let sub = match key.kind {
+                // The traffic limit comes from the key; expires_at stays
+                // NULL — a lite sub is active while it has traffic left.
+                KeyKind::Lite => {
+                    Subscription::new_lite(sub_id, ref_code, key.traffic_bytes.unwrap_or(0))
+                }
+                // expires_at stays empty on purpose: the shared add_days call
+                // below grants the key's days exactly once. Setting it here too
+                // would double them (days in expires_at + days from add_days).
+                KeyKind::Standard => {
+                    Subscription::new(sub_id, ref_code, None, req.limit_bytes)
+                }
+            };
 
             subscription_audit::log_transaction_start(sub_id, Some(key.days as i64));
 
@@ -185,17 +242,25 @@ where
 
     subscription_audit::log_transaction_start(sub_id, Some(key.days as i64));
 
-    match SyncOp::add_days(
-        &memory,
-        &sub_id,
-        key.days as i64,
-    )
-    .instrument(subscription_audit::transaction_span(
-        "key_activate_handler",
-        sub_id,
-        Some(trace_id),
-    ))
-    .await
+    let add_days_status = match key.kind {
+        // Lite subs get no days: the limit was set at creation.
+        KeyKind::Lite => Ok(Status::Updated(sub_id)),
+        KeyKind::Standard => {
+            SyncOp::add_days(
+                &memory,
+                &sub_id,
+                key.days as i64,
+            )
+            .instrument(subscription_audit::transaction_span(
+                "key_activate_handler",
+                sub_id,
+                Some(trace_id),
+            ))
+            .await
+        }
+    };
+
+    match add_days_status
     {
         Ok(Status::Updated(_)) => {
             key.activate(&sub_id);
@@ -206,17 +271,52 @@ where
                 )));
             }
 
-            // Top up connections for every enabled (env, tag): existing ones
-            // are kept, only missing protocols are created.
-            ensure_enabled_connections(
-                sub_id,
-                &enabled_conns,
-                &memory,
-                &wg_network,
-                &awg_network,
-                &awg_mobile_network,
-            )
-            .await;
+            match key.kind {
+                // Lite subs get connections only in the dedicated lite env,
+                // picked from enabled_conns. Without lite_env configured no
+                // connections are created at all.
+                KeyKind::Lite => {
+                    let lite_conns = match &lite_env {
+                        Some(env) => enabled_conns.as_ref().map(|conns| {
+                            conns
+                                .iter()
+                                .filter(|(e, _)| *e == env)
+                                .map(|(e, tags)| (e.clone(), tags.clone()))
+                                .collect::<std::collections::HashMap<Env, Vec<Tag>>>()
+                        }),
+                        None => {
+                            tracing::warn!(
+                                "service.lite_env is not configured: no connections created for lite sub {}",
+                                sub_id
+                            );
+                            None
+                        }
+                    };
+
+                    ensure_enabled_connections(
+                        sub_id,
+                        &lite_conns,
+                        &memory,
+                        &wg_network,
+                        &awg_network,
+                        &awg_mobile_network,
+                    )
+                    .await;
+                }
+                // Top up connections for every enabled (env, tag): existing ones
+                // are kept, only missing protocols are created.
+                KeyKind::Standard => {
+                    ensure_enabled_connections(
+                        sub_id,
+                        &enabled_conns,
+                        &memory,
+                        &wg_network,
+                        &awg_network,
+                        &awg_mobile_network,
+                    )
+                    .await;
+                }
+            }
 
             if let Some(mrkting) = &mrkting {
                 let client = reqwest::Client::new();
@@ -225,6 +325,8 @@ where
                     "subscription_id": sub_id,
                     "key_code": req.code,
                     "days": key.days,
+                    "kind": key.kind.to_string(),
+                    "traffic_bytes": key.traffic_bytes,
                 });
 
                 match client
@@ -256,6 +358,63 @@ where
                             "Failed to call mrkting key activation for sub {}: {}",
                             sub_id,
                             err
+                        );
+                    }
+                }
+            }
+
+            // Bind the email to the lite subscription via mrkting. A failure
+            // here must not roll back the activation.
+            if key.kind == KeyKind::Lite {
+                match (&mrkting, req.email.as_deref()) {
+                    (Some(mrkting), Some(email)) => {
+                        let client = reqwest::Client::new();
+                        let url = format!("{}/account", mrkting.endpoint.trim_end_matches('/'));
+                        let body = serde_json::json!({
+                            "subscription_id": sub_id,
+                            "email": email,
+                            "marketing_emails": false,
+                            "system_notifications": true,
+                        });
+
+                        match client
+                            .post(&url)
+                            .header("Authorization", format!("Bearer {}", mrkting.token))
+                            .header("Content-Type", "application/json")
+                            .json(&body)
+                            .send()
+                            .await
+                        {
+                            Ok(resp) => {
+                                if !resp.status().is_success() {
+                                    let status = resp.status();
+                                    let text = resp.text().await.unwrap_or_default();
+                                    tracing::error!(
+                                        "mrkting account bind failed for lite sub {}: {} {}",
+                                        sub_id,
+                                        status,
+                                        text
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "mrkting account bound for lite sub {}",
+                                        sub_id
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    "Failed to call mrkting account bind for lite sub {}: {}",
+                                    sub_id,
+                                    err
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::error!(
+                            "mrkting is not configured: email not bound for lite sub {}",
+                            sub_id
                         );
                     }
                 }

@@ -21,7 +21,7 @@ impl PgKey {
         let client = manager.get_client().await.ok()?;
 
         let query = "
-            SELECT id, code, activated, created_at, modified_at, subscription_id, days, distributor
+            SELECT id, code, activated, created_at, modified_at, subscription_id, days, distributor, kind, traffic_bytes
             FROM keys
             WHERE code = $1
         ";
@@ -36,8 +36,8 @@ impl PgKey {
         let client = manager.get_client().await?;
 
         let query = "
-               INSERT INTO keys (id, code, activated, created_at, modified_at, subscription_id, days, distributor)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               INSERT INTO keys (id, code, activated, created_at, modified_at, subscription_id, days, distributor, kind, traffic_bytes)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            ";
 
         client
@@ -52,6 +52,8 @@ impl PgKey {
                     &key.subscription_id,
                     &key.days,
                     &key.distributor.as_str(),
+                    &key.kind.to_string(),
+                    &key.traffic_bytes,
                 ],
             )
             .await?;

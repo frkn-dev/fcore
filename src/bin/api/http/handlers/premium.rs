@@ -8,7 +8,10 @@ use warp::{http::StatusCode, Rejection, Reply};
 
 use super::super::super::{
     subscription_audit,
-    sync::{tasks::SyncOp, MemSync},
+    sync::{
+        tasks::{SyncOp, DELETE_REASON_MANUAL},
+        MemSync,
+    },
 };
 use super::admin::AdminSubscriptionTraffic;
 use super::subscription::build_subscription_traffic;
@@ -456,7 +459,7 @@ where
     let expires_at = req.days.map(|d| Utc::now() + chrono::Duration::days(d as i64));
     let conn = Connection::new(&req.env, Some(child_id), proto, expires_at);
 
-    match SyncOp::add_conn(&memory, &conn_id, conn.clone()).await {
+    match SyncOp::add_conn(&memory, &conn_id, conn.clone(), None, None).await {
         Ok(Status::Ok(id)) | Ok(Status::AlreadyExist(id)) => {
             let msg = vec![conn.as_create_message(&conn_id)];
             let topic = if conn.get_token().is_some() {
@@ -534,7 +537,7 @@ where
         conn.clone()
     };
 
-    match SyncOp::delete_connection(&memory, &conn_id, &conn).await {
+    match SyncOp::delete_connection(&memory, &conn_id, &conn, Some(DELETE_REASON_MANUAL)).await {
         Ok(_) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({})),
             StatusCode::NO_CONTENT,

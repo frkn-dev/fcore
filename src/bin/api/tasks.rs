@@ -7,15 +7,20 @@ use tracing::{debug, error, info, warn};
 
 use fcore::{
     measure_time, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, Env, NodeStatus, NodeStorageOperations, Result, Status,
-    Subscription, SubscriptionOperations, SubscriptionStorageOperations,
+    ConnectionStorageApiOperations, Env, NodeStatus, NodeStorageOperations, PlanKind, Result,
+    Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use super::{
+    http::handlers::connection::create_connection_inner,
+    mrkting,
     postgres::{connection::ConnWatermark, pg::Tasks as MemoryCacheTasks},
     service::{Cache, Service},
     subscription_audit,
-    sync::tasks::SyncOp,
+    sync::tasks::{
+        SyncOp, DELETE_REASON_DEVICE_KICK, DELETE_REASON_EXPIRED,
+        DELETE_REASON_TRAFFIC_EXHAUSTED,
+    },
     traffic,
 };
 
@@ -28,6 +33,8 @@ pub trait Tasks {
     async fn restore_subscriptions(&self, interval_sec: u64);
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
     async fn persist_connection_traffic(&self, interval_sec: u64);
+    async fn enforce_traffic_limits(&self, interval_sec: u64);
+    async fn enforce_device_limit(&self, interval_sec: u64, max_ticks: u32);
 }
 
 #[async_trait::async_trait]
@@ -94,7 +101,11 @@ where
                 let expires_at = conn.get_expires_at();
                 let subscription_id = conn.get_subscription_id();
 
-                match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into(),
+                match SyncOp::delete_connection(
+                    &self.sync,
+                    &conn_id,
+                    &conn.into(),
+                    Some(DELETE_REASON_EXPIRED),
                 )
                 .await
                 {
@@ -124,6 +135,8 @@ where
             interval.tick().await;
             debug!("Run cleanup subscriptions task");
 
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
+
             let expired_subs: Vec<uuid::Uuid> = {
                 let mem = self.sync.memory.read().await;
                 mem.subscriptions
@@ -133,6 +146,39 @@ where
             };
 
             for sub_id in expired_subs {
+                // Traffic mode: a subscription with bytes left on the balance
+                // is not expired — keep its connections.
+                if traffic_mode_enabled {
+                    let check = {
+                        let mem = self.sync.memory.read().await;
+                        mem.subscriptions.find_by_id(&sub_id).map(|s| {
+                            (s.is_deleted(), s.limit_bytes(), s.time_expired())
+                        })
+                    };
+                    if let Some((false, Some(_), true)) = check {
+                        match self.sync.db.traffic().total_for_subscription(sub_id).await {
+                            Ok((uplink, downlink)) => {
+                                let remaining = check
+                                    .and_then(|(_, limit, _)| limit)
+                                    .map(|limit| limit - (uplink + downlink));
+                                if remaining.map(|r| r > 0).unwrap_or(false) {
+                                    debug!(
+                                        "Subscription {} is expired but has traffic balance left, skipping cleanup",
+                                        sub_id
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to load traffic total for subscription {}: {}",
+                                    sub_id, e
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let (expires_at, conns_to_delete): (
                     Option<chrono::DateTime<Utc>>,
                     Vec<(uuid::Uuid, Connection)>,
@@ -159,7 +205,11 @@ where
                 let connections_count = conns_to_delete.len();
 
                 for (conn_id, conn) in conns_to_delete {
-                    match SyncOp::delete_connection(&self.sync, &conn_id, &conn.into(),
+                    match SyncOp::delete_connection(
+                        &self.sync,
+                        &conn_id,
+                        &conn.into(),
+                        Some(DELETE_REASON_EXPIRED),
                     )
                     .await
                     {
@@ -194,16 +244,57 @@ where
             interval.tick().await;
             debug!("Run restore subscriptions task");
 
-            let active_subs: Vec<uuid::Uuid> = {
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
+            let metered_conns = self.settings.service.metered_conns.clone();
+
+            // (sub_id, needs balance check): subscriptions expired by time
+            // revive only while they still have traffic balance, and only
+            // connections of metered protocols (traffic mode).
+            let active_subs: Vec<(uuid::Uuid, bool)> = {
                 let mem = self.sync.memory.read().await;
                 mem.subscriptions
                     .iter()
-                    .filter_map(|(id, sub)| if sub.is_active() { Some(*id) } else { None })
+                    .filter_map(|(id, sub)| {
+                        if sub.is_active() {
+                            Some((*id, false))
+                        } else if traffic_mode_enabled && !sub.is_deleted() && sub.time_expired()
+                        {
+                            Some((*id, true))
+                        } else {
+                            None
+                        }
+                    })
                     .collect()
             };
 
-            for sub_id in active_subs {
-                match SyncOp::restore_connections_by_subscription(&self.sync, &sub_id).await {
+            for (sub_id, balance_check) in active_subs {
+                let metered = if balance_check {
+                    match self.sync.db.traffic().total_for_subscription(sub_id).await {
+                        Ok((uplink, downlink)) => {
+                            let remaining = {
+                                let mem = self.sync.memory.read().await;
+                                mem.subscriptions
+                                    .find_by_id(&sub_id)
+                                    .and_then(|s| s.remaining_bytes(uplink + downlink))
+                            };
+                            match remaining {
+                                Some(r) if r > 0 => Some(metered_conns.clone()),
+                                _ => continue,
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to load traffic total for subscription {}: {}",
+                                sub_id, e
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                match SyncOp::restore_connections_by_subscription(&self.sync, &sub_id, metered.as_deref()).await {
                     Ok(restored) => {
                         if !restored.is_empty() {
                             info!(
@@ -217,6 +308,263 @@ where
                         error!("Failed to restore expired connection {}: {:?}", sub_id, e);
                     }
                 }
+            }
+        }
+    }
+
+    async fn enforce_traffic_limits(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            debug!("Run enforce traffic limits task");
+
+            // Subscriptions with a traffic limit that still have at least one
+            // live connection. With traffic mode off only lite subscriptions
+            // are enforced (legacy). With traffic mode on, subscriptions
+            // whose paid time has expired are enforced too — they live on the
+            // balance; a standard subscription with active paid time is never
+            // limited, even over the limit (the balance is for later).
+            // The live-connection guard doubles as the notification guard: an
+            // already-exhausted sub has all connections deleted and must not
+            // re-notify every tick.
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
+            let lite_subs: Vec<(uuid::Uuid, i64, Vec<(uuid::Uuid, Connection)>)> = {
+                let mem = self.sync.memory.read().await;
+                mem.subscriptions
+                    .iter()
+                    .filter(|(_, sub)| {
+                        if sub.limit_bytes().is_none() {
+                            return false;
+                        }
+                        sub.plan_kind() == PlanKind::Lite
+                            || (traffic_mode_enabled && sub.time_expired())
+                    })
+                    .filter_map(|(sub_id, sub)| {
+                        let conns: Vec<(uuid::Uuid, Connection)> = mem
+                            .connections
+                            .get_by_subscription_id(sub_id)
+                            .map(|conns| {
+                                conns
+                                    .iter()
+                                    .filter(|(_, c)| !c.get_deleted())
+                                    .map(|(id, c)| (*id, c.clone().into()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        if conns.is_empty() {
+                            None
+                        } else {
+                            Some((*sub_id, sub.limit_bytes().unwrap_or_default(), conns))
+                        }
+                    })
+                    .collect()
+            };
+
+            for (sub_id, limit_bytes, conns) in lite_subs {
+                let (uplink, downlink) =
+                    match self.sync.db.traffic().total_for_subscription(sub_id).await {
+                        Ok(total) => total,
+                        Err(e) => {
+                            error!(
+                                "Failed to load traffic total for subscription {}: {}",
+                                sub_id, e
+                            );
+                            continue;
+                        }
+                    };
+                let used_bytes = uplink + downlink;
+
+                if used_bytes < limit_bytes {
+                    continue;
+                }
+
+                info!(
+                    "Subscription {} exhausted its traffic limit ({} >= {} bytes), deleting {} connections",
+                    sub_id,
+                    used_bytes,
+                    limit_bytes,
+                    conns.len()
+                );
+
+                for (conn_id, conn) in conns {
+                    match SyncOp::delete_connection(
+                        &self.sync,
+                        &conn_id,
+                        &conn.into(),
+                        Some(DELETE_REASON_TRAFFIC_EXHAUSTED),
+                    )
+                    .await
+                    {
+                        Ok(Status::Ok(_)) => {
+                            info!("Traffic-exhausted connection {} deleted", conn_id);
+                        }
+                        Ok(status) => {
+                            warn!(
+                                "Connection {} could not be deleted: {:?}",
+                                conn_id, status
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to delete traffic-exhausted connection {}: {:?}",
+                                conn_id, e
+                            );
+                        }
+                    }
+                }
+
+                if let Some(mrkting_config) = &self.settings.service.mrkting {
+                    mrkting::send_lite_event(
+                        mrkting_config,
+                        serde_json::json!({
+                            "type": "traffic_exhausted",
+                            "subscription_id": sub_id,
+                            "used_bytes": used_bytes,
+                            "limit_bytes": limit_bytes,
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    async fn enforce_device_limit(&self, interval_sec: u64, max_ticks: u32) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+        // Consecutive over-limit ticks per connection; in-memory only, a
+        // restart simply restarts the count.
+        let mut strikes: HashMap<uuid::Uuid, u32> = HashMap::new();
+
+        loop {
+            interval.tick().await;
+            debug!("Run enforce device limit task");
+
+            // Non-deleted connections of lite subscriptions.
+            let lite_conns: Vec<(uuid::Uuid, uuid::Uuid, Connection)> = {
+                let mem = self.sync.memory.read().await;
+                mem.subscriptions
+                    .iter()
+                    .filter(|(_, sub)| sub.plan_kind() == PlanKind::Lite)
+                    .flat_map(|(sub_id, _)| {
+                        mem.connections
+                            .get_by_subscription_id(sub_id)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter(|(_, c)| !c.get_deleted())
+                            .map(|(conn_id, c)| (*conn_id, *sub_id, c.clone().into()))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+
+            // Keep the strike map small: drop entries for connections that
+            // no longer exist or are deleted.
+            strikes.retain(|conn_id, _| {
+                lite_conns.iter().any(|(id, _, _)| id == conn_id)
+            });
+
+            for (conn_id, sub_id, conn) in lite_conns {
+                let online = self.metrics.get_connection_online_count(&conn_id);
+
+                if online <= 1 {
+                    strikes.remove(&conn_id);
+                    continue;
+                }
+
+                let count = {
+                    let count = strikes.entry(conn_id).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+
+                if count < max_ticks {
+                    debug!(
+                        "Connection {} over device limit ({} online), strike {}/{}",
+                        conn_id, online, count, max_ticks
+                    );
+                    continue;
+                }
+
+                warn!(
+                    "Connection {} over device limit for {} consecutive ticks ({} online), reissuing",
+                    conn_id, count, online
+                );
+
+                // Create the replacement first; only on success is the old
+                // connection deleted, so a failed reissue never leaves the
+                // subscription without a connection.
+                let env = conn.get_env().clone();
+                let proto = conn.get_proto().proto();
+
+                let (new_conn_id, _) = match create_connection_inner(
+                    &env,
+                    proto,
+                    Some(sub_id),
+                    None,
+                    None,
+                    None,
+                    &self.sync,
+                    &self.settings.service.wireguard_network,
+                    &self.settings.service.amnezia_wireguard_network,
+                    &self.settings.service.amnezia_wireguard_mobile_network,
+                )
+                .await
+                {
+                    Ok(created) => created,
+                    Err(e) => {
+                        error!(
+                            "Failed to reissue connection {} for lite subscription {}: {}",
+                            conn_id, sub_id, e
+                        );
+                        continue;
+                    }
+                };
+
+                info!(
+                    "Reissued connection {} as {} for lite subscription {}",
+                    conn_id, new_conn_id, sub_id
+                );
+
+                match SyncOp::delete_connection(
+                    &self.sync,
+                    &conn_id,
+                    &conn.into(),
+                    Some(DELETE_REASON_DEVICE_KICK),
+                )
+                .await
+                {
+                    Ok(Status::Ok(_)) => {
+                        info!("Device-kicked connection {} deleted", conn_id);
+                    }
+                    Ok(status) => {
+                        warn!(
+                            "Connection {} could not be deleted: {:?}",
+                            conn_id, status
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to delete device-kicked connection {}: {:?}",
+                            conn_id, e
+                        );
+                    }
+                }
+
+                if let Some(mrkting_config) = &self.settings.service.mrkting {
+                    mrkting::send_lite_event(
+                        mrkting_config,
+                        serde_json::json!({
+                            "type": "device_kick",
+                            "subscription_id": sub_id,
+                            "connection_id": conn_id,
+                        }),
+                    )
+                    .await;
+                }
+
+                strikes.remove(&conn_id);
             }
         }
     }

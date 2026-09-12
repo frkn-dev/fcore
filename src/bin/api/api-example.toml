@@ -14,6 +14,9 @@ updates_endpoint_zmq = "tcp://*:3001"
 subscription_title = "FRKN Subscription"
 support_contact = "https://t.me/frkn_support"
 base_url = "https://frkn.org"
+# Public base URL of this api instance — used for machine-facing links
+# (share feed /sub/<token>). Defaults to base_url when unset.
+api_url = "https://api.frkn.org"
 admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"
@@ -21,10 +24,19 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # enabled_conns = { dev = ["Hysteria2", "VlessTcpReality"], wl = ["VlessXhttpCdn"], ru = ["Wireguard", "Hysteria2"] }
 # Mobile AmneziaWG (dedicated pool): add "AmneziaWgMobile" to the env list, e.g.
 # enabled_conns = { ru = ["AmneziaWg", "AmneziaWgMobile", "VlessTcpReality"] }
+# Lite (traffic-only) keys: connections are created only in this env, picked
+# from enabled_conns. Without it lite activations create no connections.
+# lite_env = "lite-prod"
+# enabled_conns = { lite-prod = ["VlessTcpReality", "Hysteria2"] }
 # Labels on the client's service cards (/v1/services). Bare numbers only —
 # the client formats them itself. Defaults shown.
 # gateway_price_label = "500"
 # gateway_speed_label = "1000"
+# Traffic mode (beta): an expired subscription with a traffic limit stays
+# active while it has bytes left, and traffic top-ups are allowed on expired
+# standard subscriptions. Only metered protocols work in traffic mode.
+# traffic_mode_enabled = false
+# metered_conns = ["Wireguard", "AmneziaWg", "AmneziaWgMobile", "VlessTcpReality", "VlessGrpcReality", "VlessXhttpCdn"]
 
 # App Store IAP (POST /v1/subscriptions). Without this section the endpoint answers 503.
 # [service.apple]
@@ -57,6 +69,15 @@ db_sync_interval_sec = 1000
 subscription_restore_interval = 600
 subscription_expire_interval = 600
 traffic_persist_interval_sec = 3600
+# Lite tariff: how often lite subscriptions are checked against their
+# traffic limit (default 300).
+# traffic_limit_interval_sec = 300
+# Lite tariff: reissue a connection when it stays above the per-connection
+# device limit for device_limit_max_ticks consecutive ticks (defaults:
+# disabled, 60s interval, 3 ticks).
+# device_limit_enabled = false
+# device_limit_interval_sec = 60
+# device_limit_max_ticks = 3
 connection_expire_interval = 600
 monitor_nodes_interval = 60
 heartbeat_node_offline_threshold_sec = 120
