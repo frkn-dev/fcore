@@ -37,7 +37,7 @@ pub enum Instance {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SubscriptionResponse {
     pub id: uuid::Uuid,
-    pub expires: DateTime<Utc>,
+    pub expires: Option<DateTime<Utc>>,
     pub days: i64,
     pub ref_code: String,
     pub locations: Vec<EnvInfo>,

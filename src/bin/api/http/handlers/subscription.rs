@@ -459,7 +459,7 @@ where
     let plan_kind = sub.plan_kind();
     let created_at = sub.created_at();
     let sub_id = sub.id();
-    let expires = sub.expires_at().unwrap_or_default();
+    let expires = sub.expires_at();
     let days = sub.days_remaining().unwrap_or(0);
     let ref_code = sub.refer_code();
 
