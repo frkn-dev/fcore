@@ -148,8 +148,10 @@ fn is_valid_activation_email(email: Option<&str>) -> bool {
 /// Post activate key
 /// If subscription_id is not provided, a new subscription is created using the key's days
 /// and default connections are created for the configured envs/tags.
-/// Lite keys grant traffic instead of days: they require an email, create a
-/// subscription with expires_at NULL and connections only in the lite env.
+/// Lite keys grant traffic instead of days: they create a subscription with
+/// expires_at NULL and connections from lite_enabled_conns (falling back to
+/// enabled_conns). Email is optional: when present, it is bound to the
+/// subscription via mrkting.
 pub async fn post_activate_key_handler<N, C, S>(
     req: ActivateKeyReq,
     trace_id_header: Option<String>,
@@ -158,7 +160,7 @@ pub async fn post_activate_key_handler<N, C, S>(
     awg_network: fcore::IpAddrMask,
     awg_mobile_network: Option<fcore::IpAddrMask>,
     enabled_conns: Option<std::collections::HashMap<Env, Vec<Tag>>>,
-    lite_env: Option<Env>,
+    lite_conns: Option<std::collections::HashMap<Env, Vec<Tag>>>,
     mrkting: Option<crate::config::MrktingConfig>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -184,12 +186,6 @@ where
 
     if key.activated {
         return Ok(http::bad_request("Key already activated"));
-    }
-
-    // Lite keys bind the new subscription to an account via mrkting, so an
-    // email is mandatory. Standard keys ignore the email field.
-    if key.kind == KeyKind::Lite && !is_valid_activation_email(req.email.as_deref()) {
-        return Ok(http::bad_request("email_required"));
     }
 
     let sub_id = match req.subscription_id {
@@ -272,27 +268,9 @@ where
             }
 
             match key.kind {
-                // Lite subs get connections only in the dedicated lite env,
-                // picked from enabled_conns. Without lite_env configured no
-                // connections are created at all.
+                // Lite subs get connections from lite_enabled_conns; the
+                // fallback to the full enabled_conns is resolved in routes.
                 KeyKind::Lite => {
-                    let lite_conns = match &lite_env {
-                        Some(env) => enabled_conns.as_ref().map(|conns| {
-                            conns
-                                .iter()
-                                .filter(|(e, _)| *e == env)
-                                .map(|(e, tags)| (e.clone(), tags.clone()))
-                                .collect::<std::collections::HashMap<Env, Vec<Tag>>>()
-                        }),
-                        None => {
-                            tracing::warn!(
-                                "service.lite_env is not configured: no connections created for lite sub {}",
-                                sub_id
-                            );
-                            None
-                        }
-                    };
-
                     ensure_enabled_connections(
                         sub_id,
                         &lite_conns,
@@ -363,10 +341,14 @@ where
                 }
             }
 
-            // Bind the email to the lite subscription via mrkting. A failure
-            // here must not roll back the activation.
+            // Bind the email to the lite subscription via mrkting when one
+            // was provided. A failure here must not roll back the activation.
             if key.kind == KeyKind::Lite {
-                match (&mrkting, req.email.as_deref()) {
+                let email = req
+                    .email
+                    .as_deref()
+                    .filter(|e| is_valid_activation_email(Some(e)));
+                match (&mrkting, email) {
                     (Some(mrkting), Some(email)) => {
                         let client = reqwest::Client::new();
                         let url = format!("{}/account", mrkting.endpoint.trim_end_matches('/'));
@@ -411,12 +393,13 @@ where
                             }
                         }
                     }
-                    _ => {
+                    (None, Some(_)) => {
                         tracing::error!(
                             "mrkting is not configured: email not bound for lite sub {}",
                             sub_id
                         );
                     }
+                    _ => {}
                 }
             }
 

@@ -586,13 +586,11 @@ where
             .and_then(post_key_handler);
 
         let enabled_conns = params.enabled_conns.clone();
+        let lite_conns = params
+            .lite_enabled_conns
+            .clone()
+            .or_else(|| params.enabled_conns.clone());
         let mrkting_config = params.mrkting.clone();
-        // Matches the Env parsing of enabled_conns keys: known envs by name,
-        // anything else is a custom env (e.g. "lite-prod").
-        let lite_env = params
-            .lite_env
-            .as_ref()
-            .map(|s| Env::from_str(s).unwrap_or_else(|_| Env::Custom(s.clone())));
 
         let post_activate_key_route = warp::post()
             .and(warp::path("key"))
@@ -608,7 +606,7 @@ where
                 move || net.clone()
             }))
             .and(warp::any().map(move || enabled_conns.clone()))
-            .and(warp::any().map(move || lite_env.clone()))
+            .and(warp::any().map(move || lite_conns.clone()))
             .and(warp::any().map(move || mrkting_config.clone()))
             .and_then(post_activate_key_handler);
 
