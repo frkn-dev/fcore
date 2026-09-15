@@ -264,8 +264,8 @@ pub struct ActivateKeyReq {
     pub code: String,
     pub subscription_id: Option<uuid::Uuid>,
     pub limit_bytes: Option<i64>,
-    /// Required for lite keys: fcore binds it to the subscription via
-    /// mrkting's POST /account. Ignored for standard keys.
+    /// Optional for lite keys: when present, fcore binds it to the
+    /// subscription via mrkting's POST /account. Ignored for standard keys.
     pub email: Option<String>,
 }
 
