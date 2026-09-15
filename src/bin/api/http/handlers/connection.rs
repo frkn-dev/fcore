@@ -116,6 +116,7 @@ pub async fn create_connection_inner<N, C, S>(
     days: Option<u16>,
     label: Option<String>,
     node_id: Option<uuid::Uuid>,
+    issued_via: Option<String>,
     memory: &MemSync<N, C, S>,
     wg_network: &IpAddrMask,
     awg_network: &IpAddrMask,
@@ -219,7 +220,7 @@ where
 
     let messages = vec![msg];
 
-    match SyncOp::add_conn(memory, &conn_id, conn.clone(), label, node_id).await {
+    match SyncOp::add_conn(memory, &conn_id, conn.clone(), label, node_id, issued_via).await {
         Ok(Status::Ok(id)) => {
             let bytes = match rkyv::to_bytes::<_, 1024>(&messages) {
                 Ok(b) => b,
@@ -372,6 +373,7 @@ pub async fn ensure_enabled_connections<N, C, S>(
                 None,
                 None,
                 None,
+                None,
                 memory,
                 wg_network,
                 awg_network,
@@ -480,6 +482,7 @@ where
         conn_req.days,
         conn_req.normalized_label(),
         conn_req.node_id,
+        None,
         &memory,
         &wg_network,
         &awg_network,

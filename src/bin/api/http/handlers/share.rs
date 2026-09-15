@@ -494,6 +494,7 @@ where
         None,
         Some(label.clone()),
         None,
+        Some(ISSUED_VIA_SHARE.to_string()),
         memory,
         wg_network,
         awg_network,
@@ -509,17 +510,6 @@ where
             return Err(http::internal_error(&msg).into_response());
         }
     };
-
-    if let Err(e) = memory
-        .db
-        .conn()
-        .set_issued_via(&child_id, ISSUED_VIA_SHARE)
-        .await
-    {
-        error!("share mint: issued_via flag failed for sub {}: {}", sub_id, e);
-        delete_child_connection(memory, &child_id, child).await;
-        return Err(http::internal_error("share mint failed").into_response());
-    }
 
     {
         let mut mem = memory.memory.write().await;
