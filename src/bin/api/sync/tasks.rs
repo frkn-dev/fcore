@@ -84,6 +84,7 @@ where
         conn: Connection,
         label: Option<String>,
         node_id: Option<uuid::Uuid>,
+        issued_via: Option<String>,
     ) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
     async fn delete_connection(
@@ -276,6 +277,7 @@ where
         conn: Connection,
         label: Option<String>,
         node_id: Option<uuid::Uuid>,
+        issued_via: Option<String>,
     ) -> SyncResult<Status> {
         info!("Adding connection: {}", conn_id);
 
@@ -289,6 +291,7 @@ where
         let mut conn_row: ConnRow = (*conn_id, conn.clone()).into();
         conn_row.label = label.clone();
         conn_row.node_id = node_id;
+        conn_row.issued_via = issued_via;
 
         // Insert into database first
         if let Err(e) = self.db.conn().insert(conn_row).await {

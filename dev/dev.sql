@@ -326,3 +326,14 @@ alter table nodes add column node_ips text[];
 -- refuse to start with a keepalive in [Interface]. NULL = clients get the
 -- default 25.
 alter table inbounds add column keepalive integer;
+
+-- Share children are extra connections on the same (subscription, env,
+-- proto) as their source: the single-proto uniqueness must not count them.
+-- issued_via is now written at insert time (SyncOp::add_conn), so the
+-- partial index can simply skip share-issued rows.
+DROP INDEX IF EXISTS connections_single_proto_idx;
+CREATE UNIQUE INDEX connections_single_proto_idx
+    ON connections (subscription_id, env, proto)
+    WHERE is_deleted = false
+      AND proto NOT IN ('wireguard', 'amnezia_wg', 'amnezia_wg_mobile')
+      AND issued_via IS DISTINCT FROM 'share';

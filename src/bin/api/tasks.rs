@@ -505,6 +505,7 @@ where
                     None,
                     None,
                     None,
+                    None,
                     &self.sync,
                     &self.settings.service.wireguard_network,
                     &self.settings.service.amnezia_wireguard_network,
