@@ -239,8 +239,25 @@ where
     subscription_audit::log_transaction_start(sub_id, Some(key.days as i64));
 
     let add_days_status = match key.kind {
-        // Lite subs get no days: the limit was set at creation.
-        KeyKind::Lite => Ok(Status::Updated(sub_id)),
+        // Lite subs get no days: the limit was set at creation for a new sub,
+        // and added here for an existing one (top-up with a lite key).
+        KeyKind::Lite => match req.subscription_id {
+            None => Ok(Status::Updated(sub_id)),
+            Some(_) => {
+                SyncOp::add_limit_bytes(
+                    &memory,
+                    &sub_id,
+                    key.traffic_bytes.unwrap_or(0),
+                    &key.id,
+                )
+                .instrument(subscription_audit::transaction_span(
+                    "key_activate_lite_topup",
+                    sub_id,
+                    Some(trace_id),
+                ))
+                .await
+            }
+        },
         KeyKind::Standard => {
             SyncOp::add_days(
                 &memory,
