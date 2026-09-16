@@ -129,6 +129,14 @@ where
             }
         });
 
+        spawn_task("reconcile_enabled_connections", {
+            let interval = self.settings.tasks.conns_reconcile_interval_sec;
+            let service = Arc::clone(&self);
+            async move {
+                service.reconcile_enabled_connections(interval).await;
+            }
+        });
+
         spawn_task("periodic_db_sync", {
             let interval = self.settings.tasks.db_sync_interval_sec;
             let service = Arc::clone(&self);

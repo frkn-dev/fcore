@@ -12,7 +12,7 @@ use fcore::{
 };
 
 use super::{
-    http::handlers::connection::create_connection_inner,
+    http::handlers::connection::{create_connection_inner, ensure_enabled_connections},
     mrkting,
     postgres::{connection::ConnWatermark, pg::Tasks as MemoryCacheTasks},
     service::{Cache, Service},
@@ -35,6 +35,7 @@ pub trait Tasks {
     async fn persist_connection_traffic(&self, interval_sec: u64);
     async fn enforce_traffic_limits(&self, interval_sec: u64);
     async fn enforce_device_limit(&self, interval_sec: u64, max_ticks: u32);
+    async fn reconcile_enabled_connections(&self, interval_sec: u64);
 }
 
 #[async_trait::async_trait]
@@ -308,6 +309,95 @@ where
                         error!("Failed to restore expired connection {}: {:?}", sub_id, e);
                     }
                 }
+            }
+        }
+    }
+
+    /// Reconcile subscriptions against enabled_conns / lite_enabled_conns:
+    /// any missing (env, proto) connection is created. Soft-deleted
+    /// connections are not recreated here — restore_subscriptions revives
+    /// them; this task only fills genuinely absent pairs (e.g. lost after a
+    /// config change or a failed activation).
+    async fn reconcile_enabled_connections(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            debug!("Run reconcile enabled connections task");
+
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
+            let enabled_conns = self.settings.service.enabled_conns.clone();
+            let lite_conns = self
+                .settings
+                .service
+                .lite_enabled_conns
+                .clone()
+                .or_else(|| enabled_conns.clone());
+
+            if enabled_conns.is_none() {
+                continue;
+            }
+
+            // (sub_id, use_lite_map, needs_balance_check) — same selection as
+            // restore_subscriptions: active subs, plus time-expired subs
+            // living on their traffic balance (traffic mode).
+            let subs: Vec<(uuid::Uuid, bool, bool)> = {
+                let mem = self.sync.memory.read().await;
+                mem.subscriptions
+                    .iter()
+                    .filter_map(|(id, sub)| {
+                        if sub.is_active() {
+                            Some((*id, sub.plan_kind() == PlanKind::Lite, false))
+                        } else if traffic_mode_enabled && !sub.is_deleted() && sub.time_expired()
+                        {
+                            Some((*id, true, true))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
+            for (sub_id, use_lite_map, balance_check) in subs {
+                if balance_check {
+                    match self.sync.db.traffic().total_for_subscription(sub_id).await {
+                        Ok((uplink, downlink)) => {
+                            let remaining = {
+                                let mem = self.sync.memory.read().await;
+                                mem.subscriptions
+                                    .find_by_id(&sub_id)
+                                    .and_then(|s| s.remaining_bytes(uplink + downlink))
+                            };
+                            match remaining {
+                                Some(r) if r > 0 => {}
+                                _ => continue,
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to load traffic total for subscription {}: {}",
+                                sub_id, e
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                let conns_map = if use_lite_map {
+                    &lite_conns
+                } else {
+                    &enabled_conns
+                };
+
+                ensure_enabled_connections(
+                    sub_id,
+                    conns_map,
+                    &self.sync,
+                    &self.settings.service.wireguard_network,
+                    &self.settings.service.amnezia_wireguard_network,
+                    &self.settings.service.amnezia_wireguard_mobile_network,
+                )
+                .await;
             }
         }
     }

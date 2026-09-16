@@ -77,6 +77,9 @@ traffic_persist_interval_sec = 3600
 # disabled, 60s interval, 3 ticks).
 # device_limit_enabled = false
 # device_limit_interval_sec = 60
+# Reconcile subscriptions against enabled_conns/lite_enabled_conns: creates
+# any missing (env, proto) connection (default 3600).
+# conns_reconcile_interval_sec = 3600
 # device_limit_max_ticks = 3
 connection_expire_interval = 600
 monitor_nodes_interval = 60
