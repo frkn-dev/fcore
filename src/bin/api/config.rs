@@ -187,6 +187,10 @@ pub struct TasksConfig {
     pub device_limit_interval_sec: u64,
     #[serde(default = "default_device_limit_max_ticks")]
     pub device_limit_max_ticks: u32,
+    /// How often subscriptions are reconciled against enabled_conns /
+    /// lite_enabled_conns: any missing (env, proto) connection is created.
+    #[serde(default = "default_conns_reconcile_interval_sec")]
+    pub conns_reconcile_interval_sec: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -257,4 +261,8 @@ fn default_device_limit_interval_sec() -> u64 {
 
 fn default_device_limit_max_ticks() -> u32 {
     3
+}
+
+fn default_conns_reconcile_interval_sec() -> u64 {
+    3600
 }
