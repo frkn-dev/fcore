@@ -63,6 +63,10 @@ impl PgTraffic {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
+        // Only count traffic for connections that are still live — deleted
+        // connections (e.g. exhausted and soft-deleted) keep receiving metric
+        // reports from nodes that don't know about the deletion, which would
+        // make used_bytes drift above the limit forever and confuse the UI.
         let row = client
             .query_one(
                 r#"
@@ -71,6 +75,7 @@ impl PgTraffic {
                     COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
                 FROM connection_traffic
                 WHERE subscription_id = $1 AND period = 'day'
+                  AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
                 "#,
                 &[&subscription_id],
             )
