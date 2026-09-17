@@ -18,7 +18,7 @@ use super::{
     service::{Cache, Service},
     subscription_audit,
     sync::tasks::{
-        SyncOp, DELETE_REASON_DEVICE_KICK, DELETE_REASON_EXPIRED,
+        SyncOp, publish_conn_delete, DELETE_REASON_DEVICE_KICK, DELETE_REASON_EXPIRED,
         DELETE_REASON_TRAFFIC_EXHAUSTED,
     },
     traffic,
@@ -36,6 +36,7 @@ pub trait Tasks {
     async fn enforce_traffic_limits(&self, interval_sec: u64);
     async fn enforce_device_limit(&self, interval_sec: u64, max_ticks: u32);
     async fn reconcile_enabled_connections(&self, interval_sec: u64);
+    async fn republish_conn_deletes(&self, interval_sec: u64);
 }
 
 #[async_trait::async_trait]
@@ -318,7 +319,53 @@ where
     /// connections are not recreated here — restore_subscriptions revives
     /// them; this task only fills genuinely absent pairs (e.g. lost after a
     /// config change or a failed activation).
+    /// Re-publish ZMQ delete messages for recently deleted connections.
+    /// The bus is one-shot pub/sub: a node that was offline/reconnecting at
+    /// the moment of the original delete keeps the peer alive in the kernel
+    /// and keeps burning traffic (traffic_exhausted users stay online). The
+    /// nodes' remove_peer is idempotent, so rebroadcasting is safe.
+    async fn republish_conn_deletes(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            debug!("Run republish conn deletes task");
+
+            let cutoff = Utc::now() - chrono::Duration::hours(24);
+            let stale: Vec<(uuid::Uuid, Connection)> = {
+                let mem = self.sync.memory.read().await;
+                mem.connections
+                    .iter()
+                    .filter(|(_, c)| c.get_deleted() && c.get_modified_at() > cutoff)
+                    .map(|(id, c)| (*id, c.clone()))
+                    .collect()
+            };
+
+            if stale.is_empty() {
+                continue;
+            }
+
+            let mut republished = 0usize;
+            for (conn_id, conn) in stale {
+                match publish_conn_delete(&self.sync, &conn_id, &conn.into()).await {
+                    Ok(()) => republished += 1,
+                    Err(e) => error!("Tombstone republish failed for {}: {:?}", conn_id, e),
+                }
+            }
+
+            if republished > 0 {
+                info!("Republished {} delete tombstones", republished);
+            }
+        }
+    }
+
     async fn reconcile_enabled_connections(&self, interval_sec: u64) {
+        // The memory cache is still empty at boot (get_state_from_db runs
+        // concurrently). tokio::time::interval fires the first tick
+        // immediately — without this delay the first pass would see zero
+        // connections and try to recreate everything, hitting unique
+        // violations in the DB.
+        tokio::time::sleep(Duration::from_secs(120)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
 
         loop {

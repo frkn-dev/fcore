@@ -137,6 +137,14 @@ where
             }
         });
 
+        spawn_task("republish_conn_deletes", {
+            let interval = self.settings.tasks.tombstone_republish_interval_sec;
+            let service = Arc::clone(&self);
+            async move {
+                service.republish_conn_deletes(interval).await;
+            }
+        });
+
         spawn_task("periodic_db_sync", {
             let interval = self.settings.tasks.db_sync_interval_sec;
             let service = Arc::clone(&self);

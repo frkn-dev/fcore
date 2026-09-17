@@ -116,9 +116,71 @@ where
     ) -> SyncResult<Vec<uuid::Uuid>>;
 }
 
-#[async_trait::async_trait]
-impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>
+/// Publish the ZMQ delete message for a connection. Shared by
+/// delete_connection and the tombstone rebroadcast task: the bus is
+/// fire-and-forget pub/sub, so a node that misses the one-shot delete keeps
+/// the peer alive forever. Nodes treat remove_peer of an absent peer as a
+/// no-op, making republish safe.
+pub(crate) async fn publish_conn_delete<N, C, S>(
+    sync: &MemSync<N, C, S>,
+    conn_id: &uuid::Uuid,
+    conn: &C,
+) -> SyncResult<()>
 where
+    N: NodeStorageOperations + Send + Sync + Clone + 'static,
+    C: ConnectionBaseOperations
+        + ConnectionApiOperations
+        + Send
+        + Sync
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+{
+    let msg = vec![conn.as_delete_message(conn_id)];
+
+    // Read the node pin: a pinned conn's delete must go to the pin's Init
+    // topic, never to the env-wide Updates broadcast.
+    let pin = {
+        let memory = sync.memory.read().await;
+        memory.conn_nodes.get(conn_id).copied()
+    };
+
+    let topic = if conn.get_token().is_some() {
+        // H2 token conns stay on Auth; pinning is never exposed for H2.
+        Topic::Auth
+    } else if !conn.get_proto().is_mtproto() {
+        match pin {
+            Some(pin) => Topic::Init(pin),
+            None => conn.get_env().into(),
+        }
+    } else {
+        conn.get_env().into()
+    };
+
+    match rkyv::to_bytes::<_, 1024>(&msg) {
+        Ok(bytes) => {
+            info!("Publishing delete command to topic: {}", topic);
+            if let Err(e) = sync.publisher.send_binary(&topic, bytes.as_ref()).await {
+                error!(
+                    "NETWORK ERROR: Failed to send delete signal for {} to bus: {:?}",
+                    conn_id, e
+                );
+                return Err(SyncError::Zmq(e));
+            }
+        }
+        Err(e) => {
+            error!("SERIALIZATION ERROR for connection {}: {:?}", conn_id, e);
+            return Err(SyncError::RkyvSerialize(e));
+        }
+    }
+
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
     N: NodeStorageOperations + Send + Sync + Clone + 'static,
     C: ConnectionBaseOperations
         + ConnectionApiOperations
@@ -377,46 +439,7 @@ where
         }
         debug!("Connection {} successfully removed from database", conn_id);
 
-        let msg = vec![conn.as_delete_message(conn_id)];
-
-        // Read the node pin before it is removed from the side map below:
-        // on a node Action::Create and Action::Update are handled
-        // identically, so a pinned conn's delete must go to the pin's Init
-        // topic, never to the env-wide Updates broadcast.
-        let pin = {
-            let memory = self.memory.read().await;
-            memory.conn_nodes.get(conn_id).copied()
-        };
-
-        let topic = if conn.get_token().is_some() {
-            // H2 token conns stay on Auth; pinning is never exposed for H2.
-            Topic::Auth
-        } else if !conn.get_proto().is_mtproto() {
-            match pin {
-                Some(pin) => Topic::Init(pin),
-                None => conn.get_env().into(),
-            }
-        } else {
-            conn.get_env().into()
-        };
-
-        match rkyv::to_bytes::<_, 1024>(&msg) {
-            Ok(bytes) => {
-                info!("Publishing delete command to topic: {}", topic);
-                if let Err(e) = self.publisher.send_binary(&topic, bytes.as_ref()).await {
-                    error!(
-                        "NETWORK ERROR: Failed to send delete signal for {} to bus: {:?}",
-                        conn_id, e
-                    );
-
-                    return Err(SyncError::Zmq(e));
-                }
-            }
-            Err(e) => {
-                error!("SERIALIZATION ERROR for connection {}: {:?}", conn_id, e);
-                return Err(SyncError::RkyvSerialize(e));
-            }
-        }
+        publish_conn_delete(self, conn_id, conn).await?;
 
         {
             let mut memory = self.memory.write().await;
