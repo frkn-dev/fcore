@@ -191,6 +191,10 @@ pub struct TasksConfig {
     /// lite_enabled_conns: any missing (env, proto) connection is created.
     #[serde(default = "default_conns_reconcile_interval_sec")]
     pub conns_reconcile_interval_sec: u64,
+    /// How often ZMQ delete messages are re-published for recently deleted
+    /// connections (heals nodes that missed the one-shot delete).
+    #[serde(default = "default_tombstone_republish_interval_sec")]
+    pub tombstone_republish_interval_sec: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -264,5 +268,9 @@ fn default_device_limit_max_ticks() -> u32 {
 }
 
 fn default_conns_reconcile_interval_sec() -> u64 {
+    3600
+}
+
+fn default_tombstone_republish_interval_sec() -> u64 {
     3600
 }
