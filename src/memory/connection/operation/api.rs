@@ -100,7 +100,9 @@ impl Operations for Conn {
         let expires_at = self.expires_at;
 
         let wg = match &self.proto {
-            Proto::Wireguard { param, .. } => Some(param.clone()),
+            Proto::Wireguard { param }
+            | Proto::AmneziaWg { param }
+            | Proto::AmneziaWgMobile { param } => Some(param.clone()),
             _ => None,
         };
 
