@@ -137,6 +137,7 @@ impl PgTraffic {
                     COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
                 FROM connection_traffic
                 WHERE subscription_id = $1 AND period = 'day'
+                  AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
                 GROUP BY env
                 "#,
                 &[&subscription_id],
@@ -215,6 +216,7 @@ impl PgTraffic {
                     COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
                 FROM connection_traffic
                 WHERE subscription_id = $1 AND period = $2 AND bucket = $3
+                  AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
                 GROUP BY env
                 "#,
                 &[&subscription_id, &period, &bucket],

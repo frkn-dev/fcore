@@ -396,6 +396,7 @@ impl PgConn {
                     COALESCE(last_traffic_persist_at, created_at) AS last_traffic_persist_at
                 FROM connections
                 WHERE subscription_id = $1
+                  AND NOT is_deleted
                 "#,
                 &[&subscription_id],
             )
