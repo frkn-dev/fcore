@@ -227,8 +227,7 @@ impl PgConn {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
-        let query =
-            "UPDATE connections SET is_deleted = true, deleted_reason = $2 WHERE id = $1";
+        let query = "UPDATE connections SET is_deleted = true, deleted_reason = $2 WHERE id = $1";
 
         client.execute(query, &[conn_id, &reason]).await?;
 
@@ -338,12 +337,14 @@ impl PgConn {
         match result {
             Ok(_) => Ok(()),
             Err(e) => {
-                if let Some(code) = e.code() {
-                    if code == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
                         return Err(Error::Custom(format!(
-                            "Connection {} already exists",
-                            conn.conn_id
-                        )));
+                    "Unique violation inserting connection {}: constraint={:?}, detail={:?}",
+                    conn.conn_id,
+                    db_err.constraint(),
+                    db_err.detail(),
+                )));
                     }
                 }
 
