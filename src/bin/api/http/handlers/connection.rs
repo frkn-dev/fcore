@@ -257,19 +257,37 @@ where
     }
 }
 
-/// (env, tag) pairs already covered by the subscription's *default*
-/// (unlabeled) connections. Labeled connections are user-named devices:
-/// a named "Мама Wireguard" must not count as "a default WG connection
-/// already exists" when the renewal/activation top-up runs.
+/// (env, tag) pairs already covered by the subscription's connections for
+/// the ensure/top-up flow. Share children are excluded (they are hidden
+/// extras minted for recipients). For single-proto tags (everything except
+/// the WireGuard family) ANY non-share conn — labeled or not — occupies the
+/// pair: the `connections_single_proto_idx` unique index counts labeled
+/// devices too, and trying to create a second one fails with a unique
+/// violation. For WireGuard-family tags multiple conns are allowed, so only
+/// unlabeled (default) conns count: a named "Мама Wireguard" must not stop
+/// the top-up from creating the default.
 pub(crate) fn existing_default_pairs(
     conns: &[(uuid::Uuid, fcore::Env, Tag)],
     labels: &std::collections::HashMap<uuid::Uuid, String>,
+    share_conns: &std::collections::HashSet<uuid::Uuid>,
 ) -> std::collections::HashSet<(fcore::Env, Tag)> {
     conns
         .iter()
-        .filter(|(conn_id, _, _)| !labels.contains_key(conn_id))
+        .filter(|(conn_id, _, tag)| {
+            !share_conns.contains(conn_id)
+                && (!labels.contains_key(conn_id) || is_single_proto(*tag))
+        })
         .map(|(_, env, tag)| (env.clone(), *tag))
         .collect()
+}
+
+/// Protos restricted to one non-deleted non-share conn per (sub, env) by the
+/// connections_single_proto_idx index.
+fn is_single_proto(tag: Tag) -> bool {
+    !matches!(
+        tag,
+        Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile
+    )
 }
 
 /// Validation for a node pin on POST /connection: the node must exist,
@@ -357,7 +375,7 @@ pub async fn ensure_enabled_connections<N, C, S>(
             .iter()
             .map(|(conn_id, conn)| (*conn_id, conn.get_env(), conn.get_proto().proto()))
             .collect();
-        existing_default_pairs(&conns, &mem.conn_labels)
+        existing_default_pairs(&conns, &mem.conn_labels, &mem.share_conns)
     };
 
     for (env, tags) in conns_map {
@@ -925,14 +943,35 @@ mod tests {
         .into_iter()
         .collect();
 
-        let pairs = existing_default_pairs(&conns, &labels);
+        let pairs = existing_default_pairs(&conns, &labels, &std::collections::HashSet::new());
 
-        // Only the unlabeled default counts: the labeled AWG/H2 devices do
-        // not cover their (env, tag) pairs, so the top-up would still
-        // create default connections for them.
+        // Unlabeled WG counts; the labeled AWG device (WireGuard family)
+        // does not cover its pair; the labeled H2 (single-proto) DOES cover
+        // its pair — the unique index counts labeled devices too.
         assert!(pairs.contains(&(Env::Ru, Tag::Wireguard)));
         assert!(!pairs.contains(&(Env::Ru, Tag::AmneziaWg)));
+        assert!(pairs.contains(&(Env::Ru, Tag::Hysteria2)));
+        assert_eq!(pairs.len(), 2);
+    }
+
+    #[test]
+    fn test_existing_default_pairs_excludes_share_children() {
+        let share_child = uuid::Uuid::new_v4();
+        let default_h2 = uuid::Uuid::new_v4();
+
+        let conns = vec![
+            (share_child, Env::Ru, Tag::Hysteria2),
+            (default_h2, Env::Dev, Tag::Hysteria2),
+        ];
+
+        let share_conns: std::collections::HashSet<uuid::Uuid> =
+            [share_child].into_iter().collect();
+
+        let pairs = existing_default_pairs(&conns, &HashMap::new(), &share_conns);
+
+        // A share child does not block the default for the same pair.
         assert!(!pairs.contains(&(Env::Ru, Tag::Hysteria2)));
+        assert!(pairs.contains(&(Env::Dev, Tag::Hysteria2)));
         assert_eq!(pairs.len(), 1);
     }
 
@@ -941,7 +980,7 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let conns = vec![(id, Env::Dev, Tag::Mtproto)];
 
-        let pairs = existing_default_pairs(&conns, &HashMap::new());
+        let pairs = existing_default_pairs(&conns, &HashMap::new(), &std::collections::HashSet::new());
 
         assert!(pairs.contains(&(Env::Dev, Tag::Mtproto)));
         assert_eq!(pairs.len(), 1);
