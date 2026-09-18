@@ -722,7 +722,7 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
     async fn update_sub(&self, sub_id: &uuid::Uuid, req: SubReq) -> SyncResult<Status> {
         info!("Updating subscription: {}", sub_id);
 
-        let (old_expires_at, updated_sub) = {
+        let (was_inactive, old_expires_at, updated_sub) = {
             let mem = self.memory.read().await;
 
             let sub = match mem.subscriptions.find_by_id(sub_id) {
@@ -747,7 +747,7 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
                 updated_sub.set_limit_bytes(limit_bytes);
             }
 
-            (sub.expires_at(), updated_sub)
+            (!sub.is_active(), sub.expires_at(), updated_sub)
         };
 
         let expires_at = updated_sub
@@ -756,6 +756,8 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
                 resource: "Subscription".to_string(),
                 id: *sub_id,
             })?;
+
+        let is_active = updated_sub.is_active();
 
         subscription_audit::log_days_change(
             "updated",
@@ -795,6 +797,28 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
         {
             let mut memory = self.memory.write().await;
             memory.subscriptions.update(updated_sub);
+        }
+
+        if was_inactive && is_active {
+            info!(
+                "Restoring connections after subscription activation {}",
+                sub_id
+            );
+
+            // The subscription just got paid time, so it is not in
+            // traffic mode: revive all restorable connections.
+            match self.restore_connections_by_subscription(sub_id, None).await {
+                Ok(restored) => {
+                    debug!(
+                        "Post-update restore: {} connections restored for {}",
+                        restored.len(),
+                        sub_id
+                    );
+                }
+                Err(e) => {
+                    error!("Post-update restore FAILED for {}: {:?}", sub_id, e);
+                }
+            }
         }
 
         info!("Successfully updated subscription: {}", sub_id);
