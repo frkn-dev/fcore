@@ -722,15 +722,10 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
     async fn update_sub(&self, sub_id: &uuid::Uuid, req: SubReq) -> SyncResult<Status> {
         info!("Updating subscription: {}", sub_id);
 
-        let old_expires_at = {
+        let (old_expires_at, updated_sub) = {
             let mem = self.memory.read().await;
-            mem.subscriptions.get(sub_id).and_then(|s| s.expires_at())
-        };
 
-        {
-            let mut memory = self.memory.write().await;
-
-            let sub = match memory.subscriptions.find_by_id_mut(sub_id) {
+            let sub = match mem.subscriptions.find_by_id(sub_id) {
                 Some(s) => s,
                 None => {
                     warn!("Subscription {} not found for update", sub_id);
@@ -738,57 +733,68 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
                 }
             };
 
+            let mut updated_sub = sub.clone();
+
             if let Some(days) = req.days {
-                sub.extend(days);
+                updated_sub.extend(days);
             }
 
             if let Some(ref_code) = req.refer_code.clone() {
-                sub.set_refer_code(ref_code);
+                updated_sub.set_refer_code(ref_code);
             }
 
             if let Some(limit_bytes) = req.limit_bytes {
-                sub.set_limit_bytes(limit_bytes);
+                updated_sub.set_limit_bytes(limit_bytes);
             }
 
-            let expires_at = sub
-                .expires_at()
-                .ok_or_else(|| SyncError::InconsistentState {
-                    resource: "Subscription".to_string(),
-                    id: *sub_id,
-                })?;
+            (sub.expires_at(), updated_sub)
+        };
 
-            subscription_audit::log_days_change(
-                "updated",
+        let expires_at = updated_sub
+            .expires_at()
+            .ok_or_else(|| SyncError::InconsistentState {
+                resource: "Subscription".to_string(),
+                id: *sub_id,
+            })?;
+
+        subscription_audit::log_days_change(
+            "updated",
+            *sub_id,
+            old_expires_at,
+            Some(expires_at),
+            req.days,
+            "SyncOp::update_sub",
+        );
+
+        // -------------------------
+        // 1. DB update FIRST
+        // -------------------------
+        if let Err(e) = self
+            .db
+            .sub()
+            .update_subscription(
                 *sub_id,
-                old_expires_at,
-                Some(expires_at),
-                req.days,
-                "SyncOp::update_sub",
+                expires_at,
+                &updated_sub.refer_code(),
+                updated_sub.parent_id(),
+                updated_sub.scope_env(),
+                updated_sub.premium_token(),
+            )
+            .await
+        {
+            error!(
+                "Failed to update subscription {} in database: {}",
+                sub_id, e
             );
-
-            if let Err(e) = self
-                .db
-                .sub()
-                .update_subscription(
-                    *sub_id,
-                    expires_at,
-                    &sub.refer_code(),
-                    sub.parent_id(),
-                    sub.scope_env(),
-                    sub.premium_token(),
-                )
-                .await
-            {
-                error!(
-                    "Failed to update subscription {} in database: {}",
-                    sub_id, e
-                );
-                return Err(SyncError::Database(e));
-            }
+            return Err(SyncError::Database(e));
         }
 
-        if let Some(days) = req.days {
-            let _ = days;
+        // -------------------------
+        // 2. Memory update AFTER DB
+        // -------------------------
+        {
+            let mut memory = self.memory.write().await;
+            memory.subscriptions.update(updated_sub);
         }
 
         info!("Successfully updated subscription: {}", sub_id);
