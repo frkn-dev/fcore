@@ -135,8 +135,8 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    let expired_at: Option<DateTime<Utc>> = days
-        .map(|d| Utc::now() + chrono::Duration::days(d.into()));
+    let expired_at: Option<DateTime<Utc>> =
+        days.map(|d| Utc::now() + chrono::Duration::days(d.into()));
 
     let mem = memory.memory.read().await;
     if let Some(sub_id) = subscription_id {
@@ -284,10 +284,7 @@ pub(crate) fn existing_default_pairs(
 /// Protos restricted to one non-deleted non-share conn per (sub, env) by the
 /// connections_single_proto_idx index.
 fn is_single_proto(tag: Tag) -> bool {
-    !matches!(
-        tag,
-        Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile
-    )
+    !matches!(tag, Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile)
 }
 
 /// Validation for a node pin on POST /connection: the node must exist,
@@ -514,7 +511,10 @@ where
             Instance::Connection(conn),
         )),
         Err(msg) => {
-            if msg.contains("not found") || msg.contains("not active") || msg.contains("IP out of range") {
+            if msg.contains("not found")
+                || msg.contains("not active")
+                || msg.contains("IP out of range")
+            {
                 Ok(http::bad_request(&msg))
             } else {
                 Ok(http::internal_error(&msg))
@@ -645,9 +645,12 @@ where
 
     if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
         // Wireguard is metered: traffic mode serves it the same as Full.
-        let access =
-            resolve_serving_access(&memory.db, req.id, serving_access(sub, traffic_mode_enabled))
-                .await;
+        let access = resolve_serving_access(
+            &memory.db,
+            req.id,
+            serving_access(sub, traffic_mode_enabled),
+        )
+        .await;
         if access == ServingAccess::Expired {
             return Ok(Box::new(http::not_found(&format!(
                 "Subscription {} is expired",
@@ -744,9 +747,12 @@ where
 
     if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
         // AmneziaWG (incl. mobile) is metered: traffic mode serves it as Full.
-        let access =
-            resolve_serving_access(&memory.db, req.id, serving_access(sub, traffic_mode_enabled))
-                .await;
+        let access = resolve_serving_access(
+            &memory.db,
+            req.id,
+            serving_access(sub, traffic_mode_enabled),
+        )
+        .await;
         if access == ServingAccess::Expired {
             return Ok(Box::new(http::not_found(&format!(
                 "Subscription {} is expired",
@@ -841,9 +847,12 @@ where
     let mem = memory.memory.read().await;
 
     if let Some(sub) = mem.subscriptions.find_by_id(&req.id) {
-        let access =
-            resolve_serving_access(&memory.db, req.id, serving_access(sub, traffic_mode_enabled))
-                .await;
+        let access = resolve_serving_access(
+            &memory.db,
+            req.id,
+            serving_access(sub, traffic_mode_enabled),
+        )
+        .await;
         match access {
             ServingAccess::Full => {}
             // Mtproto has no per-connection traffic accounting.
@@ -916,7 +925,6 @@ where
     }))))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{existing_default_pairs, pinned_to, sync_conn_visible, validate_node_pin};
@@ -980,7 +988,8 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let conns = vec![(id, Env::Dev, Tag::Mtproto)];
 
-        let pairs = existing_default_pairs(&conns, &HashMap::new(), &std::collections::HashSet::new());
+        let pairs =
+            existing_default_pairs(&conns, &HashMap::new(), &std::collections::HashSet::new());
 
         assert!(pairs.contains(&(Env::Dev, Tag::Mtproto)));
         assert_eq!(pairs.len(), 1);
@@ -1015,8 +1024,7 @@ mod tests {
         assert!(pinned_to(&conn_nodes, &conn_id, &node_b));
 
         // Pinned: visible only on the pin.
-        let conn_nodes: HashMap<uuid::Uuid, uuid::Uuid> =
-            [(conn_id, node_a)].into_iter().collect();
+        let conn_nodes: HashMap<uuid::Uuid, uuid::Uuid> = [(conn_id, node_a)].into_iter().collect();
         assert!(pinned_to(&conn_nodes, &conn_id, &node_a));
         assert!(!pinned_to(&conn_nodes, &conn_id, &node_b));
     }

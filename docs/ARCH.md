@@ -75,7 +75,7 @@ Typical write path:
 - **Periodic DB sync.** `api` reloads nodes/connections/subscriptions from Postgres on a configurable interval (`tasks.db_sync_interval_sec`) and replaces the in-memory `Cache`.
 - **Node registration.** On startup a node registers itself via `POST /node` and then calls `POST /connections/sync` for each supported tag. The API publishes all matching non-deleted connections to that node's `init-<uuid>` topic.
 - **Connection expiry.** Background tasks delete expired connections/subscriptions from DB, memory, and nodes via ZMQ `Delete` messages.
-- **Subscription restore.** When a subscription is re-activated, the restore task sends `Update` messages for previously deleted connections.
+- **Subscription restore.** When a subscription is re-activated, previously deleted connections are restored via `Update` messages — synchronously on extension (`PUT /subscription`, `add_days`) and by the periodic restore task otherwise.
 - **Node status.** Heartbeats arrive on the `metrics` topic; the API marks nodes `Online`/`Offline` in DB and memory.
 
 ## Snapshots

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tokio_postgres::Client as PgClient;
 use tokio_postgres::NoTls;
 
@@ -37,7 +38,7 @@ impl PgClientManager {
 
     async fn connect(&mut self) -> Result<()> {
         let connection_line = format!(
-            "host={} user={} dbname={} password={} port={}",
+            "host={} user={} dbname={} password={} port={} connect_timeout=5 keepalives=1 keepalives_idle=30 keepalives_interval=10 options='-c statement_timeout=30000'",
             self.config.host,
             self.config.username,
             self.config.db,
@@ -64,9 +65,18 @@ impl PgClientManager {
 
         // ping with simple query
         let client = self.client.as_mut().unwrap();
-        if let Err(e) = client.simple_query("SELECT 1").await {
-            warn!("PG ping failed: {}. Reconnecting...", e);
-            self.connect().await?;
+        match timeout(Duration::from_secs(5), client.simple_query("SELECT 1")).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                warn!("PG ping failed: {}. Reconnecting...", e);
+                self.client = None;
+                self.connect().await?;
+            }
+            Err(_) => {
+                warn!("PG ping timed out. Reconnecting...");
+                self.client = None;
+                self.connect().await?;
+            }
         }
 
         Ok(self.client.as_mut().unwrap())

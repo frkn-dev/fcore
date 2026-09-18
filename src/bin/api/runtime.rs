@@ -1,4 +1,5 @@
-use futures::Future;
+use futures::{Future, FutureExt};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -17,7 +18,14 @@ where
     tokio::spawn(async move {
         info!("{name} started");
 
-        future.await;
+        if let Err(panic) = AssertUnwindSafe(future).catch_unwind().await {
+            let payload = panic
+                .downcast_ref::<&str>()
+                .map(|s| *s)
+                .or_else(|| panic.downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("unknown panic payload");
+            error!("{name} panicked: {payload}");
+        }
 
         error!("{name} unexpectedly stopped");
     })
