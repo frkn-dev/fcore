@@ -10,7 +10,7 @@ use tracing::{debug, error, warn};
 
 use fcore::{
     AmneziaWgSettings, AwgInterfaceConfig, AwgObfuscationParams, H2Settings, Inbound, IpAddrMask,
-    Node, NodeStatus, NodeType, Result, WgKeys, WireguardSettings,
+    Node, NodeStatus, NodeType, Result, Tag, WgKeys, WireguardSettings,
 };
 
 use super::pg::PgClientManager;
@@ -198,6 +198,25 @@ impl PgNode {
                 ],
             )
             .await?;
+        }
+
+        // Registration carries the full desired set of ENABLED inbounds, so
+        // a row whose tag was not sent is stale (the section was disabled in
+        // the node config) and is pruned. An empty map can arrive from a
+        // broken or hand-crafted registration — nothing at the API boundary
+        // rejects it — so pruning is skipped rather than wiping all the
+        // node's inbounds.
+        if !node.inbounds.is_empty() {
+            let sent_tags: Vec<Tag> = node.inbounds.keys().copied().collect();
+            let pruned = tx
+                .execute(
+                    "DELETE FROM inbounds WHERE node_id = $1 AND NOT (tag = ANY($2))",
+                    &[&node_id, &sent_tags],
+                )
+                .await?;
+            if pruned > 0 {
+                debug!("Pruned {} stale inbounds for node {}", pruned, node_id);
+            }
         }
 
         tx.commit().await?;
