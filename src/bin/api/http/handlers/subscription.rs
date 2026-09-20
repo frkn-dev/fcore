@@ -18,8 +18,8 @@ use fcore::http::{
 use fcore::{
     utils::get_uuid_last_octet_simple, Connection, ConnectionApiOperations,
     ConnectionBaseOperations, ConnectionStorageApiOperations, Env, Inbound, InboundClashConfig,
-    InboundConnLink, MetricStorage, NodeStorageOperations, PlanKind, Status, Subscription,
-    SubscriptionOperations, SubscriptionStorageOperations, Tag,
+    InboundConnLink, MetricStorage, NodeStatus, NodeStorageOperations, PlanKind, Status,
+    Subscription, SubscriptionOperations, SubscriptionStorageOperations, Tag,
 };
 
 use super::super::super::{
@@ -957,6 +957,9 @@ where
                 let nodes = mem.nodes.get_by_env(&env).unwrap_or_default();
 
                 for node in nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
                     // A share feed is pinned to the token's node.
                     if let Some(scope) = &share {
                         if node.uuid != scope.node_id {
@@ -996,6 +999,9 @@ where
                 }
 
                 for node in &nodes {
+                    if node.status != NodeStatus::Online {
+                        continue;
+                    }
                     // A share feed is pinned to the token's node.
                     if let Some(scope) = &share {
                         if node.uuid != scope.node_id {
