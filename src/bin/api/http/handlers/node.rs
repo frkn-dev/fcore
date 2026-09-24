@@ -48,6 +48,17 @@ where
         ));
     }
 
+    if node_req.env.is_personal() {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+                status: StatusCode::FORBIDDEN.as_u16(),
+                message: "personal env requires /private/nodes".to_string(),
+                response: None,
+            }),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+
     let node = node_req.clone().as_node();
     let node_id = node_req.uuid;
 
@@ -126,6 +137,7 @@ where
         Some(nodes) => {
             let node_response: Vec<NodeResponse> = nodes
                 .into_iter()
+                .filter(|node| !node.env.is_personal())
                 .map(|node| node.as_node_response())
                 .collect();
 
@@ -196,6 +208,7 @@ where
         .all()
         .unwrap_or_default()
         .into_iter()
+        .filter(|node| !node.env.is_personal())
         .map(|node| {
             let res = node.as_node_response();
             let mut ports: Vec<u16> = res.inbounds.iter().map(|i| i.port).collect();
@@ -246,6 +259,17 @@ where
     let mem = memory.memory.read().await;
 
     if let Some(node) = mem.nodes.get_by_id(&node_id) {
+        if node.env.is_personal() {
+            let response = ResponseMessage::<Option<NodeResponse>> {
+                status: StatusCode::NOT_FOUND.as_u16(),
+                message: "Node not found".to_string(),
+                response: None,
+            };
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&response),
+                StatusCode::NOT_FOUND,
+            ));
+        }
         let mut res = node.as_node_response();
 
         res.metrics = if let Some(node_metrics_map) = metrics.inner.get(&node_id) {

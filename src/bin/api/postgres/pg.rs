@@ -16,8 +16,10 @@ use super::{
     super::{config::PostgresConfig, service::Cache},
     connection::{ConnRow, PgConn},
     iap::PgIap,
+    install_token::PgInstallToken,
     keys::PgKey,
     node::PgNode,
+    node_access_token::PgNodeAccessToken,
     share::{PgShare, ISSUED_VIA_SHARE},
     subscription::PgSubscription,
     traffic::PgTraffic,
@@ -123,6 +125,14 @@ impl PgContext {
 
     pub fn share(&self) -> PgShare {
         PgShare::new(self.manager.clone())
+    }
+
+    pub fn install_token(&self) -> PgInstallToken {
+        PgInstallToken::new(self.manager.clone())
+    }
+
+    pub fn node_access_token(&self) -> PgNodeAccessToken {
+        PgNodeAccessToken::new(self.manager.clone())
     }
 }
 

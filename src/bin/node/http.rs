@@ -83,9 +83,10 @@ where
 
         tracing::debug!("POST /connections/sync Body: {:?}", req);
 
+        let token = load_runtime_token(&token);
         let res = HttpClient::new()
             .post(&endpoint_str)
-            .header("Authorization", format!("Bearer {}", token.trim()))
+            .header("Authorization", format!("Bearer {}", token))
             .json(&req)
             .send()
             .await
@@ -121,13 +122,21 @@ where
     }
 
     async fn register_node(&self, endpoint: String, token: String) -> Result<()> {
+        let token = load_runtime_token(&token);
         let node = self.node.clone();
 
         let mut endpoint_url = Url::parse(&endpoint)?;
-        endpoint_url
-            .path_segments_mut()
-            .map_err(|_| Error::Custom("Invalid API endpoint".to_string()))?
-            .push("node");
+        {
+            let mut segs = endpoint_url
+                .path_segments_mut()
+                .map_err(|_| Error::Custom("Invalid API endpoint".to_string()))?;
+            if token.starts_with("inst_") {
+                segs.push("private");
+                segs.push("nodes");
+            } else {
+                segs.push("node");
+            }
+        }
         let endpoint_str = endpoint_url.to_string();
 
         match serde_json::to_string_pretty(&node) {
@@ -151,6 +160,11 @@ where
             node_ips: node.node_ips.clone(),
         };
 
+        if token.starts_with("node_") {
+            tracing::debug!("Skipping register: durable node_ token present");
+            return Ok(());
+        }
+
         let res = HttpClient::new()
             .post(&endpoint_str)
             .header("Content-Type", "application/json")
@@ -163,6 +177,24 @@ where
         let body = res.text().await?;
         if status.is_success() || status == StatusCode::NOT_MODIFIED {
             tracing::debug!("Node is already registered: {:?}", status);
+            if token.starts_with("inst_") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(nt) = v
+                        .pointer("/response/node_token")
+                        .and_then(|x| x.as_str())
+                        .or_else(|| {
+                            v.pointer("/response/token")
+                                .and_then(|x| x.as_str())
+                        })
+                    {
+                        if let Err(e) = persist_node_token(nt) {
+                            tracing::error!("Failed to persist node_token: {}", e);
+                        } else {
+                            tracing::info!("Persisted durable node_token for later sync");
+                        }
+                    }
+                }
+            }
             Ok(())
         } else {
             tracing::error!("Registration failed: {} - {}", status, body);
@@ -172,4 +204,23 @@ where
             )))
         }
     }
+}
+
+fn runtime_token_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("api.token")
+}
+
+fn load_runtime_token(config_token: &str) -> String {
+    let path = runtime_token_path();
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        let t = t.trim();
+        if t.starts_with("node_") {
+            return t.to_string();
+        }
+    }
+    config_token.trim().to_string()
+}
+
+fn persist_node_token(token: &str) -> std::io::Result<()> {
+    std::fs::write(runtime_token_path(), token.trim())
 }

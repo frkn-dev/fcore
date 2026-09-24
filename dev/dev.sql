@@ -337,3 +337,25 @@ CREATE UNIQUE INDEX connections_single_proto_idx
     WHERE is_deleted = false
       AND proto NOT IN ('wireguard', 'amnezia_wg', 'amnezia_wg_mobile')
       AND issued_via IS DISTINCT FROM 'share';
+
+-- Private user nodes: one-time install tokens minted from the cabinet.
+-- Applied automatically at api startup (PgInstallToken::ensure_table).
+CREATE TABLE IF NOT EXISTS install_tokens (
+    token TEXT PRIMARY KEY,
+    subscription_id UUID NOT NULL,
+    scope_env TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS install_tokens_sub_active_idx
+    ON install_tokens (subscription_id)
+    WHERE used_at IS NULL AND revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS node_access_tokens (
+    token TEXT PRIMARY KEY,
+    node_uuid UUID NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
