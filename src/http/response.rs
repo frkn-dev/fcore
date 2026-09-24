@@ -62,8 +62,7 @@ pub struct SubscriptionResponse {
 }
 
 /// Kind of a subscription's private scope: `premium` — our managed premium
-/// nodes, `personal` — the owner's own node plugged into their account
-/// (future).
+/// nodes, `personal` — the owner's own node(s) under `custompersonal…` env.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ScopeKind {

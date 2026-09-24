@@ -45,8 +45,8 @@ pub fn with_metrics(
     warp::any().map(move || metrics.clone())
 }
 
-/// Authentication using either a service token or an admin token.
-/// Used for management endpoints that the admin panel calls with an admin token.
+/// Authentication using either a service token, an admin token, or a
+/// durable per-node token issued at private register (`node_…`).
 pub fn with_service_or_admin_auth(
     service_token: Arc<String>,
     admin_token: String,
@@ -64,6 +64,49 @@ pub fn with_service_or_admin_auth(
                 } else {
                     Err(warp::reject::custom(AuthError("Unauthorized".to_string())))
                 }
+            }
+        })
+        .untuple_one()
+}
+
+pub fn with_mgmt_auth<T, C, S>(
+    service_token: Arc<String>,
+    admin_token: String,
+    mem_sync: MemSync<T, C, S>,
+) -> impl Filter<Extract = (), Error = warp::Rejection> + Clone
+where
+    T: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static,
+{
+    warp::header::<String>("authorization")
+        .and(with_sync(mem_sync))
+        .and_then(move |auth_header: String, mem_sync: MemSync<T, C, S>| {
+            let service_token = service_token.clone();
+            let admin_token = admin_token.clone();
+            async move {
+                let token = auth_header.strip_prefix("Bearer ").unwrap_or("");
+                if token == service_token.as_str()
+                    || (!admin_token.is_empty() && token == admin_token)
+                {
+                    return Ok(());
+                }
+                if token.starts_with("node_") {
+                    match mem_sync.db.node_access_token().find_by_token(token).await {
+                        Ok(Some(_)) => return Ok(()),
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::error!("node token lookup failed: {}", e);
+                        }
+                    }
+                }
+                Err(warp::reject::custom(AuthError("Unauthorized".to_string())))
             }
         })
         .untuple_one()

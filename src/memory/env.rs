@@ -39,6 +39,21 @@ impl Env {
             Env::Custom(name) => Cow::Owned(format!("custom{}", name)),
         }
     }
+
+    pub fn personal_for(subscription_id: uuid::Uuid) -> Self {
+        Env::Custom(format!("personal{}", subscription_id.as_simple()))
+    }
+
+    pub fn is_personal(&self) -> bool {
+        matches!(self, Env::Custom(name) if name.starts_with("personal"))
+    }
+
+    pub fn is_frkn_shared(&self) -> bool {
+        matches!(
+            self,
+            Env::Production | Env::Experimental | Env::Dev | Env::Ru | Env::Wl
+        )
+    }
 }
 
 impl std::fmt::Display for Env {
@@ -142,8 +157,15 @@ mod tests {
     }
 
     #[test]
-    fn test_error_handling() {
-        let result = Env::from_str("invalid");
-        assert!(result.is_err());
+    fn test_personal_helpers() {
+        let id = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let env = Env::personal_for(id);
+        assert!(env.is_personal());
+        assert!(!env.is_frkn_shared());
+        assert_eq!(
+            env.to_string(),
+            "custompersonal11111111222233334444555555555555"
+        );
+        assert!(Env::from_str(&env.to_string()).unwrap().is_personal());
     }
 }

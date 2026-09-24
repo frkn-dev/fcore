@@ -16,7 +16,7 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, iap::*, key::*,
-        metrics::*, node::*, premium::*, share::*, subscription::*,
+        metrics::*, node::*, premium::*, private::*, share::*, subscription::*,
     },
     param::*,
     rejection,
@@ -59,7 +59,12 @@ where
         let admin_token = self.settings.service.admin_token.clone().unwrap_or_default();
         let mgmt_auth = with_service_or_admin_auth(
             Arc::new(self.settings.service.token.clone()),
+            admin_token.clone(),
+        );
+        let node_sync_auth = with_mgmt_auth(
+            Arc::new(self.settings.service.token.clone()),
             admin_token,
+            self.sync.clone(),
         );
 
         let params = &self.settings.service;
@@ -134,6 +139,45 @@ where
             .and(warp::body::json::<NodeRequest>())
             .and(with_sync(self.sync.clone()))
             .and_then(post_node_handler);
+
+        let private_mint_install_token_route = warp::post()
+            .and(warp::path("private"))
+            .and(warp::path("install-token"))
+            .and(warp::path::end())
+            .and(warp::body::json::<InstallTokenRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(mint_install_token_handler);
+
+        let private_register_node_route = warp::post()
+            .and(warp::path("private"))
+            .and(warp::path("nodes"))
+            .and(warp::path::end())
+            .and(warp::header::optional::<String>("authorization"))
+            .and(warp::body::json::<NodeRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(register_private_node_handler);
+
+        let private_list_nodes_route = warp::get()
+            .and(warp::path("private"))
+            .and(warp::path("nodes"))
+            .and(warp::path::end())
+            .and(warp::query::<PrivateNodesQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(list_private_nodes_handler);
+
+        let private_delete_node_route = warp::delete()
+            .and(warp::path("private"))
+            .and(warp::path("nodes"))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path::end())
+            .and(warp::query::<PrivateNodesQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(delete_private_node_handler);
+
+        let private_routes = private_mint_install_token_route
+            .or(private_register_node_route)
+            .or(private_list_nodes_route)
+            .or(private_delete_node_route);
 
         let get_clusters_route = warp::get()
             .and(warp::path("clusters"))
@@ -504,7 +548,7 @@ where
         let post_connections_sync_route = warp::path("connections")
             .and(warp::path("sync"))
             .and(warp::post())
-            .and(mgmt_auth.clone())
+            .and(node_sync_auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and_then(get_connections_handler);
@@ -926,6 +970,7 @@ where
             .or(get_node_route)
             .or(delete_node_route)
             .or(post_node_register_route)
+            .or(private_routes)
             // Cluster
             .or(get_clusters_route)
             .or(get_cluster_nodes_route)
