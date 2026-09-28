@@ -909,6 +909,8 @@ where
             tmp_mem.add_subscription(sub).await;
         }
 
+        tmp_mem.main_feed_nodes = db.private_feed().all().await?.into_iter().collect();
+
         let mut mem = self.sync.memory.write().await;
         *mem = tmp_mem;
 

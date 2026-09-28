@@ -5,6 +5,7 @@ pub(crate) mod keys;
 pub(crate) mod node;
 pub(crate) mod node_access_token;
 pub(crate) mod pg;
+pub(crate) mod private_feed;
 pub(crate) mod share;
 pub(crate) mod subscription;
 pub(crate) mod traffic;

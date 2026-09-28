@@ -62,6 +62,7 @@ where
 
         db.install_token().ensure_table().await?;
         db.node_access_token().ensure_table().await?;
+        db.private_feed().ensure_table().await?;
 
         let mem = Arc::new(RwLock::new(Cache::new()));
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;

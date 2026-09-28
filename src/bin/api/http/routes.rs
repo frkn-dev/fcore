@@ -165,6 +165,16 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(list_private_nodes_handler);
 
+        let private_feed_route = warp::post()
+            .and(warp::path("private"))
+            .and(warp::path("nodes"))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path("feed"))
+            .and(warp::path::end())
+            .and(warp::body::json::<PrivateFeedRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(set_private_feed_handler);
+
         let private_delete_node_route = warp::delete()
             .and(warp::path("private"))
             .and(warp::path("nodes"))
@@ -177,6 +187,7 @@ where
         let private_routes = private_mint_install_token_route
             .or(private_register_node_route)
             .or(private_list_nodes_route)
+            .or(private_feed_route)
             .or(private_delete_node_route);
 
         let get_clusters_route = warp::get()

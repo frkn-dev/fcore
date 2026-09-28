@@ -96,6 +96,8 @@ where
     /// `connections.node_id` column and maintained on create/delete/full
     /// reload. Absent entry = env-wide connection (current behavior).
     pub conn_nodes: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+    #[serde(default)]
+    pub main_feed_nodes: std::collections::HashSet<uuid::Uuid>,
 }
 
 impl<T: Default, C, S: Default + PartialEq> Default for Cache<T, C, S>
@@ -135,6 +137,7 @@ where
             conn_labels: std::collections::HashMap::new(),
             share_conns: std::collections::HashSet::new(),
             conn_nodes: std::collections::HashMap::new(),
+            main_feed_nodes: std::collections::HashSet::new(),
         }
     }
 }
