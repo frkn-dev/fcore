@@ -20,6 +20,7 @@ use super::{
     keys::PgKey,
     node::PgNode,
     node_access_token::PgNodeAccessToken,
+    private_feed::PgPrivateFeed,
     share::{PgShare, ISSUED_VIA_SHARE},
     subscription::PgSubscription,
     traffic::PgTraffic,
@@ -133,6 +134,10 @@ impl PgContext {
 
     pub fn node_access_token(&self) -> PgNodeAccessToken {
         PgNodeAccessToken::new(self.manager.clone())
+    }
+
+    pub fn private_feed(&self) -> PgPrivateFeed {
+        PgPrivateFeed::new(self.manager.clone())
     }
 }
 

@@ -55,6 +55,12 @@ pub struct PrivateNodesQuery {
     pub subscription_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PrivateFeedRequest {
+    pub subscription_id: Uuid,
+    pub include: bool,
+}
+
 fn unauthorized(msg: &str) -> warp::reply::WithStatus<warp::reply::Json> {
     let resp = ResponseMessage::<Option<Uuid>> {
         status: StatusCode::UNAUTHORIZED.as_u16(),
@@ -381,6 +387,71 @@ where
             status: StatusCode::OK.as_u16(),
             message: "Ok".to_string(),
             response: Some(nodes),
+        }),
+        StatusCode::OK,
+    )
+    .into_response())
+}
+
+pub async fn set_private_feed_handler<N, C, S>(
+    node_uuid: Uuid,
+    req: PrivateFeedRequest,
+    memory: MemSync<N, C, S>,
+) -> Result<impl Reply, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let env = personal_env(req.subscription_id);
+    {
+        let mem = memory.memory.read().await;
+        let Some(sub) = mem.subscriptions.find_by_id(&req.subscription_id) else {
+            return Ok(http::not_found("subscription not found").into_response());
+        };
+        if sub.is_deleted() {
+            return Ok(http::not_found("subscription not found").into_response());
+        }
+        let Some(node) = mem.nodes.get_by_id(&node_uuid) else {
+            return Ok(http::not_found("node not found").into_response());
+        };
+        if node.env != env || !node.env.is_personal() {
+            return Ok(forbidden("node is not owned by this subscription").into_response());
+        }
+    }
+
+    let saved = if req.include {
+        memory.db.private_feed().insert(node_uuid).await
+    } else {
+        memory.db.private_feed().delete(node_uuid).await
+    };
+    if let Err(e) = saved {
+        tracing::error!("private feed flag failed: {}", e);
+        return Ok(http::internal_error("db error").into_response());
+    }
+
+    {
+        let mut mem = memory.memory.write().await;
+        if req.include {
+            mem.main_feed_nodes.insert(node_uuid);
+        } else {
+            mem.main_feed_nodes.remove(&node_uuid);
+        }
+    }
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+            status: StatusCode::OK.as_u16(),
+            message: "Ok".to_string(),
+            response: Some(IdResponse { id: node_uuid }),
         }),
         StatusCode::OK,
     )

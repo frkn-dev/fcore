@@ -808,6 +808,10 @@ where
     .await
 }
 
+pub(crate) fn personal_on_general_list(personal: bool, included: bool, general: bool) -> bool {
+    !general || !personal || included
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn subscription_feed_inner<N, C, S>(
     req: SubscriptionInfoRequest,
@@ -968,6 +972,13 @@ where
                     }
                     // A node-pinned conn exists only on its node.
                     if !pinned_to(&mem.conn_nodes, conn_id, &node.uuid) {
+                        continue;
+                    }
+                    if !personal_on_general_list(
+                        node.env.is_personal(),
+                        mem.main_feed_nodes.contains(&node.uuid),
+                        req.conn.is_none() && share.is_none(),
+                    ) {
                         continue;
                     }
                     if let Some(inbound) = node.inbounds.get(&proto) {
@@ -1450,5 +1461,13 @@ mod tests {
             conn_link_label(&labels, &uuid::Uuid::new_v4(), "NL-1".to_string()),
             "NL-1"
         );
+    }
+
+    #[test]
+    fn personal_node_stays_off_the_general_list_until_opt_in() {
+        assert!(!super::personal_on_general_list(true, false, true));
+        assert!(super::personal_on_general_list(true, true, true));
+        assert!(super::personal_on_general_list(true, false, false));
+        assert!(super::personal_on_general_list(false, false, true));
     }
 }
