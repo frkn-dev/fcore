@@ -156,6 +156,14 @@ where
             .and(warp::body::json::<NodeRequest>())
             .and(with_sync(self.sync.clone()))
             .and(with_metrics(self.metrics.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
             .and_then(register_private_node_handler);
 
         let private_list_nodes_route = warp::get()
