@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp::http::StatusCode;
@@ -5,9 +8,9 @@ use warp::reply::Reply;
 
 use fcore::{
     http::{helpers as http, IdResponse, ResponseMessage},
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, NodeStatus,
-    NodeStorageOperations, NodeType, Status, Subscription, SubscriptionOperations,
-    SubscriptionStorageOperations,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricEnvelope,
+    MetricStorage, NodeStatus, NodeStorageOperations, NodeType, Status, Subscription,
+    SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use super::super::{
@@ -90,6 +93,29 @@ fn too_many_requests(msg: &str) -> warp::reply::WithStatus<warp::reply::Json> {
 
 fn personal_env(subscription_id: Uuid) -> Env {
     Env::personal_for(subscription_id)
+}
+
+fn refresh_env(existing: Option<&Env>, requested: &Env) -> Result<Env, &'static str> {
+    if let Some(env) = existing {
+        if !env.is_personal() {
+            return Err("refusing shared env for private node");
+        }
+        return Ok(env.clone());
+    }
+    if !requested.is_personal() {
+        return Err("personal env required");
+    }
+    Ok(requested.clone())
+}
+
+fn note_heartbeat(metrics: &MetricStorage, node_id: Uuid) {
+    metrics.insert_envelope(MetricEnvelope {
+        node_id,
+        name: "sys.heartbeat".to_string(),
+        value: 1.0,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        tags: BTreeMap::new(),
+    });
 }
 
 async fn ensure_personal_scope<N, C, S>(
@@ -219,6 +245,7 @@ pub async fn register_private_node_handler<N, C, S>(
     auth_header: Option<String>,
     mut node_req: NodeRequest,
     memory: MemSync<N, C, S>,
+    metrics: Arc<MetricStorage>,
 ) -> Result<impl Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -237,6 +264,10 @@ where
         .as_deref()
         .and_then(|h| h.strip_prefix("Bearer "))
         .unwrap_or("");
+
+    if token.starts_with("node_") {
+        return refresh_known_private_node(token, node_req, memory, metrics).await;
+    }
 
     if token.is_empty() || !token.starts_with("inst_") {
         return Ok(unauthorized("install token required").into_response());
@@ -310,6 +341,7 @@ where
 
             let _ =
                 SyncOp::update_node_status(&memory, &node_id, &node.env, NodeStatus::Online).await;
+            note_heartbeat(&metrics, node_id);
 
             Ok(warp::reply::with_status(
                 warp::reply::json(&ResponseMessage {
@@ -513,6 +545,100 @@ where
     }
 }
 
+async fn refresh_known_private_node<N, C, S>(
+    token: &str,
+    mut node_req: NodeRequest,
+    memory: MemSync<N, C, S>,
+    metrics: Arc<MetricStorage>,
+) -> Result<warp::reply::Response, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let known = match memory.db.node_access_token().find_by_token(token).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return Ok(unauthorized("invalid node token").into_response()),
+        Err(_) => return Ok(http::internal_error("db error").into_response()),
+    };
+    if known != node_req.uuid {
+        return Ok(forbidden("node uuid does not match token").into_response());
+    }
+
+    let existing_env = {
+        let mem = memory.memory.read().await;
+        mem.nodes.get_by_id(&known).map(|node| node.env)
+    };
+    if existing_env.is_none() {
+        if !node_req.env.is_personal() {
+            return Ok(http::bad_request("personal env required").into_response());
+        }
+        let mem = memory.memory.read().await;
+        let count = mem
+            .nodes
+            .get_by_env(&node_req.env)
+            .map(|nodes| nodes.len() as i64)
+            .unwrap_or(0);
+        if count >= MAX_PRIVATE_NODES_PER_SUB {
+            return Ok(too_many_requests(&format!(
+                "private node limit reached (max {})",
+                MAX_PRIVATE_NODES_PER_SUB
+            ))
+            .into_response());
+        }
+    }
+
+    let env = match refresh_env(existing_env.as_ref(), &node_req.env) {
+        Ok(env) => env,
+        Err(msg) => return Ok(http::bad_request(msg).into_response()),
+    };
+
+    if let Err(e) = node_req.validate() {
+        return Ok(http::bad_request(&e.to_string()).into_response());
+    }
+
+    node_req.env = env.clone();
+    node_req.uuid = known;
+    node_req.r#type = Some(NodeType::Node);
+    node_req.cluster = None;
+
+    let node = node_req.as_node();
+    let status = SyncOp::add_node(&memory, &known, node.clone()).await;
+    match status {
+        Ok(Status::Ok(id)) | Ok(Status::AlreadyExist(id)) | Ok(Status::NotModified(id)) => {
+            let _ =
+                SyncOp::update_node_status(&memory, &known, &node.env, NodeStatus::Online).await;
+            note_heartbeat(&metrics, known);
+            Ok(warp::reply::with_status(
+                warp::reply::json(&ResponseMessage {
+                    status: StatusCode::OK.as_u16(),
+                    message: "Ok".to_string(),
+                    response: Some(PrivateRegisterResponse {
+                        id,
+                        node_token: token.to_string(),
+                        scope_env: env.to_string(),
+                    }),
+                }),
+                StatusCode::OK,
+            )
+            .into_response())
+        }
+        Ok(_) => Ok(http::bad_request("operation not supported").into_response()),
+        Err(e) => {
+            tracing::error!("private node refresh failed: {}", e);
+            Ok(http::internal_error("register failed").into_response())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +652,15 @@ mod tests {
         assert!(env.to_string().starts_with("custompersonal"));
         assert!(!Env::Dev.is_personal());
         assert!(Env::Dev.is_frkn_shared());
+    }
+
+    #[test]
+    fn refresh_keeps_known_personal_env() {
+        let id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let personal = Env::personal_for(id);
+        assert_eq!(refresh_env(Some(&personal), &Env::Dev).unwrap(), personal);
+        assert!(refresh_env(Some(&Env::Dev), &personal).is_err());
+        assert_eq!(refresh_env(None, &personal).unwrap(), personal);
+        assert!(refresh_env(None, &Env::Dev).is_err());
     }
 }

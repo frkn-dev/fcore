@@ -155,6 +155,7 @@ where
             .and(warp::header::optional::<String>("authorization"))
             .and(warp::body::json::<NodeRequest>())
             .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
             .and_then(register_private_node_handler);
 
         let private_list_nodes_route = warp::get()

@@ -304,12 +304,45 @@ fn inbound_label(tag: Tag) -> &'static str {
     }
 }
 
+fn label_is_host(label: &str, hostname: &str, address: &str) -> bool {
+    let label = label.trim();
+    label.is_empty()
+        || label.eq_ignore_ascii_case(hostname.trim())
+        || label == address
+}
+
+fn connection_title(
+    node_label: &str,
+    hostname: &str,
+    address: &str,
+    country: &str,
+    personal: bool,
+    conn_label: Option<&str>,
+) -> String {
+    let node_label = node_label.trim();
+    if personal && label_is_host(node_label, hostname, address) {
+        if let Some(label) = conn_label.map(str::trim).filter(|l| !l.is_empty()) {
+            return label.to_string();
+        }
+        let code = country.trim();
+        if code.is_empty() {
+            return "Private".to_string();
+        }
+        return format!("{}| Private", code.to_uppercase());
+    }
+    if node_label.is_empty() {
+        return country.trim().to_uppercase();
+    }
+    node_label.to_string()
+}
+
 /// Returns the list of connections for the given protocol.
 /// For each online node with the required inbound, finds a matching connection of the subscription.
 /// A node-pinned conn (`conn_nodes`) matches only its own node.
 fn connections_for_protocol<N, C>(
     nodes: &N,
     conn_nodes: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+    conn_labels: &std::collections::HashMap<uuid::Uuid, String>,
     protocol: &str,
     conns: Option<&[(uuid::Uuid, C)]>,
 ) -> Vec<GatewayConnection>
@@ -343,11 +376,15 @@ where
                 if conn.get_env() != node.env {
                     continue;
                 }
-                let label = if node.label.is_empty() {
-                    format!("{} · {}", code, inbound_label(tag))
-                } else {
-                    format!("{} · {}", node.label, inbound_label(tag))
-                };
+                let title = connection_title(
+                    &node.label,
+                    &node.hostname,
+                    &node.address.to_string(),
+                    &code,
+                    node.env.is_personal(),
+                    conn_labels.get(conn_id).map(String::as_str),
+                );
+                let label = format!("{title} · {}", inbound_label(tag));
                 result.push(GatewayConnection {
                     connection_uuid: *conn_id,
                     node_id: node.uuid,
@@ -950,18 +987,18 @@ where
         });
     let conns_slice = conns.as_deref();
 
-    let vless_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, "vless", conns_slice);
-    let awg_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, "awg", conns_slice);
+    let vless_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "vless", conns_slice);
+    let awg_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "awg", conns_slice);
 
     // One merged service: the client must not offer a protocol choice at purchase.
     let mut connections = vless_connections;
     connections.extend(awg_connections);
     // Hysteria2 has no per-connection traffic accounting: hidden in traffic mode.
     if !traffic_mode || Tag::Hysteria2.is_metered(&metered_conns) {
-        connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "hysteria2", conns_slice));
+        connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "hysteria2", conns_slice));
     }
-    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "awg-mobile", conns_slice));
-    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, "wireguard", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "awg-mobile", conns_slice));
+    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "wireguard", conns_slice));
     let countries = available_countries_from_connections(&connections);
 
     let info = GatewayServiceInfo {
@@ -1291,6 +1328,15 @@ where
         }
     };
 
+    let service_name = connection_title(
+        &node.label,
+        &node.hostname,
+        &node.address.to_string(),
+        &node.country,
+        node.env.is_personal(),
+        mem.conn_labels.get(&conn_id).map(String::as_str),
+    );
+
     // From here on only owned clones are used; release the read lock so the
     // WireGuard branch can take a write lock for peer registration.
     drop(mem);
@@ -1398,7 +1444,7 @@ where
             "wireguard".to_string(),
         ],
         service_info: serde_json::json!({
-            "name": node.label,
+            "name": service_name,
             "type": params.service_type
         }),
         api_config: serde_json::json!({
@@ -1740,6 +1786,38 @@ mod tests {
         ] {
             assert!(v.get(field).is_none(), "{} must be omitted", field);
         }
+    }
+
+    #[test]
+    fn private_connection_title_uses_label_not_host() {
+        assert_eq!(
+            connection_title("Suomi", "fi.example", "203.0.113.7", "FI", false, None),
+            "Suomi"
+        );
+        assert_eq!(
+            connection_title("vps.example", "vps.example", "203.0.113.7", "FI", true, None),
+            "FI| Private"
+        );
+        assert_eq!(
+            connection_title("vps.example", "vps.example", "203.0.113.7", "FI", false, None),
+            "vps.example"
+        );
+        assert_eq!(
+            connection_title("CZ| Private", "vps.example", "203.0.113.7", "XX", true, None),
+            "CZ| Private"
+        );
+        assert_eq!(
+            connection_title("203.0.113.7", "vps.example", "203.0.113.7", "FI", true, Some("Кухня")),
+            "Кухня"
+        );
+        assert_eq!(
+            connection_title("Kitchen", "vps.example", "203.0.113.7", "FI", true, Some("Кухня")),
+            "Kitchen"
+        );
+        assert_eq!(
+            connection_title("", "vps.example", "203.0.113.7", "nl", false, None),
+            "NL"
+        );
     }
 }
 
