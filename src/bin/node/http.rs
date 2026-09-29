@@ -130,7 +130,7 @@ where
             let mut segs = endpoint_url
                 .path_segments_mut()
                 .map_err(|_| Error::Custom("Invalid API endpoint".to_string()))?;
-            if token.starts_with("inst_") {
+            if token.starts_with("inst_") || token.starts_with("node_") {
                 segs.push("private");
                 segs.push("nodes");
             } else {
@@ -160,11 +160,6 @@ where
             node_ips: node.node_ips.clone(),
         };
 
-        if token.starts_with("node_") {
-            tracing::debug!("Skipping register: durable node_ token present");
-            return Ok(());
-        }
-
         let res = HttpClient::new()
             .post(&endpoint_str)
             .header("Content-Type", "application/json")
@@ -191,6 +186,13 @@ where
                             tracing::error!("Failed to persist node_token: {}", e);
                         } else {
                             tracing::info!("Persisted durable node_token for later sync");
+                        }
+                    }
+                    if let Some(scope) = v.pointer("/response/scope_env").and_then(|x| x.as_str())
+                    {
+                        let toml_env = scope.strip_prefix("custom").unwrap_or(scope);
+                        if let Err(e) = std::fs::write("scope.env", toml_env) {
+                            tracing::error!("Failed to persist scope env: {}", e);
                         }
                     }
                 }

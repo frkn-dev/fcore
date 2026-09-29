@@ -400,6 +400,12 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                         .await
                     {
                         Ok(_) => {
+                            if let Some(config_path) = std::env::args().nth(1) {
+                                if adopt_private_env(&config_path, &settings.node.env) {
+                                    let _ = std::fs::remove_file(&settings.service.snapshot_path);
+                                    std::process::exit(1);
+                                }
+                            }
                             let tags: Vec<_> = node
                                 .node
                                 .inbounds
@@ -501,4 +507,54 @@ async fn wait_all_tasks_or_ctrlc(tasks: Vec<JoinHandle<()>>, shutdown_tx: broadc
             std::process::exit(0);
         }
     }
+}
+
+fn adopt_private_env(config_path: &str, current: &impl serde::Serialize) -> bool {
+    let Ok(wanted_raw) = std::fs::read_to_string("scope.env") else {
+        return false;
+    };
+    let wanted = wanted_raw.trim();
+    if wanted.is_empty() {
+        return false;
+    }
+    let Ok(current_json) = serde_json::to_string(current) else {
+        return false;
+    };
+    if wanted == current_json.trim_matches('"') {
+        return false;
+    }
+    match rewrite_node_env(config_path, wanted) {
+        Ok(()) => true,
+        Err(e) => {
+            error!("Failed to rewrite node env: {}", e);
+            false
+        }
+    }
+}
+
+fn rewrite_node_env(path: &str, env_value: &str) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut out = String::new();
+    let mut in_node = false;
+    let mut replaced = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_node = trimmed == "[node]";
+        }
+        if in_node && !replaced && trimmed.starts_with("env") && trimmed.contains('=') {
+            out.push_str(&format!("env = \"{env_value}\"\n"));
+            replaced = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !replaced {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "node env key missing",
+        ));
+    }
+    std::fs::write(path, out)
 }
