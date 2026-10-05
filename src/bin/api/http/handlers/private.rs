@@ -8,9 +8,10 @@ use warp::reply::Reply;
 
 use fcore::{
     http::{helpers as http, IdResponse, ResponseMessage},
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricEnvelope,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, ConnectionStorageApiOperations,
+    Env, IpAddrMask, MetricEnvelope,
     MetricStorage, NodeStatus, NodeStorageOperations, NodeType, Status, Subscription,
-    SubscriptionOperations, SubscriptionStorageOperations,
+    SubscriptionOperations, SubscriptionStorageOperations, Tag,
 };
 
 use super::super::{
@@ -116,6 +117,83 @@ fn note_heartbeat(metrics: &MetricStorage, node_id: Uuid) {
         timestamp: chrono::Utc::now().timestamp_millis(),
         tags: BTreeMap::new(),
     });
+}
+
+fn private_seed_tags(
+    existing_private_nodes: i64,
+    env: &Env,
+    present: &std::collections::HashSet<(Env, Tag)>,
+) -> Vec<Tag> {
+    if existing_private_nodes != 0 {
+        return Vec::new();
+    }
+    [Tag::AmneziaWg, Tag::AmneziaWgMobile, Tag::Hysteria2]
+        .into_iter()
+        .filter(|tag| !present.contains(&(env.clone(), *tag)))
+        .collect()
+}
+
+async fn seed_private_connections<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: Uuid,
+    env: &Env,
+    existing_private_nodes: i64,
+    wg_network: &IpAddrMask,
+    awg_network: &IpAddrMask,
+    awg_mobile_network: &Option<IpAddrMask>,
+) where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if existing_private_nodes != 0 {
+        return;
+    }
+
+    let present = {
+        let mem = memory.memory.read().await;
+        let conns: Vec<(Uuid, Env, Tag)> = mem
+            .connections
+            .get_by_subscription_id(&subscription_id)
+            .unwrap_or_default()
+            .iter()
+            .map(|(conn_id, conn)| (*conn_id, conn.get_env(), conn.get_proto().proto()))
+            .collect();
+        super::connection::existing_default_pairs(&conns, &mem.conn_labels, &mem.share_conns)
+    };
+
+    for tag in private_seed_tags(existing_private_nodes, env, &present) {
+        if let Err(err) = super::connection::create_connection_inner(
+            env,
+            tag,
+            Some(subscription_id),
+            None,
+            None,
+            None,
+            None,
+            memory,
+            wg_network,
+            awg_network,
+            awg_mobile_network,
+        )
+        .await
+        {
+            tracing::error!(
+                "private connection seed failed for {} {:?}: {}",
+                subscription_id,
+                tag,
+                err
+            );
+        }
+    }
 }
 
 async fn ensure_personal_scope<N, C, S>(
@@ -246,6 +324,9 @@ pub async fn register_private_node_handler<N, C, S>(
     mut node_req: NodeRequest,
     memory: MemSync<N, C, S>,
     metrics: Arc<MetricStorage>,
+    wg_network: IpAddrMask,
+    awg_network: IpAddrMask,
+    awg_mobile_network: Option<IpAddrMask>,
 ) -> Result<impl Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -290,7 +371,7 @@ where
         return Ok(http::bad_request("scope mismatch").into_response());
     }
 
-    {
+    let existing_private_nodes = {
         let mem = memory.memory.read().await;
         let count = mem
             .nodes
@@ -304,7 +385,8 @@ where
             ))
             .into_response());
         }
-    }
+        count
+    };
 
     if let Err(e) = node_req.validate() {
         return Ok(http::bad_request(&e.to_string()).into_response());
@@ -342,6 +424,16 @@ where
             let _ =
                 SyncOp::update_node_status(&memory, &node_id, &node.env, NodeStatus::Online).await;
             note_heartbeat(&metrics, node_id);
+            seed_private_connections(
+                &memory,
+                row.subscription_id,
+                &expected,
+                existing_private_nodes,
+                &wg_network,
+                &awg_network,
+                &awg_mobile_network,
+            )
+            .await;
 
             Ok(warp::reply::with_status(
                 warp::reply::json(&ResponseMessage {
@@ -662,5 +754,25 @@ mod tests {
         assert!(refresh_env(Some(&Env::Dev), &personal).is_err());
         assert_eq!(refresh_env(None, &personal).unwrap(), personal);
         assert!(refresh_env(None, &Env::Dev).is_err());
+    }
+
+    #[test]
+    fn seeds_three_protocols_only_when_no_private_nodes() {
+        let id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let env = Env::personal_for(id);
+        let none = std::collections::HashSet::new();
+        assert_eq!(
+            private_seed_tags(0, &env, &none),
+            vec![Tag::AmneziaWg, Tag::AmneziaWgMobile, Tag::Hysteria2]
+        );
+        assert!(private_seed_tags(1, &env, &none).is_empty());
+        assert!(private_seed_tags(3, &env, &none).is_empty());
+
+        let mut present = std::collections::HashSet::new();
+        present.insert((env.clone(), Tag::Hysteria2));
+        assert_eq!(
+            private_seed_tags(0, &env, &present),
+            vec![Tag::AmneziaWg, Tag::AmneziaWgMobile]
+        );
     }
 }

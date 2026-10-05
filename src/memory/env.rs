@@ -13,6 +13,7 @@ pub enum Env {
     Dev,
     Ru,
     Wl,
+    Gaming,
     #[serde(untagged)]
     Custom(String),
 }
@@ -24,6 +25,7 @@ impl Env {
             Env::Dev => b"dev".to_vec(),
             Env::Ru => b"ru".to_vec(),
             Env::Wl => b"wl".to_vec(),
+            Env::Gaming => b"gaming".to_vec(),
             Env::Production => b"production".to_vec(),
             Env::Custom(id) => format!("custom{}", id).into_bytes(),
         }
@@ -34,6 +36,7 @@ impl Env {
             Env::Dev => Cow::Borrowed("dev"),
             Env::Ru => Cow::Borrowed("ru"),
             Env::Wl => Cow::Borrowed("wl"),
+            Env::Gaming => Cow::Borrowed("gaming"),
             Env::Experimental => Cow::Borrowed("experimental"),
             Env::Production => Cow::Borrowed("production"),
             Env::Custom(name) => Cow::Owned(format!("custom{}", name)),
@@ -51,7 +54,7 @@ impl Env {
     pub fn is_frkn_shared(&self) -> bool {
         matches!(
             self,
-            Env::Production | Env::Experimental | Env::Dev | Env::Ru | Env::Wl
+            Env::Production | Env::Experimental | Env::Dev | Env::Ru | Env::Wl | Env::Gaming
         )
     }
 }
@@ -62,6 +65,7 @@ impl std::fmt::Display for Env {
             Env::Dev => write!(f, "dev"),
             Env::Ru => write!(f, "ru"),
             Env::Wl => write!(f, "wl"),
+            Env::Gaming => write!(f, "gaming"),
             Env::Experimental => write!(f, "experimental"),
             Env::Production => write!(f, "production"),
             Env::Custom(name) => write!(f, "custom{}", name),
@@ -81,6 +85,7 @@ impl FromStr for Env {
             "production" | "prod" => Ok(Env::Production),
             "ru" => Ok(Env::Ru),
             "wl" => Ok(Env::Wl),
+            "gaming" => Ok(Env::Gaming),
             s if s.starts_with("custom") => {
                 let name = s.strip_prefix("custom").unwrap_or(s).to_string();
                 Ok(Env::Custom(name))
@@ -113,6 +118,16 @@ mod tests {
         assert_eq!(Env::from_str("prod").unwrap(), Env::Production);
         assert_eq!(Env::from_str("experimental").unwrap(), Env::Experimental);
         assert_eq!(Env::from_str("ru").unwrap(), Env::Ru);
+        assert_eq!(Env::from_str("gaming").unwrap(), Env::Gaming);
+        assert_eq!(Env::from_str("GAMING").unwrap(), Env::Gaming);
+        assert!(Env::Gaming.is_frkn_shared());
+        assert!(!Env::Gaming.is_personal());
+        assert_eq!(Env::Gaming.to_string(), "gaming");
+        assert_eq!(serde_json::to_string(&Env::Gaming).unwrap(), "\"gaming\"");
+        let gaming: Env = serde_json::from_str("\"gaming\"").unwrap();
+        assert_eq!(gaming, Env::Gaming);
+        let from_str: Env = "gaming".into();
+        assert_eq!(from_str, Env::Gaming);
     }
 
     #[test]

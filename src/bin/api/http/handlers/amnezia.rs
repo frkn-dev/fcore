@@ -330,6 +330,11 @@ fn connection_title(
         }
         return format!("{}| Private", code.to_uppercase());
     }
+    if !personal {
+        if let Some(label) = conn_label.map(str::trim).filter(|l| !l.is_empty()) {
+            return label.to_string();
+        }
+    }
     if node_label.is_empty() {
         return country.trim().to_uppercase();
     }
@@ -1813,6 +1818,17 @@ mod tests {
         assert_eq!(
             connection_title("Kitchen", "vps.example", "203.0.113.7", "FI", true, Some("Кухня")),
             "Kitchen"
+        );
+        assert_eq!(
+            connection_title(
+                "Premium-a65e52c6af0e",
+                "host",
+                "203.0.113.7",
+                "CZ",
+                false,
+                Some("Телефон")
+            ),
+            "Телефон"
         );
         assert_eq!(
             connection_title("", "vps.example", "203.0.113.7", "nl", false, None),
