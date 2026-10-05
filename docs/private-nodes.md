@@ -1,7 +1,7 @@
 # Private user nodes
 
 Self-serve nodes owned by a subscription. Isolated from FRKN shared envs
-(`dev`/`ru`/`wl`/…). Auth for register: one-time install token (B).
+(`dev`/`ru`/`wl`/`gaming`/…). Auth for register: one-time install token (B).
 
 ## Flow
 
