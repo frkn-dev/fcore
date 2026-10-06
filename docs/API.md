@@ -56,7 +56,7 @@
 - **Query:**
   - `id` — UUID подписки
   - `format` — `Txt | Base64 | Clash`
-  - `env` — `all` или имя env (`production`, `experimental`, `dev`, `ru`, `wl`, `gaming`, `custom...`)
+  - `env` — `all` или имя env (`production`, `experimental`, `dev`, `ru`, `wl`, `gaming`, `bs`, `bs-prem`, `custom...`)
   - `proto` — `xray | proxy | wireguard | amneziawg | hysteria2 | vlesstcpreality | vlessgrpcreality | vlessxhttpreality | vlessxhttpcdn | mtproto`
 - **Response:**
   - `200 OK text/plain` (format=`Txt`)
