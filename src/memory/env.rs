@@ -14,6 +14,9 @@ pub enum Env {
     Ru,
     Wl,
     Gaming,
+    Bs,
+    #[serde(rename = "bs-prem")]
+    BsPrem,
     #[serde(untagged)]
     Custom(String),
 }
@@ -26,6 +29,8 @@ impl Env {
             Env::Ru => b"ru".to_vec(),
             Env::Wl => b"wl".to_vec(),
             Env::Gaming => b"gaming".to_vec(),
+            Env::Bs => b"bs".to_vec(),
+            Env::BsPrem => b"bs-prem".to_vec(),
             Env::Production => b"production".to_vec(),
             Env::Custom(id) => format!("custom{}", id).into_bytes(),
         }
@@ -37,6 +42,8 @@ impl Env {
             Env::Ru => Cow::Borrowed("ru"),
             Env::Wl => Cow::Borrowed("wl"),
             Env::Gaming => Cow::Borrowed("gaming"),
+            Env::Bs => Cow::Borrowed("bs"),
+            Env::BsPrem => Cow::Borrowed("bs-prem"),
             Env::Experimental => Cow::Borrowed("experimental"),
             Env::Production => Cow::Borrowed("production"),
             Env::Custom(name) => Cow::Owned(format!("custom{}", name)),
@@ -54,7 +61,14 @@ impl Env {
     pub fn is_frkn_shared(&self) -> bool {
         matches!(
             self,
-            Env::Production | Env::Experimental | Env::Dev | Env::Ru | Env::Wl | Env::Gaming
+            Env::Production
+                | Env::Experimental
+                | Env::Dev
+                | Env::Ru
+                | Env::Wl
+                | Env::Gaming
+                | Env::Bs
+                | Env::BsPrem
         )
     }
 }
@@ -66,6 +80,8 @@ impl std::fmt::Display for Env {
             Env::Ru => write!(f, "ru"),
             Env::Wl => write!(f, "wl"),
             Env::Gaming => write!(f, "gaming"),
+            Env::Bs => write!(f, "bs"),
+            Env::BsPrem => write!(f, "bs-prem"),
             Env::Experimental => write!(f, "experimental"),
             Env::Production => write!(f, "production"),
             Env::Custom(name) => write!(f, "custom{}", name),
@@ -86,6 +102,8 @@ impl FromStr for Env {
             "ru" => Ok(Env::Ru),
             "wl" => Ok(Env::Wl),
             "gaming" => Ok(Env::Gaming),
+            "bs" => Ok(Env::Bs),
+            "bs-prem" | "bsprem" => Ok(Env::BsPrem),
             s if s.starts_with("custom") => {
                 let name = s.strip_prefix("custom").unwrap_or(s).to_string();
                 Ok(Env::Custom(name))
@@ -128,6 +146,18 @@ mod tests {
         assert_eq!(gaming, Env::Gaming);
         let from_str: Env = "gaming".into();
         assert_eq!(from_str, Env::Gaming);
+        assert_eq!(Env::from_str("bs").unwrap(), Env::Bs);
+        assert_eq!(Env::from_str("BS-PREM").unwrap(), Env::BsPrem);
+        assert_eq!(Env::from_str("bsprem").unwrap(), Env::BsPrem);
+        assert!(Env::Bs.is_frkn_shared());
+        assert!(Env::BsPrem.is_frkn_shared());
+        assert!(!Env::BsPrem.is_personal());
+        assert_eq!(Env::BsPrem.to_string(), "bs-prem");
+        assert_eq!(serde_json::to_string(&Env::BsPrem).unwrap(), "\"bs-prem\"");
+        let prem: Env = serde_json::from_str("\"bs-prem\"").unwrap();
+        assert_eq!(prem, Env::BsPrem);
+        let topic = format!("updates-{}", Env::BsPrem);
+        assert_eq!(topic, "updates-bs-prem");
     }
 
     #[test]

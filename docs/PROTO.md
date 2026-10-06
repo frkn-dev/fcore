@@ -27,7 +27,7 @@ Each ZMQ message is a multipart message:
 |---|---|---|
 | `Auth` | `auth` | Hysteria2 token distribution and deletes. Consumed by the `auth` binary. |
 | `Metrics` | `metrics` | `MetricEnvelope` batches from nodes/auth to the API. |
-| `Updates(Env)` | `updates-<env>` | Protocol state changes targeted at nodes in a specific environment (`production`, `experimental`, `dev`, `ru`, `wl`, `gaming`, `custom…`). |
+| `Updates(Env)` | `updates-<env>` | Protocol state changes targeted at nodes in a specific environment (`production`, `experimental`, `dev`, `ru`, `wl`, `gaming`, `bs`, `bs-prem`, `custom…`). |
 | `Init(uuid)` | `init-<uuid>` | Per-node initial sync requested by `POST /connections/sync`. |
 
 A node subscribes to `updates-<node_env>` and `init-<node_uuid>`. The `auth` service subscribes to `auth` and `init-<auth_uuid>`.
