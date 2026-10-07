@@ -37,6 +37,9 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # standard subscriptions. Only metered protocols work in traffic mode.
 # traffic_mode_enabled = false
 # metered_conns = ["Wireguard", "AmneziaWg", "AmneziaWgMobile", "VlessTcpReality", "VlessGrpcReality", "VlessXhttpCdn"]
+# Mesh messenger relay (/v1/mesh/*): rkyv snapshot of the UIN → pubkey
+# registry, written every minute and on shutdown. The inbox never persists.
+# mesh_snapshot_path = "/var/lib/fcore/api/mesh-registry.bin"
 
 # App Store IAP (POST /v1/subscriptions). Without this section the endpoint answers 503.
 # [service.apple]

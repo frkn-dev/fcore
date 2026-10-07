@@ -1,6 +1,6 @@
 [package]
 name = "fcore"
-version = "0.6.47"
+version = "0.6.48"
 edition = "2021"
 build = "build.rs"
 
@@ -25,6 +25,7 @@ base32 = "0.5.1"
 chrono = { version = "0.4", features = ["serde", "rkyv"] }
 console-subscriber = {version = "0.4", optional = true}
 dashmap = "6.1.0"
+ed25519-dalek = "2"
 defguard_wireguard_rs = { version = "0.9.7", optional = true}
 flate2 = "1"
 futures = "0.3"

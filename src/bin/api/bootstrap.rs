@@ -104,11 +104,29 @@ where
             })
             .transpose()?;
 
+        // Mesh messenger registry (UIN → pubkeys); a corrupted snapshot
+        // falls back to an empty registry, same as metrics.
+        let mesh = match fcore::mesh::MeshRegistry::load_snapshot(
+            &settings.service.mesh_snapshot_path,
+        )
+        .await
+        {
+            Ok(registry) => {
+                tracing::info!("Mesh registry snapshot restored");
+                registry
+            }
+            Err(err) => {
+                tracing::warn!("Mesh snapshot restore failed: {}", err);
+                fcore::mesh::MeshRegistry::new()
+            }
+        };
+
         let service = Service::new(
             mem_sync,
             settings.clone(),
             Arc::new(metric_storage),
             agw_private_key,
+            Arc::new(mesh),
         );
 
         measure_time(service.get_state_from_db(), "Init PostgreSQL DB").await?;

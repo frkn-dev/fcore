@@ -99,6 +99,25 @@ where
             }
         });
 
+        spawn_task("mesh_registry_snapshot", {
+            let mesh = Arc::clone(&self.mesh);
+            let snapshot_path = self.settings.service.mesh_snapshot_path.clone();
+
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+
+                loop {
+                    interval.tick().await;
+
+                    mesh.gc();
+
+                    if let Err(err) = mesh.save_snapshot(&snapshot_path).await {
+                        error!("Mesh snapshot save failed: {}", err);
+                    }
+                }
+            }
+        });
+
         spawn_task("monitor_node_heartbeats", {
             let service = Arc::clone(&self);
 
@@ -229,6 +248,14 @@ where
                     .await
             {
                 error!("Failed to save snapshot: {}", err);
+            }
+
+            if let Err(err) = self
+                .mesh
+                .save_snapshot(&self.settings.service.mesh_snapshot_path)
+                .await
+            {
+                error!("Failed to save mesh snapshot: {}", err);
             }
 
             Ok(())

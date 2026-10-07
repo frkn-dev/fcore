@@ -2,6 +2,7 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod memory;
+pub mod mesh;
 pub mod metrics;
 pub mod proto;
 pub mod utils;
