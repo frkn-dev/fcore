@@ -108,6 +108,7 @@ impl FromStr for Env {
                 let name = s.strip_prefix("custom").unwrap_or(s).to_string();
                 Ok(Env::Custom(name))
             }
+            s if s.starts_with("personal") => Ok(Env::Custom(s.to_string())),
             _ => Err(Error::Custom("Wrong Env string".into())),
         }
     }
@@ -212,5 +213,7 @@ mod tests {
             "custompersonal11111111222233334444555555555555"
         );
         assert!(Env::from_str(&env.to_string()).unwrap().is_personal());
+        let json_name = format!("personal{}", id.as_simple());
+        assert_eq!(Env::from_str(&json_name).unwrap(), env);
     }
 }

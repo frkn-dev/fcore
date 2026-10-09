@@ -211,6 +211,34 @@ where
             });
         }
 
+        spawn_task("node_score", {
+            let service = Arc::clone(&self);
+            let interval = self.settings.score.interval_secs.max(1);
+
+            async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(interval));
+                let mut smooth = std::collections::HashMap::new();
+                loop {
+                    tick.tick().await;
+                    let views = {
+                        let mem = service.sync.memory.read().await;
+                        mem.nodes
+                            .iter_nodes()
+                            .map(|(_, node)| fcore::score::NodeView::from(node))
+                            .collect::<Vec<_>>()
+                    };
+                    let now = chrono::Utc::now().timestamp_millis();
+                    fcore::score::tick(
+                        &views,
+                        &service.metrics,
+                        &service.settings.score,
+                        &mut smooth,
+                        now,
+                    );
+                }
+            }
+        });
+
         spawn_task("metric_worker", {
             let metrics = Arc::clone(&self.metrics);
             let receiver = self.settings.metrics.reciever.clone();

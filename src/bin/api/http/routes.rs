@@ -16,7 +16,7 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, iap::*, key::*,
-        mesh::*, metrics::*, node::*, premium::*, private::*, share::*, subscription::*,
+        mesh::*, metrics::*, node::*, premium::*, private::*, score::*, share::*, subscription::*,
     },
     param::*,
     rejection,
@@ -396,7 +396,31 @@ where
             .and(warp::header::optional::<String>("authorization"))
             .and_then(admin_api_delete_connection_handler);
 
+        let score_cfg = self.settings.score.clone();
+        let admin_score_route = warp::get()
+            .and(warp::path!("v1" / "admin" / "nodes" / "score"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_metrics(self.metrics.clone()))
+            .and(warp::any().map(move || score_cfg.clone()))
+            .and_then(score_list_handler);
+
+        let admin_score_history_route = warp::get()
+            .and(warp::path!("v1" / "admin" / "nodes" / "score" / "history"))
+            .and(warp::path::end())
+            .and(warp::query::<crate::http::handlers::score::ScoreHistoryQuery>())
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_metrics(self.metrics.clone()))
+            .and_then(score_history_handler);
+
         let admin_routes = admin_page_route
+            .or(admin_score_history_route)
+            .or(admin_score_route)
             .or(admin_api_state_route)
             .or(admin_api_nodes_route)
             .or(admin_api_node_metrics_route)
