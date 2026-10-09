@@ -11,6 +11,8 @@ pub struct ServiceSettings {
     pub metrics: MetricsRxConfig,
     pub tasks: TasksConfig,
     pub subscription_audit: SubscriptionAuditConfig,
+    #[serde(default)]
+    pub score: fcore::score::ScoreConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]

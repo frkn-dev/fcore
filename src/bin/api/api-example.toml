@@ -54,6 +54,24 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 
 
 
+# Node score is observation only. Missing [score] keeps these defaults.
+# net.*.tx_bps is bytes/sec (sysinfo). target_bps 625000 = 5 Mbit/s.
+# link_capacity 125000000 = 1 Gbit/s. If a node reports cores = 0,
+# load uses 1 - clamp(load15, 0, 1) instead of load1/cores.
+# [score]
+# w_load = 0.25
+# w_users = 0.20
+# w_bw_capacity = 0.15
+# w_bw_per_user = 0.15
+# w_reliability = 0.15
+# w_uptime = 0.10
+# soft_cap = 100
+# link_capacity = 125000000
+# target_bps = 625000
+# stale_after_secs = 600
+# interval_secs = 60
+# heartbeat_every_secs = 60
+
 [metrics]
 reciever = "tcp://0.0.0.0:3002"
 max_points = 10000

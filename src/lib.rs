@@ -4,6 +4,7 @@ pub mod http;
 pub mod memory;
 pub mod mesh;
 pub mod metrics;
+pub mod score;
 pub mod proto;
 pub mod utils;
 pub mod zmq;
