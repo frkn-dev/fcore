@@ -36,6 +36,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 prost = { version = "0.13", optional = true }
 prost-derive = { version = "0.13", optional = true }
 rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 rkyv = { version = "0.7", features = ["std", "alloc", "validation", "uuid", ] }
 serde = { version = "1.0", features = ["derive"] }
@@ -94,5 +95,9 @@ path = "src/bin/api/main.rs"
 [[bin]]
 name = "auth"
 path = "src/bin/auth/main.rs"
+
+[[bin]]
+name = "meshd"
+path = "src/bin/mesh/main.rs"
 
 

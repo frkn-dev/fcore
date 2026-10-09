@@ -1,0 +1,21 @@
+[Unit]
+Description=FRKN mesh relay
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=fcore
+Group=fcore
+ExecStart=/usr/local/bin/meshd /etc/fcore/mesh/config.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/var/lib/fcore/mesh
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fcore/mesh
+ReadWritePaths=/var/log/fcore/mesh
+
+[Install]
+WantedBy=multi-user.target
