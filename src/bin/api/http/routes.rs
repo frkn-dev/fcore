@@ -229,6 +229,7 @@ where
             .and_then(subscription_link_handler);
 
         let get_catalog_version_route = warp::get()
+            .and(warp::path("v1"))
             .and(warp::path("catalog"))
             .and(warp::path("version"))
             .and(warp::path::end())
