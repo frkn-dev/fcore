@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod amnezia;
+pub mod catalog;
 pub mod cluster;
 pub mod connection;
 pub mod iap;

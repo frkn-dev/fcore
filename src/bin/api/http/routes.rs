@@ -15,7 +15,7 @@ use super::{
     super::{iap::AppleIapClient, service::Service, sync::MemSync},
     filters::*,
     handlers::{
-        admin::*, amnezia::*, cluster::*, connection::*, healthcheck_handler, iap::*, key::*,
+        admin::*, amnezia::*, catalog::*, cluster::*, connection::*, healthcheck_handler, iap::*, key::*,
         mesh::*, metrics::*, node::*, premium::*, private::*, score::*, share::*, subscription::*,
     },
     param::*,
@@ -227,6 +227,13 @@ where
                 move || metered.clone()
             }))
             .and_then(subscription_link_handler);
+
+        let get_catalog_version_route = warp::get()
+            .and(warp::path("catalog"))
+            .and(warp::path("version"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and_then(get_catalog_version_handler);
 
         let get_subscription_info_route = warp::get()
             .and(warp::path!("subscription" / Uuid))
@@ -1068,6 +1075,7 @@ where
         let routes = get_healthcheck_route
             // Subscription
             .or(get_subscription_route)
+            .or(get_catalog_version_route)
             .or(get_share_feed_route)
             .or(get_subscription_info_route)
             .or(get_subscription_by_ref_code_route)
