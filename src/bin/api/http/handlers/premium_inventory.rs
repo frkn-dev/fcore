@@ -127,6 +127,18 @@ where
             }
         }
 
+        // Трафик слота = трафик подписки-владельца: отдельного счётчика на
+        // слот нет, но клиент платит именно за этот канал.
+        let (traffic_up, traffic_down) = match owner {
+            Some((sub_id, _)) => memory
+                .db
+                .traffic()
+                .total_for_subscription(*sub_id)
+                .await
+                .unwrap_or((0, 0)),
+            None => (0, 0),
+        };
+
         slots.push(serde_json::json!({
             "env": env,
             "subscription_id": owner.map(|(id, _)| *id),
@@ -134,6 +146,9 @@ where
             "expired": expired,
             "connections_total": conns_total,
             "connections_active": conns_active,
+            "traffic_up": traffic_up,
+            "traffic_down": traffic_down,
+            "traffic_total": traffic_up + traffic_down,
             "nodes": nodes,
         }));
     }
