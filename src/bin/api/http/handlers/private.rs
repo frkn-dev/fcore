@@ -1385,12 +1385,18 @@ where
     if owner.is_deleted() {
         return Err(http::not_found("subscription not found").into_response());
     }
-    if owner.plan_kind() != PlanKind::Selfhosted {
-        return Err(http::bad_request("not a selfhosted account").into_response());
-    }
     if owner.parent_id().is_some() {
         return Err(http::bad_request(
             "a user of a selfhosted account cannot invite users",
+        )
+        .into_response());
+    }
+    // Своих юзеров может заводить любой аккаунт, а не только selfhosted:
+    // «своё железо + свои люди» не должно требовать второго аккаунта. Границу
+    // задаёт лимит (`user_limit`), его поднимает админ.
+    if owner.user_limit() <= 0 {
+        return Err(http::bad_request(
+            "user limit is 0 for this account",
         )
         .into_response());
     }
