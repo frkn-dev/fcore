@@ -92,6 +92,24 @@ impl IpAddrMask {
         }
     }
 
+    /// Первые `RESERVED_PREFIX` адресов подсети (сеть+1 … сеть+N) не выдаём:
+    /// на хостах в этих же адресах подняты собственные awg-интерфейсы
+    /// (awg0 100.64.0.1, awg1 10.77.0.1, awg2… 100.64.0.2-.4, 10.77.0.2-.4),
+    /// и совпадающий адрес у пира ломает маршрут на этом хосте.
+    pub const RESERVED_PREFIX: u32 = 50;
+
+    /// Первый адрес, который разрешено выдавать юзеру.
+    pub fn first_allocatable_ipv4(&self) -> Option<Ipv4Addr> {
+        let base = self.as_ipv4()?;
+        let start = u32::from(base).checked_add(Self::RESERVED_PREFIX + 1)?;
+        let ip = Ipv4Addr::from(start);
+        if self.contains_ipv4(ip) {
+            Some(ip)
+        } else {
+            self.first_peer_ip()
+        }
+    }
+
     pub fn first_peer_ip(&self) -> Option<Ipv4Addr> {
         let base = self.first_ipv4()?;
         Self::increment_ipv4(base).and_then(|ip| {
@@ -332,5 +350,56 @@ impl From<IpAddrMask> for AmneziaWireguardAllowedIp {
             AmneziaWireguardAllowedIpAttr::IpAddr(ip.address),
             AmneziaWireguardAllowedIpAttr::Cidr(ip.cidr),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mask(s: &str) -> IpAddrMask {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn first_allocatable_skips_reserved_prefix() {
+        // Прод-пулы: первые 50 адресов заняты хостовыми awg-интерфейсами.
+        assert_eq!(
+            mask("100.64.0.1/10").first_allocatable_ipv4(),
+            Some("100.64.0.52".parse::<Ipv4Addr>().unwrap())
+        );
+        assert_eq!(
+            mask("10.77.0.0/16").first_allocatable_ipv4(),
+            Some("10.77.0.51".parse::<Ipv4Addr>().unwrap())
+        );
+        assert_eq!(
+            mask("10.100.0.0/16").first_allocatable_ipv4(),
+            Some("10.100.0.51".parse::<Ipv4Addr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn first_allocatable_clears_host_interface_addresses() {
+        // Реальные адреса интерфейсов на хостах: 10.77.0.1-.4 и 100.64.0.1-.4,
+        // а также 100.64.0.1/10 и 10.77.0.1/16 как адреса самих awg-девайсов.
+        for (net, first) in [
+            ("100.64.0.1/10", "100.64.0.52"),
+            ("10.77.0.0/16", "10.77.0.51"),
+        ] {
+            let first: Ipv4Addr = first.parse().unwrap();
+            let m = mask(net);
+            assert_eq!(m.first_allocatable_ipv4(), Some(first));
+            for host in ["10.77.0.1", "10.77.0.4", "100.64.0.1", "100.64.0.4"] {
+                let host: Ipv4Addr = host.parse().unwrap();
+                // Сравниваем только адреса из этой же подсети.
+                if !m.contains_ipv4(host) {
+                    continue;
+                }
+                assert!(
+                    u32::from(first) > u32::from(host),
+                    "{net}: выдаваемый {first} не должен совпадать с адресом интерфейса хоста {host}"
+                );
+            }
+        }
     }
 }
