@@ -407,9 +407,16 @@ where
                     .get_last_addr(req.proto)
                     .and_then(|mask| mask.as_ipv4());
 
+                let floor = network.first_allocatable_ipv4();
                 let next = match last_ip {
-                    Some(ip) => IpAddrMask::increment_ipv4(ip),
-                    None => network.first_peer_ip(),
+                    Some(ip) => {
+                        let candidate = IpAddrMask::increment_ipv4(ip);
+                        match (candidate, floor) {
+                            (Some(c), Some(f)) if u32::from(c) < u32::from(f) => Some(f),
+                            (c, _) => c,
+                        }
+                    }
+                    None => floor.or_else(|| network.first_peer_ip()),
                 };
 
                 let next = match next {
