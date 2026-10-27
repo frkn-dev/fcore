@@ -238,6 +238,10 @@ where
         .and_then(|v| v.as_str())
         .and_then(|v| trimmed(v, 64));
 
+    // ASN/страна клиента — оффлайн-база, без сети в горячем пути.
+    let (asn, country) = fcore::geoip::lookup(ip);
+    let asn = asn.map(|v| v as i32);
+
     let (node_id, node_host) = memory
         .db
         .report()
@@ -279,8 +283,8 @@ where
         udp_probe: probe.get("udp").cloned().unwrap_or(Value::Null),
         device: app.get("device").cloned().unwrap_or(Value::Null),
         user_note: req.note.as_deref().and_then(|v| trimmed(v, 500)),
-        asn: None,
-        country: None,
+        asn,
+        country,
         ip_prefix: ip_prefix(ip),
         ip_hash: Some(ip_hash(ip, salt)),
         report_at,

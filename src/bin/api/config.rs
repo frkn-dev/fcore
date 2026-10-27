@@ -161,6 +161,12 @@ pub struct ServiceConfig {
     /// connections cannot be created.
     #[serde(default)]
     pub amnezia_wireguard_mobile_network: Option<IpAddrMask>,
+    /// Оффлайн-базы MaxMind для телеметрии блокировок: ASN (обязательна) и
+    /// страна (опциональна). Пустое значение — обогащение выключено.
+    #[serde(default)]
+    pub geoip_asn_path: Option<String>,
+    #[serde(default)]
+    pub geoip_country_path: Option<String>,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     /// Connections created for lite (traffic-only) key activations, same
