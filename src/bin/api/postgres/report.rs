@@ -160,6 +160,28 @@ impl PgReport {
         Ok(inserted > 0)
     }
 
+    /// Резолв ноды по адресу: id + hostname (у пуловых нод один хост и
+    /// несколько адресов, поэтому группировать удобнее по ноде).
+    pub async fn resolve_node(
+        &self,
+        address: std::net::IpAddr,
+    ) -> Result<(Option<uuid::Uuid>, Option<String>)> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                "SELECT id, hostname FROM nodes WHERE address = $1 LIMIT 1",
+                &[&address],
+            )
+            .await?;
+
+        match rows.first() {
+            Some(r) => Ok((Some(r.get("id")), Some(r.get("hostname")))),
+            None => Ok((None, None)),
+        }
+    }
+
     /// Сколько отчётов по паре (адрес, порт) уже есть за окно — для дедупа по окну.
     pub async fn count_recent(
         &self,
