@@ -23,6 +23,7 @@ use fcore::{
 use crate::postgres::report::{Observation, FAIL_STATES, OK_STATES};
 use crate::sync::MemSync;
 
+use super::admin::check_token;
 use super::amnezia::extract_subscription_id;
 use super::share::{auth_data_has_share_token, client_ip, RateLimiter};
 
@@ -676,6 +677,9 @@ pub struct BlockReportAggregateQuery {
 pub async fn admin_block_report_handler<N, C, S>(
     query: BlockReportAggregateQuery,
     memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
 ) -> Result<warp::reply::Response, Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -690,6 +694,13 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    if !admin_enabled {
+        return Ok(json_status(404, "not found"));
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(json_status(401, "unauthorized"));
+    }
+
     let now = Utc::now();
     let from = query
         .from

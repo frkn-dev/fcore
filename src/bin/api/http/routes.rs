@@ -1007,7 +1007,7 @@ where
                 },
             );
 
-        // GET /v1/admin/report/block — агрегат с вердиктами.
+        // GET /v1/admin/report/block — агрегат с вердиктами (под admin-токеном).
         let get_block_report_admin_route = warp::get()
             .and(warp::path("v1"))
             .and(warp::path("admin"))
@@ -1016,10 +1016,23 @@ where
             .and(warp::path::end())
             .and(warp::query::<crate::http::handlers::report::BlockReportAggregateQuery>())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
             .and_then(
                 |query: crate::http::handlers::report::BlockReportAggregateQuery,
-                 sync: MemSync<N, C, S>| async move {
-                    crate::http::handlers::report::admin_block_report_handler(query, sync).await
+                 sync: MemSync<N, C, S>,
+                 admin_enabled: bool,
+                 admin_token: String,
+                 auth_header: Option<String>| async move {
+                    crate::http::handlers::report::admin_block_report_handler(
+                        query,
+                        sync,
+                        admin_enabled,
+                        admin_token,
+                        auth_header,
+                    )
+                    .await
                 },
             );
         // The public per-share feed (GET /sub/<token>) gets polled by
