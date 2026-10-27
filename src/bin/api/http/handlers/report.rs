@@ -443,6 +443,9 @@ where
             .and_then(|p| p.get("icmp"))
             .and_then(|i| i.get("ok"))
             .and_then(|v| v.as_bool()),
+        target_country: opt_trimmed(&target.country, 64),
+        error: req.report.error.clone().unwrap_or(Value::Null),
+        note: opt_trimmed(&req.report.note, 500),
         app: req.report.app.clone().unwrap_or(Value::Null),
         device: req.report.device.clone().unwrap_or(Value::Null),
         network: req.report.network.clone().unwrap_or(Value::Null),
@@ -611,6 +614,9 @@ where
             state,
             rtt_ms: result.rtt_ms.map(|v| v as i32),
             icmp_ok: None,
+            target_country: None,
+            error: Value::Null,
+            note: None,
             app: req.scan.app.clone().unwrap_or(Value::Null),
             device: req.scan.device.clone().unwrap_or(Value::Null),
             network: network.clone(),

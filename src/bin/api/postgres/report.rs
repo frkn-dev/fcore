@@ -44,6 +44,9 @@ pub struct Observation {
     pub state: Option<String>,
     pub rtt_ms: Option<i32>,
     pub icmp_ok: Option<bool>,
+    pub target_country: Option<String>,
+    pub error: serde_json::Value,
+    pub note: Option<String>,
     pub app: serde_json::Value,
     pub device: serde_json::Value,
     pub network: serde_json::Value,
@@ -92,6 +95,9 @@ impl PgReport {
                     state            text,
                     rtt_ms           int,
                     icmp_ok          boolean,
+                    target_country   text,
+                    error            jsonb,
+                    note             text,
                     app              jsonb,
                     device           jsonb,
                     network          jsonb,
@@ -149,10 +155,10 @@ impl PgReport {
                     platform, os, target_host, address, node_id, node_host, port,
                     protocol, transport, state, rtt_ms, icmp_ok, probe, session,
                     country_code, asn, client_country, ip_prefix, ip_hash, observed_at,
-                    app, device, network
+                    app, device, network, target_country, error, note
                 ) VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                    $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29
+                    $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
                 )
                 ON CONFLICT (id) DO NOTHING
                 "#,
@@ -186,6 +192,9 @@ impl PgReport {
                     &row.app,
                     &row.device,
                     &row.network,
+                    &row.target_country,
+                    &row.error,
+                    &row.note,
                 ],
             )
             .await?;
