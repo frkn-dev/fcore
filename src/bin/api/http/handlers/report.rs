@@ -27,15 +27,15 @@ use super::amnezia::extract_subscription_id;
 use super::share::{auth_data_has_share_token, client_ip, RateLimiter};
 
 /// Лимит тела одиночного отчёта.
-pub const MAX_REPORT_BODY_BYTES: u64 = 32 * 1024;
+pub const MAX_REPORT_BODY_BYTES: u64 = 16 * 1024;
 /// Лимит тела среза «Check all servers».
-pub const MAX_SCAN_BODY_BYTES: u64 = 160 * 1024;
+pub const MAX_SCAN_BODY_BYTES: u64 = 128 * 1024;
 /// Допустимое опережение часов клиента.
 const MAX_CLOCK_SKEW_SECS: i64 = 300;
 /// Окно дедупа «тот же юзер про ту же цель».
 pub const DEDUP_WINDOW_SECS: i64 = 600;
 /// Сколько записей в срезе принимаем (клиент режет на 512).
-pub const MAX_SCAN_RESULTS: usize = 1024;
+pub const MAX_SCAN_RESULTS: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Payload
@@ -60,6 +60,10 @@ pub struct ReportBody {
     pub probe: Option<Value>,
     #[serde(default)]
     pub session: Option<Value>,
+    /// Опционален: на iOS/macOS/Windows его нет, на Android carrier и
+    /// network_country бывают пустыми строками.
+    #[serde(default)]
+    pub network: Option<Value>,
     #[serde(default)]
     pub at: Option<String>,
     #[serde(default)]
@@ -107,6 +111,8 @@ pub struct ScanBody {
     pub duration_ms: Option<i64>,
     #[serde(default)]
     pub network: Option<Value>,
+    #[serde(default)]
+    pub device: Option<Value>,
     #[serde(default)]
     pub results: Vec<ScanResult>,
 }
@@ -437,6 +443,9 @@ where
             .and_then(|p| p.get("icmp"))
             .and_then(|i| i.get("ok"))
             .and_then(|v| v.as_bool()),
+        app: req.report.app.clone().unwrap_or(Value::Null),
+        device: req.report.device.clone().unwrap_or(Value::Null),
+        network: req.report.network.clone().unwrap_or(Value::Null),
         probe: req.report.probe.clone().unwrap_or(Value::Null),
         session: req.report.session.clone().unwrap_or(Value::Null),
         country_code: opt_trimmed(&target.country_code, 2).or_else(|| opt_trimmed(&target.country_code, 3)),
@@ -602,6 +611,9 @@ where
             state,
             rtt_ms: result.rtt_ms.map(|v| v as i32),
             icmp_ok: None,
+            app: req.scan.app.clone().unwrap_or(Value::Null),
+            device: req.scan.device.clone().unwrap_or(Value::Null),
+            network: network.clone(),
             probe: Value::Null,
             session: serde_json::json!({
                 "mode": req.scan.mode,
