@@ -62,6 +62,18 @@ where
         db.conn().ensure_schema().await?;
 
         db.install_token().ensure_table().await?;
+        db.report().ensure_table().await?;
+
+        // Оффлайн geo-базы: без них телеметрия блокировок работает, но без
+        // ASN/страны — вердикты не срабатывают, поэтому шумим в лог.
+        if let Some(asn_path) = settings.service.geoip_asn_path.as_deref() {
+            match fcore::geoip::init(asn_path, settings.service.geoip_country_path.as_deref()) {
+                Ok(()) => tracing::info!("geoip: ASN db loaded from {asn_path}"),
+                Err(e) => tracing::warn!("geoip: disabled ({e})"),
+            }
+        } else {
+            tracing::warn!("geoip: geoip_asn_path is not set, block verdicts will stay unknown");
+        }
         db.node_access_token().ensure_table().await?;
         db.private_feed().ensure_table().await?;
         db.node().ensure_pool_column().await?;

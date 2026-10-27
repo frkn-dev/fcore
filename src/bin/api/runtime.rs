@@ -132,6 +132,14 @@ where
             }
         });
 
+        spawn_task("purge_block_observations", {
+            let service = Arc::clone(&self);
+            // Раз в сутки: сырые наблюдения живут 30 дней.
+            async move {
+                service.purge_block_observations(86_400).await;
+            }
+        });
+
         spawn_task("cleanup_expired_connections", {
             let interval = self.settings.tasks.connection_expire_interval;
             let service = Arc::clone(&self);

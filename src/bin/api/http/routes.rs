@@ -911,6 +911,117 @@ where
             let limiter = share_rate_limiter.clone();
             warp::any().map(move || limiter.clone())
         };
+
+        // Block telemetry: 10/мин на IP (отчёты о блокировке адреса).
+        let report_rate_limiter =
+            Arc::new(RateLimiter::new(10, std::time::Duration::from_secs(60)));
+        let with_report_limiter = {
+            let limiter = report_rate_limiter.clone();
+            warp::any().map(move || limiter.clone())
+        };
+        // 30 отчётов в час на подписку.
+        let report_sub_limiter = Arc::new(crate::http::handlers::report::SubRateLimiter::new(
+            30,
+            std::time::Duration::from_secs(3600),
+        ));
+        let with_report_sub_limiter = {
+            let limiter = report_sub_limiter.clone();
+            warp::any().map(move || limiter.clone())
+        };
+
+        // POST /v1/report/block и /v1/report/scan — шифрованный конверт gateway,
+        // как у /v1/services: клиент не умеет читать plaintext-ответ.
+        let post_block_report_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("report"))
+            .and(warp::path("block"))
+            .and(warp::path::end())
+            .and(warp::body::content_length_limit(
+                crate::http::handlers::report::MAX_REPORT_BODY_BYTES,
+            ))
+            .and(crypto::with_agw_decryption::<
+                crate::http::handlers::report::BlockReportEnvelope,
+            >(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(with_report_limiter.clone())
+            .and(with_report_sub_limiter.clone())
+            .and_then(
+                |req: crate::http::handlers::report::BlockReportEnvelope,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 remote: Option<std::net::SocketAddr>,
+                 x_forwarded_for: Option<String>,
+                 rate_limiter: Arc<RateLimiter>,
+                 sub_limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
+                    let response =
+                        crate::http::handlers::report::gateway_block_report_handler(
+                            req,
+                            sync,
+                            remote,
+                            x_forwarded_for,
+                            rate_limiter,
+                            sub_limiter,
+                        )
+                        .await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
+
+        let post_scan_report_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("report"))
+            .and(warp::path("scan"))
+            .and(warp::path::end())
+            .and(warp::body::content_length_limit(
+                crate::http::handlers::report::MAX_SCAN_BODY_BYTES,
+            ))
+            .and(crypto::with_agw_decryption::<
+                crate::http::handlers::report::BlockScanEnvelope,
+            >(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("x-forwarded-for"))
+            .and(with_report_limiter.clone())
+            .and(with_report_sub_limiter.clone())
+            .and_then(
+                |req: crate::http::handlers::report::BlockScanEnvelope,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 remote: Option<std::net::SocketAddr>,
+                 x_forwarded_for: Option<String>,
+                 rate_limiter: Arc<RateLimiter>,
+                 sub_limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
+                    let response =
+                        crate::http::handlers::report::gateway_scan_report_handler(
+                            req,
+                            sync,
+                            remote,
+                            x_forwarded_for,
+                            rate_limiter,
+                            sub_limiter,
+                        )
+                        .await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
+
+        // GET /v1/admin/report/block — агрегат с вердиктами.
+        let get_block_report_admin_route = warp::get()
+            .and(warp::path("v1"))
+            .and(warp::path("admin"))
+            .and(warp::path("report"))
+            .and(warp::path("block"))
+            .and(warp::path::end())
+            .and(warp::query::<crate::http::handlers::report::BlockReportAggregateQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |query: crate::http::handlers::report::BlockReportAggregateQuery,
+                 sync: MemSync<N, C, S>| async move {
+                    crate::http::handlers::report::admin_block_report_handler(query, sync).await
+                },
+            );
         // The public per-share feed (GET /sub/<token>) gets polled by
         // clients — a more generous budget than mint.
         let share_feed_rate_limiter =
@@ -1261,6 +1372,10 @@ where
             .or(post_share_mint_route)
             .or(post_shares_list_route)
             .or(post_share_revoke_route)
+            // Block telemetry
+            .or(post_block_report_route)
+            .or(post_scan_report_route)
+            .or(get_block_report_admin_route)
             // Mesh
             .or(mesh_routes)
             // Admin

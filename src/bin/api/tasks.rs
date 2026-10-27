@@ -31,6 +31,8 @@ pub trait Tasks {
     async fn cleanup_expired_connections(&self, interval_sec: u64);
     async fn cleanup_expired_subscriptions(&self, interval_sec: u64);
     async fn restore_subscriptions(&self, interval_sec: u64);
+    async fn purge_block_observations(&self, interval_sec: u64);
+
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
     async fn persist_connection_traffic(&self, interval_sec: u64);
     async fn enforce_traffic_limits(&self, interval_sec: u64);
@@ -942,6 +944,32 @@ where
         *mem = tmp_mem;
 
         Ok(())
+    }
+
+    /// Ретенция наблюдений о блокировках (30 дней).
+    async fn purge_block_observations(&self, interval_sec: u64) {
+        use crate::postgres::report::BLOCK_OBSERVATION_RETENTION_DAYS;
+
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            match self
+                .sync
+                .db
+                .report()
+                .purge_old(BLOCK_OBSERVATION_RETENTION_DAYS)
+                .await
+            {
+                Ok(0) => tracing::debug!("block observations: nothing to purge"),
+                Ok(n) => tracing::info!(
+                    "block observations: purged {} rows older than {} days",
+                    n,
+                    BLOCK_OBSERVATION_RETENTION_DAYS
+                ),
+                Err(e) => tracing::error!("block observations purge failed: {}", e),
+            }
+        }
     }
 
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64) {
