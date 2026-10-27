@@ -1,12 +1,12 @@
-//! Отчёты клиента о блокировке адреса (`POST /v1/report/block`).
+//! Телеметрия блокировок: `/v1/report/block` и `/v1/report/scan`.
 //!
-//! Приём намеренно plaintext (без `with_agw_decryption`): в payload нет
-//! секретов, а поддержке так проще отлаживать. Тело ≤ 16 КБ, лимиты по IP и
-//! по подписке, идемпотентность по клиентскому `report_id`, отчёты «из
-//! будущего» отбрасываются.
+//! Контракт снят с клиента 4.8.14.75 (`frkn-docs/block-telemetry-client-contract.md`):
+//! оба эндпойнта ходят через шифрованный конверт gateway (`with_agw_decryption` +
+//! `encrypt_gateway_reply`), payload — `{auth_data, report_id|scan_id, report|scan}`.
 //!
-//! IP пользователя не пишем: только ASN, страна, префикс /24 (/48) и
-//! blake3-хеш для счёта уникальности.
+//! Что клиент не шлёт и что нельзя требовать: `error`, `device`, `note`,
+//! `probe.icmp.rtt_ms`, `scan.results[].tls`, `dns_ok`. `target.address` бывает
+//! пустым (DNS не ответил) — это валидный и самый информативный отчёт.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Deserialize;
@@ -20,50 +20,122 @@ use fcore::{
     Subscription, SubscriptionOperations,
 };
 
-use crate::postgres::report::BlockReportRow;
+use crate::postgres::report::{Observation, FAIL_STATES, OK_STATES};
 use crate::sync::MemSync;
 
 use super::amnezia::extract_subscription_id;
 use super::share::{auth_data_has_share_token, client_ip, RateLimiter};
 
-/// Максимальный размер тела отчёта.
-pub const MAX_REPORT_BODY_BYTES: u64 = 16 * 1024;
-/// Допустимое опережение по часам клиента.
+/// Лимит тела одиночного отчёта.
+pub const MAX_REPORT_BODY_BYTES: u64 = 32 * 1024;
+/// Лимит тела среза «Check all servers».
+pub const MAX_SCAN_BODY_BYTES: u64 = 160 * 1024;
+/// Допустимое опережение часов клиента.
 const MAX_CLOCK_SKEW_SECS: i64 = 300;
-/// Дедуп по окну: сколько секунд считаем отчёты по паре (адрес, порт) «тем же».
+/// Окно дедупа «тот же юзер про ту же цель».
 pub const DEDUP_WINDOW_SECS: i64 = 600;
+/// Сколько записей в срезе принимаем (клиент режет на 512).
+pub const MAX_SCAN_RESULTS: usize = 1024;
+
+// ---------------------------------------------------------------------------
+// Payload
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct BlockReportRequest {
+pub struct BlockReportEnvelope {
+    #[serde(default)]
     pub auth_data: Value,
     pub report_id: String,
+    pub report: ReportBody,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReportBody {
+    #[serde(default)]
+    pub app: Option<Value>,
+    #[serde(default)]
+    pub support_tag: Option<String>,
     pub target: ReportTarget,
     #[serde(default)]
     pub probe: Option<Value>,
+    #[serde(default)]
+    pub session: Option<Value>,
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub error: Option<Value>,
+    #[serde(default)]
+    pub device: Option<Value>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReportTarget {
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Может быть пустой строкой, если DNS не ответил.
+    #[serde(default)]
+    pub address: Option<String>,
+    pub protocol: String,
+    pub port: i64,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub country_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BlockScanEnvelope {
+    #[serde(default)]
+    pub auth_data: Value,
+    pub scan_id: String,
+    pub scan: ScanBody,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScanBody {
     #[serde(default)]
     pub app: Option<Value>,
     #[serde(default)]
     pub support_tag: Option<String>,
     #[serde(default)]
-    pub error: Option<Value>,
+    pub mode: Option<String>,
     #[serde(default)]
-    pub note: Option<String>,
+    pub started_at: Option<String>,
     #[serde(default)]
-    pub at: Option<String>,
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub network: Option<Value>,
+    #[serde(default)]
+    pub results: Vec<ScanResult>,
 }
 
+/// В записи среза есть **либо** `tcp`, **либо** `udp`: транспорт выбран по
+/// протоколу. `skipped` — «не успели/отменили», не ошибка сети.
 #[derive(Debug, Deserialize)]
-pub struct ReportTarget {
-    pub address: String,
-    pub port: i64,
-    pub protocol: String,
+pub struct ScanResult {
     #[serde(default)]
     pub host: Option<String>,
     #[serde(default)]
+    pub address: Option<String>,
+    pub port: i64,
+    pub protocol: String,
+    #[serde(default)]
     pub transport: Option<String>,
+    #[serde(default)]
+    pub tcp: Option<String>,
+    #[serde(default)]
+    pub udp: Option<String>,
+    #[serde(default)]
+    pub rtt_ms: Option<i64>,
 }
 
-/// Лимит по подписке: 30 отчётов в час. Ключ — subscription uuid.
+// ---------------------------------------------------------------------------
+// Лимитеры
+// ---------------------------------------------------------------------------
+
+/// Лимит по подписке (ключ — subscription uuid).
 pub struct SubRateLimiter {
     limit: usize,
     window: std::time::Duration,
@@ -92,8 +164,13 @@ impl SubRateLimiter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Хелперы
+// ---------------------------------------------------------------------------
+
 fn json_status(code: u16, message: &str) -> warp::reply::Response {
-    let status = warp::http::StatusCode::from_u16(code).unwrap_or(warp::http::StatusCode::BAD_REQUEST);
+    let status =
+        warp::http::StatusCode::from_u16(code).unwrap_or(warp::http::StatusCode::BAD_REQUEST);
     warp::reply::with_status(
         warp::reply::json(&serde_json::json!({ "status": code, "message": message })),
         status,
@@ -101,10 +178,20 @@ fn json_status(code: u16, message: &str) -> warp::reply::Response {
     .into_response()
 }
 
-/// `report_id` приходит строкой; в PG ключ — uuid, поэтому не-uuid значения
-/// стабильно сворачиваем в uuid из хеша (идемпотентность сохраняется).
-fn report_uuid(report_id: &str, sub_id: Option<uuid::Uuid>) -> uuid::Uuid {
-    if let Ok(id) = uuid::Uuid::parse_str(report_id) {
+/// Ответ об успехе: клиент смотрит только на отсутствие `status >= 400`.
+fn accepted(body: Value) -> warp::reply::Response {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "status": 202,
+            "response": body,
+        })),
+        warp::http::StatusCode::ACCEPTED,
+    )
+    .into_response()
+}
+
+pub(crate) fn batch_uuid(raw: &str, sub_id: Option<uuid::Uuid>) -> uuid::Uuid {
+    if let Ok(id) = uuid::Uuid::parse_str(raw) {
         return id;
     }
     use sha2::{Digest, Sha256};
@@ -112,7 +199,22 @@ fn report_uuid(report_id: &str, sub_id: Option<uuid::Uuid>) -> uuid::Uuid {
     if let Some(sub) = sub_id {
         hasher.update(sub.as_bytes());
     }
-    hasher.update(report_id.as_bytes());
+    hasher.update(raw.as_bytes());
+    let hash = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    uuid::Uuid::from_bytes(bytes)
+}
+
+fn observation_uuid(batch: uuid::Uuid, index: usize, address: Option<IpAddr>, host: Option<&str>) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(batch.as_bytes());
+    hasher.update(index.to_le_bytes());
+    match address {
+        Some(a) => hasher.update(a.to_string().as_bytes()),
+        None => hasher.update(host.unwrap_or("").as_bytes()),
+    }
     let hash = hasher.finalize();
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&hash[..16]);
@@ -152,9 +254,84 @@ fn trimmed(s: &str, max: usize) -> Option<String> {
     }
 }
 
-/// POST /v1/report/block
+fn opt_trimmed(s: &Option<String>, max: usize) -> Option<String> {
+    s.as_deref().and_then(|v| trimmed(v, max))
+}
+
+fn parse_address(raw: &Option<String>) -> Result<Option<IpAddr>, String> {
+    match raw.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(s) => s.parse::<IpAddr>().map(Some).map_err(|_| "invalid_address".into()),
+    }
+}
+
+fn parse_time(raw: &Option<String>) -> Result<Option<DateTime<Utc>>, String> {
+    match raw.as_deref() {
+        None => Ok(None),
+        Some(s) => {
+            let dt = DateTime::parse_from_rfc3339(s)
+                .map_err(|_| "invalid_at".to_string())?
+                .with_timezone(&Utc);
+            if dt > Utc::now() + ChronoDuration::seconds(MAX_CLOCK_SKEW_SECS) {
+                return Err("at_in_future".to_string());
+            }
+            Ok(Some(dt))
+        }
+    }
+}
+
+fn app_fields(app: &Option<Value>) -> (String, String, Option<String>) {
+    let app = app.as_ref();
+    let version = app
+        .and_then(|a| a.get("version"))
+        .and_then(|v| v.as_str())
+        .and_then(|v| trimmed(v, 32))
+        .unwrap_or_else(|| "unknown".to_string());
+    let platform = app
+        .and_then(|a| a.get("platform"))
+        .and_then(|v| v.as_str())
+        .and_then(|v| trimmed(v, 32))
+        .unwrap_or_else(|| "unknown".to_string());
+    let os = app
+        .and_then(|a| a.get("os"))
+        .and_then(|v| v.as_str())
+        .and_then(|v| trimmed(v, 64));
+    (version, platform, os)
+}
+
+/// Первое не-`skipped`/не-`answered` состояние из `probe.tcp[]` / `probe.udp[]`.
+fn report_state(probe: &Option<Value>) -> Option<String> {
+    let probe = probe.as_ref()?;
+    for key in ["udp", "tcp"] {
+        if let Some(arr) = probe.get(key).and_then(|v| v.as_array()) {
+            for entry in arr {
+                if let Some(state) = entry.get("state").and_then(|v| v.as_str()) {
+                    return Some(state.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn report_transport(probe: &Option<Value>) -> Option<String> {
+    let probe = probe.as_ref()?;
+    if probe.get("udp").and_then(|v| v.as_array()).is_some() {
+        return Some("udp".to_string());
+    }
+    if probe.get("tcp").and_then(|v| v.as_array()).is_some() {
+        return Some("tcp".to_string());
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/report/block
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
 pub async fn gateway_block_report_handler<N, C, S>(
-    req: BlockReportRequest,
+    req: BlockReportEnvelope,
     memory: MemSync<N, C, S>,
     remote: Option<SocketAddr>,
     x_forwarded_for: Option<String>,
@@ -180,8 +357,7 @@ where
     }
 
     let sub_id = extract_subscription_id(&req.auth_data);
-    let has_share = auth_data_has_share_token(&req.auth_data);
-    if sub_id.is_none() && !has_share {
+    if sub_id.is_none() && !auth_data_has_share_token(&req.auth_data) {
         return Ok(json_status(401, "unauthorized"));
     }
     if let Some(sub) = sub_id {
@@ -190,121 +366,121 @@ where
         }
     }
 
-    // target
-    let address: IpAddr = match req.target.address.trim().parse() {
-        Ok(v) => v,
-        Err(_) => return Ok(json_status(400, "invalid_address")),
-    };
-    if req.target.port < 1 || req.target.port > 65535 {
+    let target = &req.report.target;
+    if target.port < 1 || target.port > 65535 {
         return Ok(json_status(400, "invalid_port"));
     }
-    let protocol = match trimmed(&req.target.protocol, 32) {
+    let protocol = match trimmed(&target.protocol, 32) {
         Some(v) => v,
         None => return Ok(json_status(400, "invalid_protocol")),
     };
-
-    // at: не из будущего
-    let now = Utc::now();
-    let report_at = match req.at.as_deref() {
-        Some(raw) => match DateTime::parse_from_rfc3339(raw) {
-            Ok(dt) => {
-                let dt = dt.with_timezone(&Utc);
-                if dt > now + ChronoDuration::seconds(MAX_CLOCK_SKEW_SECS) {
-                    return Ok(json_status(400, "at_in_future"));
-                }
-                dt
-            }
-            Err(_) => return Ok(json_status(400, "invalid_at")),
-        },
-        None => now,
+    let address = match parse_address(&target.address) {
+        Ok(v) => v,
+        Err(e) => return Ok(json_status(400, &e)),
+    };
+    let observed_at = match parse_time(&req.report.at) {
+        Ok(Some(t)) => t,
+        Ok(None) => Utc::now(),
+        Err(e) => return Ok(json_status(400, &e)),
     };
 
-    let app = req.app.unwrap_or(Value::Null);
-    let probe = req.probe.unwrap_or(Value::Null);
-    let error = req.error.unwrap_or(Value::Null);
+    let host = opt_trimmed(&target.host, 255);
+    let (node_id, node_host) = match (address, host.as_deref()) {
+        (Some(addr), _) => memory
+            .db
+            .report()
+            .resolve_node(addr)
+            .await
+            .unwrap_or((None, None)),
+        (None, Some(h)) => memory
+            .db
+            .report()
+            .resolve_node_by_host(h)
+            .await
+            .unwrap_or((None, None)),
+        _ => (None, None),
+    };
 
-    let app_version = app
-        .get("version")
-        .and_then(|v| v.as_str())
-        .and_then(|v| trimmed(v, 32))
-        .unwrap_or_else(|| "unknown".to_string());
-    let platform = app
-        .get("platform")
-        .and_then(|v| v.as_str())
-        .and_then(|v| trimmed(v, 32))
-        .unwrap_or_else(|| "unknown".to_string());
-    let os = app
-        .get("os")
-        .and_then(|v| v.as_str())
-        .and_then(|v| trimmed(v, 64));
+    let (asn, client_country) = fcore::geoip::lookup(ip);
+    let (app_version, platform, os) = app_fields(&req.report.app);
+    let batch_id = batch_uuid(&req.report_id, sub_id);
 
-    // ASN/страна клиента — оффлайн-база, без сети в горячем пути.
-    let (asn, country) = fcore::geoip::lookup(ip);
-    let asn = asn.map(|v| v as i32);
-
-    let (node_id, node_host) = memory
-        .db
-        .report()
-        .resolve_node(address)
-        .await
-        .unwrap_or((None, None));
-
-    let salt = b"frkn-block-telemetry-v1";
-    let row = BlockReportRow {
-        id: report_uuid(&req.report_id, sub_id),
+    let row = Observation {
+        id: observation_uuid(batch_id, 0, address, host.as_deref()),
         subscription_id: sub_id,
-        share_token_hash: None,
-        support_tag: req.support_tag.as_deref().and_then(|v| trimmed(v, 64)),
+        source: "report".to_string(),
+        batch_id,
+        support_tag: opt_trimmed(&req.report.support_tag, 64),
         app_version,
         platform,
         os,
-        node_address: address,
+        target_host: host,
+        address,
         node_id,
         node_host,
-        port: req.target.port as i32,
+        port: target.port as i32,
         protocol,
-        transport: req.target.transport.as_deref().and_then(|v| trimmed(v, 16)),
-        error_code: error.get("code").and_then(|v| v.as_i64()).map(|v| v as i32),
-        error_stage: error
-            .get("stage")
-            .and_then(|v| v.as_str())
-            .and_then(|v| trimmed(v, 32)),
-        icmp_ok: probe
-            .get("icmp")
-            .and_then(|v| v.get("ok"))
-            .and_then(|v| v.as_bool()),
-        icmp_rtt_ms: probe
-            .get("icmp")
-            .and_then(|v| v.get("rtt_ms"))
+        transport: report_transport(&req.report.probe),
+        state: report_state(&req.report.probe),
+        rtt_ms: req
+            .report
+            .probe
+            .as_ref()
+            .and_then(|p| p.get("icmp"))
+            .and_then(|i| i.get("rtt_ms"))
             .and_then(|v| v.as_i64())
             .map(|v| v as i32),
-        dns_ips: probe.get("dns").cloned().unwrap_or(Value::Null),
-        tcp_probe: probe.get("tcp").cloned().unwrap_or(Value::Null),
-        udp_probe: probe.get("udp").cloned().unwrap_or(Value::Null),
-        device: app.get("device").cloned().unwrap_or(Value::Null),
-        user_note: req.note.as_deref().and_then(|v| trimmed(v, 500)),
-        asn,
-        country,
+        icmp_ok: req
+            .report
+            .probe
+            .as_ref()
+            .and_then(|p| p.get("icmp"))
+            .and_then(|i| i.get("ok"))
+            .and_then(|v| v.as_bool()),
+        probe: req.report.probe.clone().unwrap_or(Value::Null),
+        session: req.report.session.clone().unwrap_or(Value::Null),
+        country_code: opt_trimmed(&target.country_code, 2).or_else(|| opt_trimmed(&target.country_code, 3)),
+        asn: asn.map(|v| v as i32),
+        client_country,
         ip_prefix: ip_prefix(ip),
-        ip_hash: Some(ip_hash(ip, salt)),
-        report_at,
+        ip_hash: Some(ip_hash(ip, b"frkn-block-telemetry-v1")),
+        observed_at,
     };
 
-    // дедуп по окну: тот же адрес+порт от той же подписки недавно уже был
     if let Ok(count) = memory
         .db
         .report()
-        .count_recent(address, row.port, sub_id, DEDUP_WINDOW_SECS)
+        .count_recent(
+            row.address,
+            row.target_host.as_deref(),
+            row.port,
+            sub_id,
+            DEDUP_WINDOW_SECS,
+        )
         .await
     {
         if count > 0 {
-            return Ok(json_status(202, "dedup:window"));
+            return Ok(accepted(serde_json::json!({
+                "id": row.id,
+                "dedup": true,
+                "reason": "window",
+                "results_count": 1,
+            })));
         }
     }
 
-    match memory.db.report().insert_once(&row).await {
-        Ok(true) => Ok(json_status(202, "accepted")),
-        Ok(false) => Ok(json_status(202, "dedup:report_id")),
+    match memory.db.report().insert_batch(batch_id, std::slice::from_ref(&row)).await {
+        Ok(true) => Ok(accepted(serde_json::json!({
+            "id": row.id,
+            "dedup": false,
+            "results_count": 1,
+        }))),
+        Ok(false) => Ok(accepted(serde_json::json!({
+            "id": row.id,
+            "dedup": true,
+            "reason": "report_id",
+            "results_count": 1,
+        }))),
         Err(e) => {
             tracing::error!("block report insert failed: {e}");
             Ok(json_status(500, "internal"))
@@ -312,7 +488,159 @@ where
     }
 }
 
-/// GET /v1/admin/report/block?from=&to=&group_by=&address=&min_reports=
+// ---------------------------------------------------------------------------
+// POST /v1/report/scan
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub async fn gateway_scan_report_handler<N, C, S>(
+    req: BlockScanEnvelope,
+    memory: MemSync<N, C, S>,
+    remote: Option<SocketAddr>,
+    x_forwarded_for: Option<String>,
+    ip_limiter: Arc<RateLimiter>,
+    sub_limiter: Arc<SubRateLimiter>,
+) -> Result<warp::reply::Response, Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    let ip = client_ip(remote, x_forwarded_for.as_deref());
+    if !ip_limiter.check(ip) {
+        return Ok(json_status(429, "too_many_requests"));
+    }
+
+    let sub_id = extract_subscription_id(&req.auth_data);
+    if sub_id.is_none() && !auth_data_has_share_token(&req.auth_data) {
+        return Ok(json_status(401, "unauthorized"));
+    }
+    if let Some(sub) = sub_id {
+        if !sub_limiter.check(sub) {
+            return Ok(json_status(429, "too_many_requests_subscription"));
+        }
+    }
+
+    if req.scan.results.is_empty() {
+        return Ok(json_status(400, "empty_results"));
+    }
+    if req.scan.results.len() > MAX_SCAN_RESULTS {
+        return Ok(json_status(413, "too_many_results"));
+    }
+
+    let observed_at = match parse_time(&req.scan.started_at) {
+        Ok(Some(t)) => t,
+        Ok(None) => Utc::now(),
+        Err(e) => return Ok(json_status(400, &e)),
+    };
+
+    let (asn, client_country) = fcore::geoip::lookup(ip);
+    let (app_version, platform, os) = app_fields(&req.scan.app);
+    let batch_id = batch_uuid(&req.scan_id, sub_id);
+    let support_tag = opt_trimmed(&req.scan.support_tag, 64);
+    let network = req.scan.network.clone().unwrap_or(Value::Null);
+
+    let mut rows: Vec<Observation> = Vec::with_capacity(req.scan.results.len());
+    for (index, result) in req.scan.results.iter().enumerate() {
+        if result.port < 1 || result.port > 65535 {
+            return Ok(json_status(400, "invalid_port"));
+        }
+        let protocol = match trimmed(&result.protocol, 32) {
+            Some(v) => v,
+            None => return Ok(json_status(400, "invalid_protocol")),
+        };
+        let address = match parse_address(&result.address) {
+            Ok(v) => v,
+            Err(e) => return Ok(json_status(400, &e)),
+        };
+        let host = opt_trimmed(&result.host, 255);
+        let state = result
+            .udp
+            .clone()
+            .or_else(|| result.tcp.clone())
+            .and_then(|v| trimmed(&v, 24));
+        let (node_id, node_host) = match (address, host.as_deref()) {
+            (Some(addr), _) => memory
+                .db
+                .report()
+                .resolve_node(addr)
+                .await
+                .unwrap_or((None, None)),
+            (None, Some(h)) => memory
+                .db
+                .report()
+                .resolve_node_by_host(h)
+                .await
+                .unwrap_or((None, None)),
+            _ => (None, None),
+        };
+
+        rows.push(Observation {
+            id: observation_uuid(batch_id, index, address, host.as_deref()),
+            subscription_id: sub_id,
+            source: "scan".to_string(),
+            batch_id,
+            support_tag: support_tag.clone(),
+            app_version: app_version.clone(),
+            platform: platform.clone(),
+            os: os.clone(),
+            target_host: host,
+            address,
+            node_id,
+            node_host,
+            port: result.port as i32,
+            protocol,
+            transport: opt_trimmed(&result.transport, 8),
+            state,
+            rtt_ms: result.rtt_ms.map(|v| v as i32),
+            icmp_ok: None,
+            probe: Value::Null,
+            session: serde_json::json!({
+                "mode": req.scan.mode,
+                "duration_ms": req.scan.duration_ms,
+                "network": network,
+            }),
+            country_code: None,
+            asn: asn.map(|v| v as i32),
+            client_country: client_country.clone(),
+            ip_prefix: ip_prefix(ip),
+            ip_hash: Some(ip_hash(ip, b"frkn-block-telemetry-v1")),
+            observed_at,
+        });
+    }
+
+    let results_count = rows.len();
+    match memory.db.report().insert_batch(batch_id, &rows).await {
+        Ok(true) => Ok(accepted(serde_json::json!({
+            "id": batch_id,
+            "dedup": false,
+            "results_count": results_count,
+        }))),
+        Ok(false) => Ok(accepted(serde_json::json!({
+            "id": batch_id,
+            "dedup": true,
+            "reason": "scan_id",
+            "results_count": results_count,
+        }))),
+        Err(e) => {
+            tracing::error!("block scan insert failed: {e}");
+            Ok(json_status(500, "internal"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/admin/report/block
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Deserialize)]
 pub struct BlockReportAggregateQuery {
     #[serde(default)]
@@ -324,7 +652,7 @@ pub struct BlockReportAggregateQuery {
     #[serde(default)]
     pub address: Option<String>,
     #[serde(default)]
-    pub min_reports: Option<i64>,
+    pub min_observations: Option<i64>,
 }
 
 pub async fn admin_block_report_handler<N, C, S>(
@@ -359,11 +687,11 @@ where
         .unwrap_or(now);
 
     let address = match query.address.as_deref() {
-        Some(raw) => match raw.trim().parse::<IpAddr>() {
+        Some(raw) if !raw.trim().is_empty() => match raw.trim().parse::<IpAddr>() {
             Ok(v) => Some(v),
             Err(_) => return Ok(json_status(400, "invalid_address")),
         },
-        None => None,
+        _ => None,
     };
 
     let group_by = query.group_by.as_deref().unwrap_or("address");
@@ -374,7 +702,13 @@ where
     match memory
         .db
         .report()
-        .aggregate(from, to, address, query.min_reports.unwrap_or(1), group_by)
+        .aggregate(
+            from,
+            to,
+            address,
+            query.min_observations.unwrap_or(1),
+            group_by,
+        )
         .await
     {
         Ok(rows) => Ok(warp::reply::with_status(
@@ -384,7 +718,8 @@ where
                     "from": from,
                     "to": to,
                     "group_by": group_by,
-                    "polygon_age_sec": serde_json::Value::Null,
+                    "fail_states": FAIL_STATES,
+                    "ok_states": OK_STATES,
                     "groups": rows,
                 }
             })),
@@ -403,20 +738,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn report_uuid_is_stable_and_unique() {
+    fn batch_uuid_is_stable_and_unique() {
         let sub = uuid::Uuid::parse_str("3e578494-0163-4f52-a90c-0a477fa2c19e").unwrap();
-        let a = report_uuid("abc-123", Some(sub));
-        let b = report_uuid("abc-123", Some(sub));
-        let c = report_uuid("abc-124", Some(sub));
-        assert_eq!(a, b, "одинаковый report_id должен давать тот же ключ");
-        assert_ne!(a, c);
-        // валидный uuid проходит как есть
+        assert_eq!(
+            batch_uuid("abc-123", Some(sub)),
+            batch_uuid("abc-123", Some(sub))
+        );
+        assert_ne!(
+            batch_uuid("abc-123", Some(sub)),
+            batch_uuid("abc-124", Some(sub))
+        );
         let raw = "d2cd1be7-030e-463a-9fb4-52bf00f9733e";
-        assert_eq!(report_uuid(raw, Some(sub)).to_string(), raw);
+        assert_eq!(batch_uuid(raw, Some(sub)).to_string(), raw);
     }
 
     #[test]
-    fn prefixes_are_truncated_not_full_ip() {
+    fn empty_address_is_valid_not_an_error() {
+        // DNS не ответил — самый ценный отчёт, а не 400.
+        assert_eq!(parse_address(&Some(String::new())).unwrap(), None);
+        assert_eq!(parse_address(&None).unwrap(), None);
+        assert!(parse_address(&Some("93.89.220.49".into())).unwrap().is_some());
+        assert!(parse_address(&Some("не-ip".into())).is_err());
+    }
+
+    #[test]
+    fn prefixes_and_hashes_do_not_leak_ip() {
         assert_eq!(
             ip_prefix("203.0.113.77".parse().unwrap()).unwrap(),
             "203.0.113.0/24"
@@ -425,24 +771,37 @@ mod tests {
             ip_prefix("2a02:6b8:c02:1234:5678::1".parse().unwrap()).unwrap(),
             "2a02:6b8:c02::/48"
         );
-    }
-
-    #[test]
-    fn ip_hash_differs_for_different_users() {
         let salt = b"frkn-block-telemetry-v1";
         let a = ip_hash("203.0.113.77".parse().unwrap(), salt);
         let b = ip_hash("203.0.113.78".parse().unwrap(), salt);
         assert_eq!(a.len(), 16);
         assert_ne!(a, b);
-        // в хеше не должно быть читаемого ip
         assert!(!String::from_utf8_lossy(&a).contains("203.0.113"));
     }
 
     #[test]
-    fn trimmed_enforces_limits() {
-        assert_eq!(trimmed("  ru  ", 8).unwrap(), "ru");
-        assert!(trimmed("   ", 8).is_none());
-        assert!(trimmed(&"x".repeat(9), 8).is_none());
+    fn report_state_reads_arrays_and_skips_nothing() {
+        let probe = serde_json::json!({
+            "dns": {"ips": []},
+            "icmp": {"ok": false},
+            "tcp": [{"port": 443, "state": "timeout"}],
+            "udp": [{"port": 443, "state": "no-answer"}]
+        });
+        assert_eq!(report_state(&Some(probe.clone())).unwrap(), "no-answer");
+        assert_eq!(report_transport(&Some(probe)).unwrap(), "udp");
+
+        // пустой probe — не ошибка
+        assert!(report_state(&Some(serde_json::json!({}))).is_none());
+        assert!(report_state(&None).is_none());
+    }
+
+    #[test]
+    fn at_from_future_is_rejected() {
+        let future = (Utc::now() + ChronoDuration::hours(2)).to_rfc3339();
+        assert_eq!(parse_time(&Some(future)).unwrap_err(), "at_in_future");
+        let now = Utc::now().to_rfc3339();
+        assert!(parse_time(&Some(now)).unwrap().is_some());
+        assert_eq!(parse_time(&Some("не-дата".into())).unwrap_err(), "invalid_at");
     }
 
     #[test]
@@ -452,7 +811,13 @@ mod tests {
         assert!(limiter.check(sub));
         assert!(limiter.check(sub));
         assert!(!limiter.check(sub));
-        // другая подписка не затронута
         assert!(limiter.check(uuid::Uuid::new_v4()));
+    }
+
+    #[test]
+    fn trimmed_enforces_limits() {
+        assert_eq!(trimmed("  ru  ", 8).unwrap(), "ru");
+        assert!(trimmed("   ", 8).is_none());
+        assert!(trimmed(&"x".repeat(9), 8).is_none());
     }
 }
