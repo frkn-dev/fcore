@@ -242,6 +242,30 @@ impl AlertsEngine {
         }
     }
 
+    /// Затравка состояния из PG после старта процесса.
+    ///
+    /// Без неё правило не видит ноды, которые молчат с прошлого запуска:
+    /// хранилище метрик живёт в памяти и после рестарта пустое.
+    pub fn seed(&mut self, node_id: Uuid, already_alerted: bool) {
+        let now = Instant::now();
+        let grace = Duration::from_secs(self.cfg.new_node_grace_sec);
+        let track = self
+            .nodes
+            .entry(node_id)
+            .or_insert_with(|| NodeTrack::new(now));
+        // нода нам известна давно — грейс «новой ноды» на неё не действует
+        track.first_seen = now.checked_sub(grace).unwrap_or(now);
+        track.alerted = already_alerted;
+        if already_alerted {
+            track.offline_since = Some(now);
+        }
+    }
+
+    /// Уже отправляли алерт по этой ноде (и отбоя не было).
+    pub fn is_alerted(&self, node_id: &Uuid) -> bool {
+        self.nodes.get(node_id).map(|t| t.alerted).unwrap_or(false)
+    }
+
     /// Убирает состояние по нодам, которых больше нет в реестре.
     pub fn retain_nodes(&mut self, alive: &[Uuid]) {
         self.nodes.retain(|id, _| alive.contains(id));

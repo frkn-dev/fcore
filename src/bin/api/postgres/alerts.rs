@@ -40,6 +40,14 @@ impl PgAlerts {
                     ON alert_events (rule, created_at DESC);
                 CREATE INDEX IF NOT EXISTS alert_events_node_time
                     ON alert_events (node_id, created_at DESC);
+
+                -- Последний heartbeat по ноде: переживает рестарт api, чтобы
+                -- правило «нода молчит» работало и после перезапуска.
+                CREATE TABLE IF NOT EXISTS node_heartbeats (
+                    node_id    uuid PRIMARY KEY,
+                    last_ms    bigint NOT NULL,
+                    updated_at timestamptz NOT NULL DEFAULT now()
+                );
                 "#,
             )
             .await?;
@@ -83,6 +91,70 @@ impl PgAlerts {
             .await?;
 
         Ok(())
+    }
+
+    /// Сохраняет последние heartbeat-ы (по одной записи на ноду).
+    pub async fn upsert_heartbeats(&self, rows: &[(uuid::Uuid, i64)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let ids: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
+        let stamps: Vec<i64> = rows.iter().map(|(_, ms)| *ms).collect();
+
+        client
+            .execute(
+                r#"
+                INSERT INTO node_heartbeats (node_id, last_ms, updated_at)
+                SELECT * FROM unnest($1::uuid[], $2::bigint[]) AS t(node_id, last_ms), now()
+                ON CONFLICT (node_id) DO UPDATE SET last_ms = EXCLUDED.last_ms, updated_at = now()
+                "#,
+                &[&ids, &stamps],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Последние известные heartbeat-ы (для затравки движка после рестарта).
+    pub async fn load_heartbeats(&self) -> Result<Vec<(uuid::Uuid, i64)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query("SELECT node_id, last_ms FROM node_heartbeats", &[])
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<_, uuid::Uuid>("node_id"), r.get::<_, i64>("last_ms")))
+            .collect())
+    }
+
+    /// Ноды, по которым последнее событие — «упала» (то есть алерт уже был и
+    /// отбоя не последовало). Нужно, чтобы рестарт не спамил теми же авариями.
+    pub async fn nodes_with_open_offline_alert(&self) -> Result<Vec<uuid::Uuid>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT node_id FROM (
+                    SELECT DISTINCT ON (node_id) node_id, rule
+                    FROM alert_events
+                    WHERE node_id IS NOT NULL
+                    ORDER BY node_id, created_at DESC
+                ) last WHERE rule = 'node_offline'
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows.iter().map(|r| r.get::<_, uuid::Uuid>("node_id")).collect())
     }
 
     /// Последние срабатывания — для отладки и будущей админки.

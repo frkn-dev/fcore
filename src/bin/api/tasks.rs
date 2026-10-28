@@ -966,6 +966,27 @@ where
 
         let client = reqwest::Client::new();
         let mut engine = crate::alerts::AlertsEngine::new(cfg.clone());
+
+        // После рестарта хранилище метрик пустое, поэтому последние heartbeat-ы
+        // и уже открытые аварии берём из PG — иначе мёртвые ноды «невидимы».
+        let mut last_seen: std::collections::HashMap<uuid::Uuid, i64> =
+            match self.sync.db.alerts().load_heartbeats().await {
+                Ok(rows) => rows.into_iter().collect(),
+                Err(e) => {
+                    tracing::warn!("alerts: cannot load heartbeats from db: {e}");
+                    Default::default()
+                }
+            };
+        match self.sync.db.alerts().nodes_with_open_offline_alert().await {
+            Ok(ids) => {
+                for id in ids {
+                    engine.seed(id, true);
+                }
+            }
+            Err(e) => tracing::warn!("alerts: cannot load open alerts: {e}"),
+        }
+        tracing::info!("alerts: seeded {} known heartbeats", last_seen.len());
+
         let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
 
         tracing::info!(
@@ -993,7 +1014,14 @@ where
             let now_ms = chrono::Utc::now().timestamp_millis();
 
             for (node_id, hostname, env) in nodes {
-                let heartbeat = self.metrics.get_last_heartbeat(&node_id);
+                // живой heartbeat обновляет карту; иначе берём последний известный
+                if let Some(fresh) = self.metrics.get_last_heartbeat(&node_id) {
+                    last_seen.insert(node_id, fresh);
+                }
+                let heartbeat = last_seen.get(&node_id).copied();
+                if heartbeat.is_some() {
+                    engine.seed(node_id, engine.is_alerted(&node_id));
+                }
 
                 let crate::alerts::Decision::Fire {
                     kind,
@@ -1082,12 +1110,31 @@ where
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64) {
         let mut interval = tokio::time::interval(Duration::from_secs(check_interval_sec));
         let threshold_ms = (offline_threshold_sec * 1000) as i64;
+        // Раз в минуту сохраняем последние heartbeat-ы в PG: правило
+        // «нода молчит» должно переживать рестарт api.
+        let mut last_persist = std::time::Instant::now();
 
         loop {
             interval.tick().await;
             tracing::debug!("Running node heartbeat monitor task");
 
             let now_ms = chrono::Utc::now().timestamp_millis();
+
+            if last_persist.elapsed() >= Duration::from_secs(60) {
+                let mut rows: Vec<(uuid::Uuid, i64)> = Vec::new();
+                {
+                    let memory = self.sync.memory.read().await;
+                    for (id, _node) in memory.nodes.iter_nodes() {
+                        if let Some(ms) = self.metrics.get_last_heartbeat(id) {
+                            rows.push((*id, ms));
+                        }
+                    }
+                }
+                if let Err(e) = self.sync.db.alerts().upsert_heartbeats(&rows).await {
+                    tracing::warn!("cannot persist node heartbeats: {e}");
+                }
+                last_persist = std::time::Instant::now();
+            }
 
             let nodes_snapshot: Vec<(uuid::Uuid, Env, NodeStatus)> = {
                 let memory = self.sync.memory.read().await;
