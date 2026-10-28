@@ -2,12 +2,13 @@
 
 ## Current
 - **Repo:** ffcore
-- **Branch:** `feat/block-telemetry` (не смерджено, на прод не выкачено)
-- **Task:** телеметрия блокировок — `POST /v1/report/block` + `GET /v1/admin/report/block` (ТЗ: `dopamine/frkn-docs/block-telemetry-api.md`)
-- **Status:** Э0+Э1 готовы и закоммичены (`73a16e7`, `a86ca54`, `4902828`): стор `block_reports` + идемпотентный приём, лимиты 10/мин на IP и 30/час на подписку, дедуп по `report_id` и по окну 10 мин, вердикты `blocked` / `blocked_single_asn` / `unknown` считаются на лету по скользящему окну, оффлайн-обогащение ASN/страной из GeoLite2. Тесты: lib 103, bin api 102. **Деплой ждёт клиентскую часть** — собираем v0.6.75 после того, как клиент доделает отчёты, чтобы проверить сквозняком.
-- **Updated:** 2026-10-27
+- **Branch:** `main` (смерджено, запушено; на проде **v0.6.78**)
+- **Task:** телеметрия блокировок (`POST /v1/report/block`, `POST /v1/report/scan`, `GET /v1/admin/report/block`)
+- **Status:** выкачено и проверено на проде живым клиентским конвертом (AES-256-CBC + RSA): отчёт 202, дубль по `report_id`/окну — 202 `dedup`, пустой `address` принимается, без авторизации 401, скан 3 записи 202. Данные легли в `block_observations` (4 строки), админ-агрегат по `address|node|asn|country` считает вердикты, geoip определяет ASN/страну по IP запроса. Тесты: lib 103, bin api 104.
+- **Updated:** 2026-10-28
 
 ## Done
+- 2026-10-28 — **0.6.78: телеметрия блокировок в проде**. `block_observations` (одна таблица на отчёты и сканы), идемпотентность по `report_id`/`scan_id` и окну 10 мин, лимиты 16/128 КБ + 10/мин на IP + 30/час на подписку, geoip ASN/страна оффлайн из GeoLite2 (`/opt/api/GeoLite2-*.mmdb`), суточная ретенция 30 дней. Найдено на проде и починено: сериализация `cidr`/`char(2)` (касты в INSERT), `ip_hash` отсутствовал в CTE агрегата. Админ-ручка закрыта admin-токеном.
 - 2026-10-27 — **block-telemetry Э0+Э1** (ветка `feat/block-telemetry`): таблица `block_reports` (+ индексы addr/time, asn/time, sub/time), `insert_once` с `ON CONFLICT (id)`, `count_recent` для дедупа по окну, `aggregate()` с вердиктом на лету; хендлер с валидацией контракта, ответами 202/400/401/413/429, `SubRateLimiter` 30/час на подписку; `src/geoip.rs` — GeoLite2 ASN+Country в `OnceLock`, конфиг `geoip_asn_path` / `geoip_country_path`. Базы лежат на проде в `/opt/api/GeoLite2-{ASN,Country}.mmdb` (8.6M/3.2M, sha сверены), в гит не коммитятся. **В `config.toml` пути пока НЕ добавлены** — старый бинарь 0.6.74 их не читает, добавляем при выкатке.
 - 2026-10-25 — **0.6.74: первые 50 адресов каждой подсети больше не выдаются**. Аллокатор (`connection.rs`, `premium.rs`) стартует с `network + RESERVED_PREFIX + 1` (`IpAddrMask::RESERVED_PREFIX = 50`, `src/memory/connection/wireguard.rs`), а если счётчик откатился ниже резерва (восстановление из бэкапа) — поднимается до резерва. Причина: на хостах собственные awg-интерфейсы стоят на `100.64.0.1-.4` и `10.77.0.1-.4`, а пул выдавал юзерам ровно эти адреса. Тесты: 101 lib (2 новых на резерв). Прод `Ok (v0.6.74)`. **Не сделано:** 7 живых коннектов всё ещё сидят в зарезервированном диапазоне (3 AWG `100.64.0.2-.4`, 4 мобильных `10.77.0.1-.4`) — их замена требует фикса `Action::Update` в ноде (`node/tasks.rs:127` возвращает «AWG user already exists» вместо замены allowed-ips).
 - 2026-10-25 — **0.6.73: трафик слота в инвентаре**. Для каждого слота с владельцем отдаём `traffic_up` / `traffic_down` / `traffic_total` — это суммарный трафик подписки-владельца (`traffic().total_for_subscription`), отдельного счётчика на слот нет. На проде: 21 из 26 слотов с трафиком, крупнейший ~203 ГБ вниз. Прод `Ok (v0.6.73)`.
@@ -39,6 +40,9 @@
 - [ ] dopamine: сборка с `frkn://sub/shared/` (локально собирается, не закоммичено).
 
 ## Blockers / Notes
+- **Билд-хост `us.frkn.org` (82.26.93.183) отваливается по прямому SSH** (22 filtered), `ProxyJump` с ключом перестал пускать — рабочий способ: `ssh -o ProxyCommand="ssh -i ~/.ssh/ed25519_frkn -W %h:%p root@darkmachine2.frkn.org" -i ~/.ssh/ed25519_frkn root@82.26.93.183`.
+- Перед сборкой чистить грязный `Cargo.lock` в `/opt/build/src/<repo>`, иначе `build.sh` падает на `git checkout` с `Aborting`.
+- Лог api при старте печатает `Settings: ServiceSettings {...}` вместе с токенами и паролем БД — не грепать эту строку целиком.
 - **block-telemetry ждёт клиент** — сборка/деплой `v0.6.75` после того, как клиентская часть начнёт присылать отчёты.
 - GeoLite2 требует атрибуции («This product includes GeoLite2 data created by MaxMind…») — добавить на сайт/в доки, когда ручка поедет в прод.
 - **Обход недоступного билд-хоста: ходить через jump `ProxyJump=root@darkmachine2.frkn.org`** (`darkmachine2.frkn.org` = 91.199.137.92). Прямой SSH до `us.frkn.org` (82.26.93.183) периодически не поднимается, через jump работает. Сборку запускать отвязанно: `ssh -J root@darkmachine2.frkn.org root@us.frkn.org 'cd /opt/build && setsid nohup ./build.sh fcore <tag> > /tmp/build-<tag>.log 2>&1 </dev/null &'` — обрыв SSH её больше не убивает. `server-release.sh` jump не умеет, поэтому `gh release create` делать руками.
