@@ -322,6 +322,7 @@ mod tests {
             recovery_grace_sec: 120,
             new_node_grace_sec: 0,
             throttle_sec: 1800,
+            telegram_api_base: default_api_base(),
         }
     }
 
