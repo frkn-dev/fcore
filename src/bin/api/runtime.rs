@@ -132,13 +132,17 @@ where
             }
         });
 
-        spawn_task("monitor_alerts", {
-            let service = Arc::clone(&self);
-            // Правила оповещений: проверка раз в 30 секунд.
-            async move {
-                service.monitor_alerts(30).await;
-            }
-        });
+        if self.settings.alerts.can_deliver() {
+            spawn_task("monitor_alerts", {
+                let service = Arc::clone(&self);
+                // Правила оповещений: проверка раз в 30 секунд.
+                async move {
+                    service.monitor_alerts(30).await;
+                }
+            });
+        } else {
+            tracing::warn!("alerts: task not started (no telegram token/chat_id)");
+        }
 
         spawn_task("purge_block_observations", {
             let service = Arc::clone(&self);

@@ -957,7 +957,11 @@ where
                 cfg.telegram_bot_token.is_some(),
                 cfg.telegram_chat_id.is_some()
             );
-            return;
+            // Не выходим: runtime считает завершившуюся задачу аварией.
+            // Просто дремлем, пока конфиг не перечитают рестартом.
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
         }
 
         let client = reqwest::Client::new();
