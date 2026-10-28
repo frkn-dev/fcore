@@ -13,6 +13,9 @@ pub struct ServiceSettings {
     pub subscription_audit: SubscriptionAuditConfig,
     #[serde(default)]
     pub score: fcore::score::ScoreConfig,
+    /// Правила оповещений (нода офлайн / вернулась).
+    #[serde(default)]
+    pub alerts: crate::alerts::AlertsConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]

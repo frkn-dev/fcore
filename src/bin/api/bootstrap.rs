@@ -63,6 +63,7 @@ where
 
         db.install_token().ensure_table().await?;
         db.report().ensure_table().await?;
+        db.alerts().ensure_table().await?;
 
         // Оффлайн geo-базы: без них телеметрия блокировок работает, но без
         // ASN/страны — вердикты не срабатывают, поэтому шумим в лог.

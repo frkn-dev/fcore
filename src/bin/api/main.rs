@@ -9,6 +9,7 @@ use crate::{
     service::{Cache, Service},
 };
 
+mod alerts;
 mod bootstrap;
 mod config;
 mod entitlements;

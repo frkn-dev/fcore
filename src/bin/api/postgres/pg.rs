@@ -132,6 +132,10 @@ impl PgContext {
         PgInstallToken::new(self.manager.clone())
     }
 
+    pub fn alerts(&self) -> crate::postgres::alerts::PgAlerts {
+        crate::postgres::alerts::PgAlerts::new(self.manager.clone())
+    }
+
     pub fn report(&self) -> crate::postgres::report::PgReport {
         crate::postgres::report::PgReport::new(self.manager.clone())
     }

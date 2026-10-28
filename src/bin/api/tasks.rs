@@ -32,6 +32,7 @@ pub trait Tasks {
     async fn cleanup_expired_subscriptions(&self, interval_sec: u64);
     async fn restore_subscriptions(&self, interval_sec: u64);
     async fn purge_block_observations(&self, interval_sec: u64);
+    async fn monitor_alerts(&self, interval_sec: u64);
 
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
     async fn persist_connection_traffic(&self, interval_sec: u64);
@@ -944,6 +945,108 @@ where
         *mem = tmp_mem;
 
         Ok(())
+    }
+
+    /// Правила оповещений: нода офлайн дольше порога и её возвращение.
+    async fn monitor_alerts(&self, interval_sec: u64) {
+        let cfg = self.settings.alerts.clone();
+        if !cfg.can_deliver() {
+            tracing::warn!(
+                "alerts: disabled (enabled={}, telegram token={}, chat={}) — правила не работают",
+                cfg.enabled,
+                cfg.telegram_bot_token.is_some(),
+                cfg.telegram_chat_id.is_some()
+            );
+            return;
+        }
+
+        let client = reqwest::Client::new();
+        let mut engine = crate::alerts::AlertsEngine::new(cfg.clone());
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        tracing::info!(
+            "alerts: started (offline>{}s, recovery {}s, new node grace {}s)",
+            cfg.offline_threshold_sec,
+            cfg.recovery_grace_sec,
+            cfg.new_node_grace_sec
+        );
+
+        loop {
+            interval.tick().await;
+
+            let nodes: Vec<(uuid::Uuid, String, String)> = {
+                let memory = self.sync.memory.read().await;
+                memory
+                    .nodes
+                    .iter_nodes()
+                    .map(|(id, node)| (*id, node.hostname.clone(), node.env.to_string()))
+                    .collect()
+            };
+
+            let alive: Vec<uuid::Uuid> = nodes.iter().map(|(id, _, _)| *id).collect();
+            engine.retain_nodes(&alive);
+
+            let now_ms = chrono::Utc::now().timestamp_millis();
+
+            for (node_id, hostname, env) in nodes {
+                let heartbeat = self.metrics.get_last_heartbeat(&node_id);
+
+                let crate::alerts::Decision::Fire {
+                    kind,
+                    duration_sec,
+                    ..
+                } = engine.observe(node_id, &hostname, &env, heartbeat, now_ms)
+                else {
+                    continue;
+                };
+
+                let text = crate::alerts::format_message(&kind, &hostname, &env, duration_sec);
+                let delivered = match (
+                    cfg.telegram_bot_token.as_deref(),
+                    cfg.telegram_chat_id.as_deref(),
+                ) {
+                    (Some(token), Some(chat)) => {
+                        match crate::alerts::send_telegram(&client, &cfg.telegram_api_base, token, chat, &text).await {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::error!("alerts: delivery failed: {e}");
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+
+                tracing::info!(
+                    "alert {}: {} ({}) duration={}s delivered={}",
+                    kind.as_str(),
+                    hostname,
+                    env,
+                    duration_sec,
+                    delivered
+                );
+
+                let details = serde_json::json!({ "hostname": hostname, "env": env });
+                if let Err(e) = self
+                    .sync
+                    .db
+                    .alerts()
+                    .record(
+                        kind.as_str(),
+                        Some(node_id),
+                        Some(&hostname),
+                        Some(&env),
+                        duration_sec,
+                        delivered,
+                        &details,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    tracing::error!("alerts: cannot record event: {e}");
+                }
+            }
+        }
     }
 
     /// Ретенция наблюдений о блокировках (30 дней).

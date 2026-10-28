@@ -11,6 +11,7 @@ pub mod node;
 pub mod premium;
 pub mod premium_inventory;
 pub mod private;
+pub(crate) mod alerts;
 pub(crate) mod report;
 pub mod score;
 pub mod share;

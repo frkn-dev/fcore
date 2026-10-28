@@ -1007,6 +1007,69 @@ where
                 },
             );
 
+        // Админ-ручки оповещений: история и тест канала.
+        let get_admin_alerts_route = warp::get()
+            .and(warp::path!("v1" / "admin" / "alerts"))
+            .and(warp::path::end())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(
+                |q: std::collections::HashMap<String, String>,
+                 sync: MemSync<N, C, S>,
+                 admin_enabled: bool,
+                 admin_token: String,
+                 auth_header: Option<String>| async move {
+                    let limit = q.get("limit").and_then(|v| v.parse::<i64>().ok());
+                    crate::http::handlers::alerts::admin_alerts_handler(
+                        limit,
+                        sync,
+                        admin_enabled,
+                        admin_token,
+                        auth_header,
+                    )
+                    .await
+                },
+            );
+
+        let alerts_cfg = self.settings.alerts.clone();
+        let post_admin_alerts_test_route = warp::post()
+            .and(warp::path!("v1" / "admin" / "alerts" / "test"))
+            .and(warp::path::end())
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and(with_param_bool(alerts_cfg.enabled))
+            .and(with_param_string(alerts_cfg.telegram_api_base.clone()))
+            .and(with_param_string(
+                alerts_cfg.telegram_bot_token.clone().unwrap_or_default(),
+            ))
+            .and(with_param_string(
+                alerts_cfg.telegram_chat_id.clone().unwrap_or_default(),
+            ))
+            .and_then(
+                |admin_enabled: bool,
+                 admin_token: String,
+                 auth_header: Option<String>,
+                 alerts_enabled: bool,
+                 api_base: String,
+                 bot_token: String,
+                 chat_id: String| async move {
+                    crate::http::handlers::alerts::admin_alerts_test_handler(
+                        admin_enabled,
+                        admin_token,
+                        auth_header,
+                        alerts_enabled,
+                        api_base,
+                        bot_token,
+                        chat_id,
+                    )
+                    .await
+                },
+            );
+
         // GET /v1/admin/report/block — агрегат с вердиктами (под admin-токеном).
         let get_block_report_admin_route = warp::get()
             .and(warp::path("v1"))
@@ -1389,6 +1452,8 @@ where
             .or(post_block_report_route)
             .or(post_scan_report_route)
             .or(get_block_report_admin_route)
+            .or(get_admin_alerts_route)
+            .or(post_admin_alerts_test_route)
             // Mesh
             .or(mesh_routes)
             // Admin

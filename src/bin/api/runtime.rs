@@ -132,6 +132,14 @@ where
             }
         });
 
+        spawn_task("monitor_alerts", {
+            let service = Arc::clone(&self);
+            // Правила оповещений: проверка раз в 30 секунд.
+            async move {
+                service.monitor_alerts(30).await;
+            }
+        });
+
         spawn_task("purge_block_observations", {
             let service = Arc::clone(&self);
             // Раз в сутки: сырые наблюдения живут 30 дней.
