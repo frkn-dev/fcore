@@ -986,6 +986,10 @@ where
             Err(e) => tracing::warn!("alerts: cannot load open alerts: {e}"),
         }
         tracing::info!("alerts: seeded {} known heartbeats", last_seen.len());
+        // Ноды, которые молчат ещё с прошлых запусков, в PG тоже отсутствуют.
+        // Для них точкой отсчёта считаем старт процесса: алерт придёт, когда
+        // молчание превысит порог, с честной пометкой «с момента запуска».
+        let started_ms = chrono::Utc::now().timestamp_millis();
 
         let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
 
@@ -999,27 +1003,42 @@ where
         loop {
             interval.tick().await;
 
-            let nodes: Vec<(uuid::Uuid, String, String)> = {
+            let nodes: Vec<(uuid::Uuid, String, String, bool)> = {
                 let memory = self.sync.memory.read().await;
                 memory
                     .nodes
                     .iter_nodes()
-                    .map(|(id, node)| (*id, node.hostname.clone(), node.env.to_string()))
+                    .map(|(id, node)| {
+                        (
+                            *id,
+                            node.hostname.clone(),
+                            node.env.to_string(),
+                            node.status == NodeStatus::Online,
+                        )
+                    })
                     .collect()
             };
 
-            let alive: Vec<uuid::Uuid> = nodes.iter().map(|(id, _, _)| *id).collect();
+            let alive: Vec<uuid::Uuid> = nodes.iter().map(|(id, _, _, _)| *id).collect();
             engine.retain_nodes(&alive);
 
             let now_ms = chrono::Utc::now().timestamp_millis();
 
-            for (node_id, hostname, env) in nodes {
+            for (node_id, hostname, env, is_online) in nodes {
                 // живой heartbeat обновляет карту; иначе берём последний известный
                 if let Some(fresh) = self.metrics.get_last_heartbeat(&node_id) {
                     last_seen.insert(node_id, fresh);
                 }
-                let heartbeat = last_seen.get(&node_id).copied();
-                if heartbeat.is_some() {
+                let heartbeat = last_seen.get(&node_id).copied().or_else(|| {
+                    // Нода не отчитывалась ни разу: если она не онлайн —
+                    // считаем, что молчит с момента старта процесса.
+                    if is_online {
+                        None
+                    } else {
+                        Some(started_ms)
+                    }
+                });
+                if heartbeat.is_some() && last_seen.contains_key(&node_id) {
                     engine.seed(node_id, engine.is_alerted(&node_id));
                 }
 
