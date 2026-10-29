@@ -387,20 +387,36 @@ impl MetricStorage {
     // HEARTBEAT
     // ------------------------------------------------------------
 
+    /// Последняя метка `sys.heartbeat` по ноде.
+    ///
+    /// У ноды может быть НЕСКОЛЬКО серий heartbeat: ключ серии — хеш (имя +
+    /// теги), поэтому смена тегов (env, label, адрес, cores) или служебная
+    /// отметка с пустыми тегами создаёт вторую серию. Раньше возвращалась
+    /// первая попавшаяся — если она заморожена, нода навсегда оставалась
+    /// offline при живом трафике. Берём максимум по всем сериям.
     pub fn get_last_heartbeat(&self, node_id: &uuid::Uuid) -> Option<i64> {
         let node = self.inner.get(node_id)?;
+        let mut latest: Option<i64> = None;
 
         for entry in node.iter() {
             let hash = *entry.key();
 
-            if let Some((name, _)) = self.metadata.get(&hash).map(|m| m.value().clone()) {
-                if name == "sys.heartbeat" {
-                    return entry.value().back().map(|p| p.timestamp);
-                }
+            let is_heartbeat = self
+                .metadata
+                .get(&hash)
+                .map(|m| m.value().0 == "sys.heartbeat")
+                .unwrap_or(false);
+
+            if !is_heartbeat {
+                continue;
+            }
+
+            if let Some(ts) = entry.value().back().map(|p| p.timestamp) {
+                latest = Some(latest.map_or(ts, |cur: i64| cur.max(ts)));
             }
         }
 
-        None
+        latest
     }
 
     // ------------------------------------------------------------
@@ -648,6 +664,37 @@ mod tests {
         assert_eq!(escape_prometheus_label("a\"b"), "a\\\"b");
         assert_eq!(escape_prometheus_label("a\\b"), "a\\\\b");
         assert_eq!(escape_prometheus_label("a\nb"), "a\\nb");
+    }
+
+    /// Регрессия: служебная отметка регистрации с пустыми тегами создаёт
+    /// ВТОРУЮ серию `sys.heartbeat`. Если она заморожена, нода с живым
+    /// трафиком навсегда остаётся offline (ровно так встал cz2). Берём
+    /// максимум по всем сериям, а не первую попавшуюся.
+    #[test]
+    fn test_get_last_heartbeat_ignores_stale_series() {
+        let storage = MetricStorage::new(100, 3600);
+        let node_id = uuid::Uuid::parse_str("e9e4b6f5-8d9b-473a-8c3a-74b8b8e1ae8b").unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let mut tags = BTreeMap::new();
+        tags.insert("hostname".to_string(), "cz2.frkn.org".to_string());
+
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "sys.heartbeat".to_string(),
+            value: 1.0,
+            timestamp: now - 700_000,
+            tags: BTreeMap::new(),
+        });
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "sys.heartbeat".to_string(),
+            value: 1.0,
+            timestamp: now - 1_000,
+            tags,
+        });
+
+        assert_eq!(storage.get_last_heartbeat(&node_id), Some(now - 1_000));
     }
 
     #[tokio::test]

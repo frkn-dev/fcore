@@ -321,13 +321,22 @@ fn refresh_env(existing: Option<&Env>, requested: &Env) -> Result<Env, &'static 
     Ok(requested.clone())
 }
 
-fn note_heartbeat(metrics: &MetricStorage, node_id: Uuid) {
+/// Отметка «нода только что зарегистрировалась».
+///
+/// Теги обязаны совпадать с тегами настоящих heartbeat от агента: ключ серии
+/// в MetricStorage — хеш (имя + теги), и пустой набор тегов создавал вторую,
+/// навсегда замороженную серию `sys.heartbeat` рядом с живой.
+fn note_heartbeat(
+    metrics: &MetricStorage,
+    node_id: Uuid,
+    tags: BTreeMap<String, String>,
+) {
     metrics.insert_envelope(MetricEnvelope {
         node_id,
         name: "sys.heartbeat".to_string(),
         value: 1.0,
         timestamp: chrono::Utc::now().timestamp_millis(),
-        tags: BTreeMap::new(),
+        tags,
     });
 }
 
@@ -734,7 +743,7 @@ where
 
             let _ =
                 SyncOp::update_node_status(&memory, &node_id, &node.env, NodeStatus::Online).await;
-            note_heartbeat(&metrics, node_id);
+            note_heartbeat(&metrics, node_id, node.get_base_tags());
             seed_private_connections(
                 &memory,
                 row.subscription_id,
@@ -1883,7 +1892,7 @@ where
         Ok(Status::Ok(id)) | Ok(Status::AlreadyExist(id)) | Ok(Status::NotModified(id)) => {
             let _ =
                 SyncOp::update_node_status(&memory, &known, &node.env, NodeStatus::Online).await;
-            note_heartbeat(&metrics, known);
+            note_heartbeat(&metrics, known, node.get_base_tags());
             Ok(warp::reply::with_status(
                 warp::reply::json(&ResponseMessage {
                     status: StatusCode::OK.as_u16(),
