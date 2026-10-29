@@ -998,6 +998,7 @@ where
             cfg.cpu_threshold_pct,
             cfg.cpu_hold_sec
         );
+        tracing::info!("alerts: offline escalation after {}s", cfg.offline_long_sec);
         tracing::info!(
             "alerts: disk rule active (disk>{}% {}s, reset {}%)",
             cfg.disk_threshold_pct,

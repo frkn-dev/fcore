@@ -48,6 +48,9 @@ pub struct AlertsConfig {
     /// Сколько переходов offline↔online в окне считаем «нода мигает».
     #[serde(default = "default_flap_threshold")]
     pub flap_threshold: u64,
+    /// Через сколько секунд офлайна шлём эскалацию.
+    #[serde(default = "default_offline_long")]
+    pub offline_long_sec: u64,
     /// Порог CPU, выше которого копим время.
     #[serde(default = "default_cpu_threshold")]
     pub cpu_threshold_pct: f64,
@@ -82,6 +85,9 @@ fn default_new_node_grace() -> u64 {
 }
 fn default_throttle() -> u64 {
     1800
+}
+fn default_offline_long() -> u64 {
+    3600
 }
 fn default_disk_threshold() -> f64 {
     90.0
@@ -124,6 +130,7 @@ impl Default for AlertsConfig {
             recovery_grace_sec: default_recovery_grace(),
             new_node_grace_sec: default_new_node_grace(),
             throttle_sec: default_throttle(),
+            offline_long_sec: default_offline_long(),
             disk_threshold_pct: default_disk_threshold(),
             disk_hold_sec: default_disk_hold(),
             disk_reset_pct: default_disk_reset(),
@@ -149,6 +156,8 @@ impl AlertsConfig {
 pub enum AlertKind {
     NodeOffline,
     NodeRecovered,
+    /// Нода лежит дольше часа — эскалация к обычному node_offline.
+    NodeOfflineLong,
     /// Нода мигает: много переходов за окно (короткие обрывы, не ловимые порогом).
     NodeFlapping,
     /// CPU держится выше порога дольше заданного времени.
@@ -161,6 +170,7 @@ impl AlertKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::NodeOffline => "node_offline",
+            Self::NodeOfflineLong => "node_offline_long",
             Self::NodeRecovered => "node_recovered",
             Self::NodeFlapping => "node_flapping",
             Self::NodeCpuHigh => "node_cpu_high",
@@ -213,6 +223,8 @@ struct NodeTrack {
     flap_alerted: bool,
     /// Сейчас длится эпизод тишины (чтобы не считать его много раз).
     hiccup_active: bool,
+    /// Уже отправили эскалацию «лежит больше часа».
+    long_alerted: bool,
     /// Последний отправленный алерт по типу — для подавления повторов.
     last_sent: HashMap<&'static str, Instant>,
 }
@@ -228,6 +240,7 @@ impl NodeTrack {
             last_online: None,
             flap_alerted: false,
             hiccup_active: false,
+            long_alerted: false,
             last_sent: HashMap::new(),
         }
     }
@@ -333,6 +346,25 @@ impl AlertsEngine {
             let since = *track.offline_since.get_or_insert(now);
             let offline_for = now.duration_since(since).as_secs() as i64;
 
+            // Эскалация: нода лежит дольше часа — отдельное сообщение,
+            // чтобы 10-минутный алерт не потерялся в потоке.
+            let silence = silence_sec.max(offline_for);
+            if track.alerted
+                && !track.long_alerted
+                && !new_node
+                && silence >= self.cfg.offline_long_sec.max(600) as i64
+            {
+                track.long_alerted = true;
+                return Decision::Fire {
+                    kind: AlertKind::NodeOfflineLong,
+                    node_id,
+                    hostname: hostname.to_string(),
+                    env: env.to_string(),
+                    duration_sec: silence,
+                    detail: None,
+                };
+            }
+
             if track.alerted || new_node {
                 return Decision::Idle;
             }
@@ -365,6 +397,7 @@ impl AlertsEngine {
         }
 
         track.alerted = false;
+        track.long_alerted = false;
         track.ok_since = None;
         Decision::Fire {
             kind: AlertKind::NodeRecovered,
@@ -572,6 +605,10 @@ pub fn format_message_full(
             "🟢 Нода вернулась\n{hostname} ({env})\nстабильна: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
+        AlertKind::NodeOfflineLong => format!(
+            "🚨 Нода лежит больше часа\n{hostname} ({env})\nмолчит: {human}\nвремя: {}",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ),
         AlertKind::NodeDiskHigh => format!(
             "💾 Диск почти полон\n{hostname} ({env}){extra}\nдержится: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
@@ -612,6 +649,7 @@ mod tests {
             recovery_grace_sec: 120,
             new_node_grace_sec: 0,
             throttle_sec: 1800,
+            offline_long_sec: 3600,
             disk_threshold_pct: 90.0,
             disk_hold_sec: 900,
             disk_reset_pct: 85.0,
@@ -689,6 +727,33 @@ mod tests {
                                                                  // первый свежий heartbeat — ещё не отбой
         assert_eq!(
             e.observe(node(), "n1", "ru", Some(now), now),
+            Decision::Idle
+        );
+    }
+
+    #[test]
+    fn long_offline_escalates_once() {
+        let mut e = AlertsEngine::new(cfg());
+        let now = 1_700_000_000_000i64;
+        let hour_ago = Some(now - 3_700_000);
+        // первое срабатывание — обычный офлайн
+        match e.observe(node(), "n1", "ru", hour_ago, now) {
+            Decision::Fire { kind, .. } => assert_eq!(kind, AlertKind::NodeOffline),
+            other => panic!("ожидали node_offline, получили {other:?}"),
+        }
+        // следующий тик — эскалация «больше часа»
+        match e.observe(node(), "n1", "ru", Some(now - 3_730_000), now) {
+            Decision::Fire {
+                kind, duration_sec, ..
+            } => {
+                assert_eq!(kind, AlertKind::NodeOfflineLong);
+                assert!(duration_sec >= 3600);
+            }
+            other => panic!("ожидали node_offline_long, получили {other:?}"),
+        }
+        // повторно не шлём
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now - 3_760_000), now),
             Decision::Idle
         );
     }
