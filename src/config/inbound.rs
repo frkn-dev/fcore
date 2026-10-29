@@ -752,7 +752,10 @@ mod tests {
         }
     }
 
-    fn awg_obfuscation(random_trailers: Option<bool>, disable_cookies: Option<bool>) -> AwgObfuscationParams {
+    fn awg_obfuscation(
+        random_trailers: Option<bool>,
+        disable_cookies: Option<bool>,
+    ) -> AwgObfuscationParams {
         AwgObfuscationParams {
             jc: 4,
             jmin: 56,
@@ -814,7 +817,10 @@ mod tests {
         let config = inbound
             .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
             .unwrap();
-        assert!(config.contains("PersistentKeepalive = 25\n"), "config: {config}");
+        assert!(
+            config.contains("PersistentKeepalive = 25\n"),
+            "config: {config}"
+        );
 
         // Set on the inbound: rendered as-is.
         let mut inbound = awg_inbound(None);
@@ -822,15 +828,21 @@ mod tests {
         let config = inbound
             .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
             .unwrap();
-        assert!(config.contains("PersistentKeepalive = 10\n"), "config: {config}");
+        assert!(
+            config.contains("PersistentKeepalive = 10\n"),
+            "config: {config}"
+        );
     }
 
     #[test]
     fn test_awg31_flags_not_rendered_when_unset_or_off() {
-        for (rt, dc) in [(None, None), (Some(false), Some(false)), (Some(false), None)] {
+        for (rt, dc) in [
+            (None, None),
+            (Some(false), Some(false)),
+            (Some(false), None),
+        ] {
             let inbound = awg_inbound(Some(awg_obfuscation(rt, dc)));
-            let conn_id =
-                uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+            let conn_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
             let config = inbound
                 .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
                 .unwrap();
@@ -872,10 +884,22 @@ mod tests {
             .amneziawg(&conn_id, &awg_conn(), "node", "node.example.com", "Test")
             .unwrap();
 
-        assert!(config.contains("HeaderProtectionKey = cHVibGljLWtleQ==\n"), "config: {config}");
-        assert!(config.contains("ContentPaddingAddition = 5-25\n"), "config: {config}");
-        assert!(config.contains("RekeyAfterTime = 110-130\n"), "config: {config}");
-        assert!(config.contains("MaxHandshakeAttempts = 18\n"), "config: {config}");
+        assert!(
+            config.contains("HeaderProtectionKey = cHVibGljLWtleQ==\n"),
+            "config: {config}"
+        );
+        assert!(
+            config.contains("ContentPaddingAddition = 5-25\n"),
+            "config: {config}"
+        );
+        assert!(
+            config.contains("RekeyAfterTime = 110-130\n"),
+            "config: {config}"
+        );
+        assert!(
+            config.contains("MaxHandshakeAttempts = 18\n"),
+            "config: {config}"
+        );
         assert!(!config.contains("RekeyTimeout"), "config: {config}");
     }
 

@@ -122,12 +122,7 @@ impl Store {
         name: Option<&str>,
     ) -> Result<String, MeshError> {
         let sub = parse_subscription(subscription_id, subscription_secret)?;
-        if !self
-            .subs
-            .allows(sub)
-            .await
-            .map_err(MeshError::Internal)?
-        {
+        if !self.subs.allows(sub).await.map_err(MeshError::Internal)? {
             return Err(MeshError::SubscriptionRejected);
         }
         let noise = normalize_pubkey(noise_pubkey)?;
@@ -206,7 +201,9 @@ impl Store {
             .prepare("SELECT noise_pubkey, last_seen FROM devices WHERE uin = ?1")
             .map_err(internal)?;
         let rows = stmt
-            .query_map(params![uin], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .query_map(params![uin], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
             .map_err(internal)?;
         let mut devices = Vec::new();
         let mut online = false;
@@ -298,7 +295,12 @@ impl Store {
         Ok(slots)
     }
 
-    pub async fn poll(&self, uin: &str, ts: i64, sig_b64: &str) -> Result<Vec<SlotView>, MeshError> {
+    pub async fn poll(
+        &self,
+        uin: &str,
+        ts: i64,
+        sig_b64: &str,
+    ) -> Result<Vec<SlotView>, MeshError> {
         let now = Utc::now().timestamp();
         check_ts(ts, now)?;
         let device = {
@@ -416,9 +418,8 @@ fn internal(e: rusqlite::Error) -> MeshError {
 }
 
 fn parse_subscription(id: &str, secret: &str) -> Result<Uuid, MeshError> {
-    let id = Uuid::parse_str(id.trim()).map_err(|_| {
-        MeshError::BadInput("subscription_id must be a uuid".into())
-    })?;
+    let id = Uuid::parse_str(id.trim())
+        .map_err(|_| MeshError::BadInput("subscription_id must be a uuid".into()))?;
     let secret = Uuid::parse_str(secret.trim()).map_err(|_| MeshError::SubscriptionRejected)?;
     if id != secret {
         return Err(MeshError::SubscriptionRejected);
@@ -542,7 +543,9 @@ fn devices_of(conn: &Connection, uin: &str) -> Result<Vec<(String, String)>, Mes
         .prepare("SELECT noise_pubkey, signing_pubkey FROM devices WHERE uin = ?1")
         .map_err(internal)?;
     let rows = stmt
-        .query_map(params![uin], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .query_map(params![uin], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
         .map_err(internal)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(internal)
 }
@@ -560,7 +563,11 @@ fn authed_device(
     match_device(&devices, msg, sig_b64)
 }
 
-fn match_device(devices: &[(String, String)], msg: &str, sig_b64: &str) -> Result<String, MeshError> {
+fn match_device(
+    devices: &[(String, String)],
+    msg: &str,
+    sig_b64: &str,
+) -> Result<String, MeshError> {
     for (noise, signing) in devices {
         if verify_ed25519(signing, msg, sig_b64).is_ok() {
             return Ok(noise.clone());
@@ -633,16 +640,12 @@ fn name_canonical(uin: &str, ts: i64, name: &str) -> String {
 
 fn verify_ed25519(signing_pubkey_hex: &str, msg: &str, sig_b64: &str) -> Result<(), MeshError> {
     let pk_bytes = hex::decode(signing_pubkey_hex).map_err(|_| MeshError::BadSignature)?;
-    let pk: [u8; 32] = pk_bytes
-        .try_into()
-        .map_err(|_| MeshError::BadSignature)?;
+    let pk: [u8; 32] = pk_bytes.try_into().map_err(|_| MeshError::BadSignature)?;
     let vk = VerifyingKey::from_bytes(&pk).map_err(|_| MeshError::BadSignature)?;
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(sig_b64)
         .map_err(|_| MeshError::BadSignature)?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| MeshError::BadSignature)?;
+    let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| MeshError::BadSignature)?;
     vk.verify(msg.as_bytes(), &Signature::from_bytes(&sig_arr))
         .map_err(|_| MeshError::BadSignature)
 }
@@ -782,17 +785,29 @@ mod tests {
             .unwrap();
         let pull_ts = Utc::now().timestamp();
         let got = store
-            .pull(&b_uin, pull_ts, &sig(&b1.sk, &pull_canonical(&b_uin, pull_ts)))
+            .pull(
+                &b_uin,
+                pull_ts,
+                &sig(&b1.sk, &pull_canonical(&b_uin, pull_ts)),
+            )
             .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].ciphertext, "cipher-for-1");
         let still = store
-            .pull(&b_uin, pull_ts, &sig(&b2.sk, &pull_canonical(&b_uin, pull_ts)))
+            .pull(
+                &b_uin,
+                pull_ts,
+                &sig(&b2.sk, &pull_canonical(&b_uin, pull_ts)),
+            )
             .unwrap();
         assert_eq!(still.len(), 1);
         assert_eq!(still[0].ciphertext, "cipher-for-2");
         let empty = store
-            .pull(&b_uin, pull_ts, &sig(&b2.sk, &pull_canonical(&b_uin, pull_ts)))
+            .pull(
+                &b_uin,
+                pull_ts,
+                &sig(&b2.sk, &pull_canonical(&b_uin, pull_ts)),
+            )
             .unwrap();
         assert!(empty.is_empty());
     }
@@ -823,7 +838,11 @@ mod tests {
             .send(&a_uin, &b_uin, &envelopes, ts, &sig(&a.sk, &msg))
             .unwrap();
         let slots = handle.await.unwrap().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].ciphertext, "wake");
     }
@@ -849,7 +868,12 @@ mod tests {
         let (d, uin) = reg(&store, 30, &sub(5)).await;
         let ts = Utc::now().timestamp();
         store
-            .set_name(&uin, "Ada", ts, &sig(&d.sk, &name_canonical(&uin, ts, "Ada")))
+            .set_name(
+                &uin,
+                "Ada",
+                ts,
+                &sig(&d.sk, &name_canonical(&uin, ts, "Ada")),
+            )
             .unwrap();
         assert_eq!(store.lookup(&uin).unwrap().name, "Ada");
         store
@@ -899,11 +923,19 @@ mod tests {
             .unwrap();
         assert_eq!(left, 0);
         let err = store
-            .pull(&b_uin, pull_ts - 10_000, &sig(&b.sk, &pull_canonical(&b_uin, pull_ts - 10_000)))
+            .pull(
+                &b_uin,
+                pull_ts - 10_000,
+                &sig(&b.sk, &pull_canonical(&b_uin, pull_ts - 10_000)),
+            )
             .unwrap_err();
         assert_eq!(err, MeshError::BadTimestamp);
         let err = store
-            .pull(&b_uin, pull_ts, &sig(&a.sk, &pull_canonical(&b_uin, pull_ts)))
+            .pull(
+                &b_uin,
+                pull_ts,
+                &sig(&a.sk, &pull_canonical(&b_uin, pull_ts)),
+            )
             .unwrap_err();
         assert_eq!(err, MeshError::BadSignature);
         let err = store

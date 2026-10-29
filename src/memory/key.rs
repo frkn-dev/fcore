@@ -536,8 +536,8 @@ mod tests {
     #[test]
     fn test_lite_code_generate_and_parse() {
         let code = Code::new_lite(5, b"TEST", SECRET);
-        let parsed = Code::parse_payload(&code.to_string(), SECRET)
-            .expect("lite code should parse");
+        let parsed =
+            Code::parse_payload(&code.to_string(), SECRET).expect("lite code should parse");
 
         assert_eq!(
             parsed,
@@ -656,11 +656,15 @@ mod tests {
     }
 
     #[test]
-    fn test_key_kind_string_roundtrip() {        for (kind, s) in [(KeyKind::Standard, "standard"), (KeyKind::Lite, "lite")] {
+    fn test_key_kind_string_roundtrip() {
+        for (kind, s) in [(KeyKind::Standard, "standard"), (KeyKind::Lite, "lite")] {
             assert_eq!(kind.to_string(), s);
             assert_eq!(KeyKind::from_str(s).unwrap(), kind);
             assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{}\"", s));
-            assert_eq!(serde_json::from_str::<KeyKind>(&format!("\"{}\"", s)).unwrap(), kind);
+            assert_eq!(
+                serde_json::from_str::<KeyKind>(&format!("\"{}\"", s)).unwrap(),
+                kind
+            );
         }
 
         assert!(KeyKind::from_str("premium").is_err());

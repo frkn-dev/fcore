@@ -324,10 +324,31 @@ impl<'de> Deserialize<'de> for AwgObfuscationParams {
         }
 
         const FIELDS: &[&str] = &[
-            "jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4", "i1", "i2", "i3",
-            "i4", "i5", "random_trailers", "disable_cookies", "header_protection_key",
-            "content_padding_addition", "rekey_after_time", "rekey_timeout", "reject_after_time",
-            "keepalive_timeout", "max_handshake_attempts",
+            "jc",
+            "jmin",
+            "jmax",
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "i1",
+            "i2",
+            "i3",
+            "i4",
+            "i5",
+            "random_trailers",
+            "disable_cookies",
+            "header_protection_key",
+            "content_padding_addition",
+            "rekey_after_time",
+            "rekey_timeout",
+            "reject_after_time",
+            "keepalive_timeout",
+            "max_handshake_attempts",
         ];
         deserializer.deserialize_struct("AwgObfuscationParams", FIELDS, AwgObfuscationParamsVisitor)
     }
@@ -480,9 +501,7 @@ impl AmneziaWgServerConfig {
 
                 // ===== AWG 3.0 =====
                 "HeaderProtectionKey" => header_protection_key = Some(value.to_string()),
-                "ContentPaddingAddition" => {
-                    content_padding_addition = Some(value.to_string())
-                }
+                "ContentPaddingAddition" => content_padding_addition = Some(value.to_string()),
                 "RekeyAfterTime" => rekey_after_time = Some(value.to_string()),
                 "RekeyTimeout" => rekey_timeout = Some(value.to_string()),
                 "RejectAfterTime" => reject_after_time = Some(value.to_string()),
@@ -506,9 +525,7 @@ impl AmneziaWgServerConfig {
                 // the first 12 bytes of the S-prefix as nonce — the kernel
                 // rejects the interface with EINVAL when any S < 12. Fail
                 // fast here so the misconfiguration is obvious.
-                if header_protection_key.is_some()
-                    && [s1, s2, s3, s4].iter().any(|s| *s < 12)
-                {
+                if header_protection_key.is_some() && [s1, s2, s3, s4].iter().any(|s| *s < 12) {
                     return Err(Error::Custom(
                         "HeaderProtectionKey requires S1..S4 >= 12".into(),
                     ));
@@ -762,10 +779,7 @@ mod tests {
         }"#;
 
         let params: AwgObfuscationParams = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            params.header_protection_key.as_deref(),
-            Some("base64key")
-        );
+        assert_eq!(params.header_protection_key.as_deref(), Some("base64key"));
         assert_eq!(params.content_padding_addition.as_deref(), Some("5-25"));
         assert_eq!(params.rekey_after_time.as_deref(), Some("110-130"));
         assert_eq!(params.rekey_timeout.as_deref(), Some("5"));
@@ -865,7 +879,9 @@ mod tests {
 
     #[test]
     fn parse_header_protection_key_requires_32_bytes() {
-        assert!(parse_header_protection_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok());
+        assert!(
+            parse_header_protection_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok()
+        );
         assert!(parse_header_protection_key("cHVibGljLWtleQ==").is_err()); // 10 bytes
         assert!(parse_header_protection_key("!!!not-base64!!!").is_err());
     }

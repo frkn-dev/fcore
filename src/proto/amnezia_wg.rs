@@ -3,9 +3,8 @@ use crate::error::{Error, Result as MyResult};
 use crate::AwgObfuscationParams;
 use base64::{engine::general_purpose, Engine as _};
 use netlink_packet_amnezia_wireguard::{
-    range::u32_range_from_string, AmneziaWireguardAttribute,
-    AmneziaWireguardCmd, AmneziaWireguardMessage, AmneziaWireguardPeer,
-    AmneziaWireguardPeerAttribute,
+    range::u32_range_from_string, AmneziaWireguardAttribute, AmneziaWireguardCmd,
+    AmneziaWireguardMessage, AmneziaWireguardPeer, AmneziaWireguardPeerAttribute,
 };
 use netlink_packet_core::{
     NetlinkDeserializable, NetlinkMessage, NetlinkPayload, NetlinkSerializable, NLM_F_ACK,
@@ -143,9 +142,7 @@ impl AwgInterface {
             for (spec, make_attr) in headers {
                 if !spec.is_empty() {
                     let range = u32_range_from_string(spec).ok_or_else(|| {
-                        Error::Custom(format!(
-                            "invalid amnezia magic header spec: {spec:?}"
-                        ))
+                        Error::Custom(format!("invalid amnezia magic header spec: {spec:?}"))
                     })?;
                     attributes.push(make_attr(range));
                 }
@@ -245,14 +242,10 @@ impl AwgInterface {
         // 3, so support cannot be probed — an older module will reject the
         // request and the error will surface at node startup).
         if let Some(random_trailers) = params.random_trailers {
-            attributes.push(AmneziaWireguardAttribute::RandomTrailers(
-                random_trailers,
-            ));
+            attributes.push(AmneziaWireguardAttribute::RandomTrailers(random_trailers));
         }
         if let Some(disable_cookies) = params.disable_cookies {
-            attributes.push(AmneziaWireguardAttribute::DisableCookies(
-                disable_cookies,
-            ));
+            attributes.push(AmneziaWireguardAttribute::DisableCookies(disable_cookies));
         }
 
         let msg = AmneziaWireguardMessage {

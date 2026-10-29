@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use warp::Filter;
 use tokio_postgres::NoTls;
+use warp::Filter;
 
 mod http;
 mod store;
@@ -44,8 +44,7 @@ fn default_db_path() -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -163,10 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn lookup_route(
-    uin: String,
-    store: Arc<Store>,
-) -> Result<impl warp::Reply, warp::Rejection> {
+async fn lookup_route(uin: String, store: Arc<Store>) -> Result<impl warp::Reply, warp::Rejection> {
     http::lookup(uin, store).await
 }
 

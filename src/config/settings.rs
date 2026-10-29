@@ -84,8 +84,7 @@ pub struct NodeConfigRaw {
 
 /// Trims the configured pool name and treats a blank value as absent.
 fn normalize_pool(pool: Option<String>) -> Option<String> {
-    pool.map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
+    pool.map(|p| p.trim().to_string()).filter(|p| !p.is_empty())
 }
 
 /// Normalizes a `pool_translation` map: trims keys/values, lowercases the

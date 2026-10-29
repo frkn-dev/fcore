@@ -186,10 +186,7 @@ where
                     if let Some(nt) = v
                         .pointer("/response/node_token")
                         .and_then(|x| x.as_str())
-                        .or_else(|| {
-                            v.pointer("/response/token")
-                                .and_then(|x| x.as_str())
-                        })
+                        .or_else(|| v.pointer("/response/token").and_then(|x| x.as_str()))
                     {
                         if let Err(e) = persist_node_token(nt) {
                             tracing::error!("Failed to persist node_token: {}", e);
@@ -197,8 +194,7 @@ where
                             tracing::info!("Persisted durable node_token for later sync");
                         }
                     }
-                    if let Some(scope) = v.pointer("/response/scope_env").and_then(|x| x.as_str())
-                    {
+                    if let Some(scope) = v.pointer("/response/scope_env").and_then(|x| x.as_str()) {
                         let toml_env = scope.strip_prefix("custom").unwrap_or(scope);
                         if let Err(e) = std::fs::write("scope.env", toml_env) {
                             tracing::error!("Failed to persist scope env: {}", e);

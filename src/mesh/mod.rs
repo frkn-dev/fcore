@@ -207,10 +207,7 @@ impl MeshRegistry {
         verify_ed25519(&signing_pubkey, &msg, sig_b64)?;
 
         let slots = match self.inbox.remove(uin) {
-            Some((_, slots)) => slots
-                .into_iter()
-                .filter(|s| s.expires_at > now)
-                .collect(),
+            Some((_, slots)) => slots.into_iter().filter(|s| s.expires_at > now).collect(),
             None => Vec::new(),
         };
 
@@ -273,7 +270,9 @@ impl MeshRegistry {
 
         let registry = Self::new();
         for id in snapshot.identities {
-            registry.by_noise.insert(id.noise_pubkey.clone(), id.uin.clone());
+            registry
+                .by_noise
+                .insert(id.noise_pubkey.clone(), id.uin.clone());
             registry.by_uin.insert(
                 id.uin.clone(),
                 MeshIdentity {
@@ -433,7 +432,10 @@ mod tests {
         );
         // Stale timestamp.
         let stale = ts - TS_SKEW_SECS - 1;
-        let sig_stale = b64_sig(&sk_a, &format!("send\n{}\n{}\n{}", b.uin, stale, "dGVzdA=="));
+        let sig_stale = b64_sig(
+            &sk_a,
+            &format!("send\n{}\n{}\n{}", b.uin, stale, "dGVzdA=="),
+        );
         assert_eq!(
             reg.send(&a.uin, &b.uin, "dGVzdA==", stale, &sig_stale)
                 .unwrap_err(),
@@ -441,11 +443,13 @@ mod tests {
         );
         // Unknown sender / recipient.
         assert_eq!(
-            reg.send("12345678", &b.uin, "dGVzdA==", ts, &sig).unwrap_err(),
+            reg.send("12345678", &b.uin, "dGVzdA==", ts, &sig)
+                .unwrap_err(),
             MeshError::UnknownUin
         );
         assert_eq!(
-            reg.send(&a.uin, "12345678", "dGVzdA==", ts, &sig).unwrap_err(),
+            reg.send(&a.uin, "12345678", "dGVzdA==", ts, &sig)
+                .unwrap_err(),
             MeshError::UnknownUin
         );
     }

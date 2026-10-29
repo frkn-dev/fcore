@@ -189,7 +189,6 @@ pub struct EnvInfo {
     pub has_awg: bool,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,8 +222,18 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "downlink", "env", "id", "include_in_main", "is_deleted", "label", "proto",
-                "share_feed_url", "share_node_id", "share_token", "share_url", "uplink"
+                "downlink",
+                "env",
+                "id",
+                "include_in_main",
+                "is_deleted",
+                "label",
+                "proto",
+                "share_feed_url",
+                "share_node_id",
+                "share_token",
+                "share_url",
+                "uplink"
             ]
         );
 

@@ -72,10 +72,7 @@ impl Product {
     pub fn includes_standard(&self) -> bool {
         matches!(
             self,
-            Product::Standard
-                | Product::StandardGaming
-                | Product::StandardBsPrem
-                | Product::Full
+            Product::Standard | Product::StandardGaming | Product::StandardBsPrem | Product::Full
         )
     }
 
@@ -234,7 +231,12 @@ mod tests {
                 "includes_standard of {}",
                 product
             );
-            assert_eq!(product.extra_envs(), extra_envs, "extra_envs of {}", product);
+            assert_eq!(
+                product.extra_envs(),
+                extra_envs,
+                "extra_envs of {}",
+                product
+            );
         }
     }
 

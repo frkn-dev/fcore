@@ -456,6 +456,32 @@ impl MetricStorage {
         (used, total)
     }
 
+    /// Все разделы ноды: (mount, usage_percent) по последним значениям.
+    pub fn node_disks(&self, node_id: &uuid::Uuid) -> Vec<(String, f64)> {
+        let Some(node_map) = self.inner.get(node_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in node_map.iter() {
+            let hash = *entry.key();
+            let Some(meta) = self.metadata.get(&hash) else {
+                continue;
+            };
+            let name = &meta.value().0;
+            let Some(rest) = name.strip_prefix("sys.disk.") else {
+                continue;
+            };
+            let Some(mount) = rest.strip_suffix(".usage_percent") else {
+                continue;
+            };
+            if let Some(last) = entry.value().back() {
+                out.push((mount.to_string(), last.value));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     pub fn node_disk_usage(&self, node_id: &uuid::Uuid, mount: &str) -> Option<f64> {
         self.node_latest_value(node_id, &format!("sys.disk.{}.usage_percent", mount))
     }

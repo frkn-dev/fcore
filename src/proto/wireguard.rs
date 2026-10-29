@@ -165,7 +165,11 @@ impl WgApi {
                 .map(|d| d.as_millis() as u64)
         });
 
-        Ok((peer.rx_bytes as i64, peer.tx_bytes as i64, last_handshake_ms))
+        Ok((
+            peer.rx_bytes as i64,
+            peer.tx_bytes as i64,
+            last_handshake_ms,
+        ))
     }
 
     pub fn is_exist(&self, pubkey: String) -> bool {

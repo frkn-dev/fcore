@@ -1,9 +1,9 @@
 use super::node::Node;
 
-#[cfg(feature = "xray")]
-use fcore::{Prefix, StatsOp};
 #[cfg(any(feature = "xray", feature = "amnezia-wg"))]
 use fcore::Tag;
+#[cfg(feature = "xray")]
+use fcore::{Prefix, StatsOp};
 
 use fcore::{ConnectionBaseOperations, HasMetrics, MetricBuffer, Node as MemNode};
 
@@ -39,7 +39,9 @@ pub trait BusinessMetrics {
 /// Considers a peer online if the last handshake was no more than 3 minutes ago.
 fn peer_online_by_handshake(last_handshake_ms: Option<u64>) -> f64 {
     const ONLINE_TIMEOUT_MS: i64 = 3 * 60 * 1000;
-    let Some(hs_ms) = last_handshake_ms else { return 0.0 };
+    let Some(hs_ms) = last_handshake_ms else {
+        return 0.0;
+    };
     let now_ms = chrono::Utc::now().timestamp_millis();
     let hs_ms = hs_ms as i64;
     if now_ms >= hs_ms && (now_ms - hs_ms) <= ONLINE_TIMEOUT_MS {

@@ -374,7 +374,13 @@ pub fn publish(
         row.components.reliability,
         now_ms,
     );
-    write(storage, node_id, SERIES_UPTIME, row.components.uptime, now_ms);
+    write(
+        storage,
+        node_id,
+        SERIES_UPTIME,
+        row.components.uptime,
+        now_ms,
+    );
 }
 
 pub fn tick(
@@ -392,7 +398,12 @@ pub fn tick(
     }
 }
 
-pub fn history(storage: &MetricStorage, node_id: &Uuid, from_ms: i64, to_ms: i64) -> Vec<MetricPoint> {
+pub fn history(
+    storage: &MetricStorage,
+    node_id: &Uuid,
+    from_ms: i64,
+    to_ms: i64,
+) -> Vec<MetricPoint> {
     points_named(storage, node_id, SERIES_TOTAL, from_ms, to_ms)
 }
 
@@ -427,7 +438,13 @@ fn sum_latest(storage: &MetricStorage, node_id: &Uuid, metric: &str) -> f64 {
     total
 }
 
-fn count_named(storage: &MetricStorage, node_id: &Uuid, metric: &str, from_ms: i64, to_ms: i64) -> u64 {
+fn count_named(
+    storage: &MetricStorage,
+    node_id: &Uuid,
+    metric: &str,
+    from_ms: i64,
+    to_ms: i64,
+) -> u64 {
     points_named(storage, node_id, metric, from_ms, to_ms).len() as u64
 }
 
@@ -665,7 +682,13 @@ mod tests {
         };
         let cfg = cfg();
         let mut smooth = HashMap::new();
-        tick(std::slice::from_ref(&view), &storage, &cfg, &mut smooth, now);
+        tick(
+            std::slice::from_ref(&view),
+            &storage,
+            &cfg,
+            &mut smooth,
+            now,
+        );
         tick(
             std::slice::from_ref(&view),
             &storage,
@@ -689,9 +712,10 @@ mod tests {
         let list_body_2 = list_body.clone();
         let hist_body_2 = hist_body.clone();
 
-        let list_filter = warp::path!("v1" / "admin" / "nodes" / "score").map(move || list_body.clone());
-        let hist_filter =
-            warp::path!("v1" / "admin" / "nodes" / "score" / "history").map(move || hist_body.clone());
+        let list_filter =
+            warp::path!("v1" / "admin" / "nodes" / "score").map(move || list_body.clone());
+        let hist_filter = warp::path!("v1" / "admin" / "nodes" / "score" / "history")
+            .map(move || hist_body.clone());
 
         let list_res = warp::test::request()
             .method("GET")

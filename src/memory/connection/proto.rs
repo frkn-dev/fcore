@@ -82,7 +82,10 @@ impl Proto {
     }
 
     pub fn is_amneziawg(&self) -> bool {
-        matches!(self, Proto::AmneziaWg { .. } | Proto::AmneziaWgMobile { .. })
+        matches!(
+            self,
+            Proto::AmneziaWg { .. } | Proto::AmneziaWgMobile { .. }
+        )
     }
 
     pub fn is_shadowsocks(&self) -> bool {

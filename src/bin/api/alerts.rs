@@ -57,6 +57,15 @@ pub struct AlertsConfig {
     /// Ниже этого значения считаем, что нагрузка спала (гистерезис).
     #[serde(default = "default_cpu_reset")]
     pub cpu_reset_pct: f64,
+    /// Порог заполнения диска, %.
+    #[serde(default = "default_disk_threshold")]
+    pub disk_threshold_pct: f64,
+    /// Сколько секунд держится заполнение, чтобы алертить.
+    #[serde(default = "default_disk_hold")]
+    pub disk_hold_sec: u64,
+    /// Ниже этого значения считаем, что место освободили (гистерезис).
+    #[serde(default = "default_disk_reset")]
+    pub disk_reset_pct: f64,
     /// База Telegram Bot API (можно подменить на прокси).
     #[serde(default = "default_api_base")]
     pub telegram_api_base: String,
@@ -73,6 +82,15 @@ fn default_new_node_grace() -> u64 {
 }
 fn default_throttle() -> u64 {
     1800
+}
+fn default_disk_threshold() -> f64 {
+    90.0
+}
+fn default_disk_hold() -> u64 {
+    900
+}
+fn default_disk_reset() -> f64 {
+    85.0
 }
 fn default_cpu_threshold() -> f64 {
     85.0
@@ -106,6 +124,9 @@ impl Default for AlertsConfig {
             recovery_grace_sec: default_recovery_grace(),
             new_node_grace_sec: default_new_node_grace(),
             throttle_sec: default_throttle(),
+            disk_threshold_pct: default_disk_threshold(),
+            disk_hold_sec: default_disk_hold(),
+            disk_reset_pct: default_disk_reset(),
             cpu_threshold_pct: default_cpu_threshold(),
             cpu_hold_sec: default_cpu_hold(),
             cpu_reset_pct: default_cpu_reset(),
@@ -132,6 +153,8 @@ pub enum AlertKind {
     NodeFlapping,
     /// CPU держится выше порога дольше заданного времени.
     NodeCpuHigh,
+    /// Раздел диска заполнен выше порога дольше заданного времени.
+    NodeDiskHigh,
 }
 
 impl AlertKind {
@@ -141,6 +164,7 @@ impl AlertKind {
             Self::NodeRecovered => "node_recovered",
             Self::NodeFlapping => "node_flapping",
             Self::NodeCpuHigh => "node_cpu_high",
+            Self::NodeDiskHigh => "node_disk_high",
         }
     }
 }
@@ -158,6 +182,8 @@ pub enum Decision {
         env: String,
         /// Сколько секунд нода молчит (для офлайна) или была в алерте (для отбоя).
         duration_sec: i64,
+        /// Уточнение для сообщения (раздел диска, значение).
+        detail: Option<String>,
     },
 }
 
@@ -213,6 +239,8 @@ pub struct AlertsEngine {
     nodes: HashMap<Uuid, NodeTrack>,
     /// Состояние правила CPU: когда нагрузка поднялась и отправлен ли алерт.
     cpu: HashMap<Uuid, CpuTrack>,
+    /// Состояние правила диска: (нода, раздел) → с какого момента заполнен.
+    disks: HashMap<(Uuid, String), CpuTrack>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +255,7 @@ impl AlertsEngine {
             cfg,
             nodes: HashMap::new(),
             cpu: HashMap::new(),
+            disks: HashMap::new(),
         }
     }
 
@@ -291,6 +320,7 @@ impl AlertsEngine {
                         hostname: hostname.to_string(),
                         env: env.to_string(),
                         duration_sec: count,
+                        detail: None,
                     };
                 }
             }
@@ -318,6 +348,7 @@ impl AlertsEngine {
                 hostname: hostname.to_string(),
                 env: env.to_string(),
                 duration_sec: silence_sec.max(offline_for),
+                detail: None,
             };
         }
 
@@ -341,6 +372,7 @@ impl AlertsEngine {
             hostname: hostname.to_string(),
             env: env.to_string(),
             duration_sec: stable_for as i64,
+            detail: None,
         }
     }
 
@@ -390,6 +422,7 @@ impl AlertsEngine {
                     hostname: hostname.to_string(),
                     env: env.to_string(),
                     duration_sec: held.as_secs() as i64,
+                    detail: None,
                 };
             }
         } else if cpu < reset {
@@ -398,6 +431,60 @@ impl AlertsEngine {
         }
 
         Decision::Idle
+    }
+
+    /// Правило диска: раздел заполнен выше порога дольше `disk_hold_sec`.
+    pub fn observe_disk(
+        &mut self,
+        node_id: Uuid,
+        hostname: &str,
+        env: &str,
+        disks: &[(String, f64)],
+    ) -> Option<Decision> {
+        self.observe_disk_at(node_id, hostname, env, disks, Instant::now())
+    }
+
+    fn observe_disk_at(
+        &mut self,
+        node_id: Uuid,
+        hostname: &str,
+        env: &str,
+        disks: &[(String, f64)],
+        now: Instant,
+    ) -> Option<Decision> {
+        let hold = Duration::from_secs(self.cfg.disk_hold_sec.max(60));
+        let threshold = self.cfg.disk_threshold_pct;
+        let reset = self.cfg.disk_reset_pct.min(threshold - 1.0);
+        let mut fire = None;
+
+        for (mount, pct) in disks {
+            let key = (node_id, mount.clone());
+            if *pct >= threshold {
+                let track = self.disks.entry(key).or_insert(CpuTrack {
+                    high_since: now,
+                    alerted: false,
+                });
+                if track.alerted {
+                    continue;
+                }
+                let held = now.duration_since(track.high_since);
+                if held >= hold {
+                    track.alerted = true;
+                    fire = Some(Decision::Fire {
+                        kind: AlertKind::NodeDiskHigh,
+                        node_id,
+                        hostname: hostname.to_string(),
+                        env: env.to_string(),
+                        duration_sec: held.as_secs() as i64,
+                        detail: Some(format!("{mount}: {}", pct.round())),
+                    });
+                }
+            } else if *pct < reset {
+                self.disks.remove(&key);
+            }
+        }
+
+        fire
     }
 
     /// Затравка состояния из PG после старта процесса.
@@ -463,6 +550,18 @@ pub async fn send_telegram(
 
 /// Текст сообщения в Telegram.
 pub fn format_message(kind: &AlertKind, hostname: &str, env: &str, duration_sec: i64) -> String {
+    format_message_full(kind, hostname, env, duration_sec, None)
+}
+
+/// То же, но с уточнением (раздел диска и т.п.).
+pub fn format_message_full(
+    kind: &AlertKind,
+    hostname: &str,
+    env: &str,
+    duration_sec: i64,
+    detail: Option<&str>,
+) -> String {
+    let extra = detail.map(|d| format!("\n{d}")).unwrap_or_default();
     let human = human_duration(duration_sec);
     match kind {
         AlertKind::NodeOffline => format!(
@@ -471,6 +570,10 @@ pub fn format_message(kind: &AlertKind, hostname: &str, env: &str, duration_sec:
         ),
         AlertKind::NodeRecovered => format!(
             "🟢 Нода вернулась\n{hostname} ({env})\nстабильна: {human}\nвремя: {}",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ),
+        AlertKind::NodeDiskHigh => format!(
+            "💾 Диск почти полон\n{hostname} ({env}){extra}\nдержится: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
         AlertKind::NodeCpuHigh => format!(
@@ -509,6 +612,9 @@ mod tests {
             recovery_grace_sec: 120,
             new_node_grace_sec: 0,
             throttle_sec: 1800,
+            disk_threshold_pct: 90.0,
+            disk_hold_sec: 900,
+            disk_reset_pct: 85.0,
             cpu_threshold_pct: 85.0,
             cpu_hold_sec: 600,
             cpu_reset_pct: 70.0,
@@ -585,6 +691,37 @@ mod tests {
             e.observe(node(), "n1", "ru", Some(now), now),
             Decision::Idle
         );
+    }
+
+    #[test]
+    fn disk_fires_after_hold_with_mount_in_detail() {
+        let mut e = AlertsEngine::new(cfg());
+        let base = std::time::Instant::now();
+        let disks = vec![("/".to_string(), 93.0), ("/opt".to_string(), 40.0)];
+        // первый тик — только начинаем отсчёт
+        assert!(e.observe_disk_at(node(), "n1", "ru", &disks, base).is_none());
+        // 15 минут — алерт, в уточнении раздел и процент
+        match e.observe_disk_at(node(), "n1", "ru", &disks, base + Duration::from_secs(901)) {
+            Some(Decision::Fire { kind, detail, .. }) => {
+                assert_eq!(kind, AlertKind::NodeDiskHigh);
+                assert_eq!(detail.as_deref(), Some("/: 93"));
+            }
+            other => panic!("ожидали node_disk_high, получили {other:?}"),
+        }
+        // повторно не шлём
+        assert!(e
+            .observe_disk_at(node(), "n1", "ru", &disks, base + Duration::from_secs(1200))
+            .is_none());
+    }
+
+    #[test]
+    fn disk_below_threshold_stays_quiet() {
+        let mut e = AlertsEngine::new(cfg());
+        let base = std::time::Instant::now();
+        let disks = vec![("/".to_string(), 88.0)];
+        assert!(e
+            .observe_disk_at(node(), "n1", "ru", &disks, base + Duration::from_secs(3600))
+            .is_none());
     }
 
     #[test]

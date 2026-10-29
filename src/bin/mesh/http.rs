@@ -77,7 +77,9 @@ fn mesh_error(err: MeshError) -> warp::reply::Response {
         MeshError::UnknownUin => http::not_found("mesh_uin_not_found").into_response(),
         MeshError::BadSignature | MeshError::BadTimestamp | MeshError::SubscriptionRejected => {
             warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({"status": 403, "message": "mesh_auth_failed"})),
+                warp::reply::json(
+                    &serde_json::json!({"status": 403, "message": "mesh_auth_failed"}),
+                ),
                 warp::http::StatusCode::FORBIDDEN,
             )
             .into_response()

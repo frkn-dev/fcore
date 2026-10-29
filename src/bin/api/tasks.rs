@@ -997,6 +997,12 @@ where
             cfg.cpu_threshold_pct,
             cfg.cpu_hold_sec
         );
+        tracing::info!(
+            "alerts: disk rule active (disk>{}% {}s, reset {}%)",
+            cfg.disk_threshold_pct,
+            cfg.disk_hold_sec,
+            cfg.disk_reset_pct
+        );
 
         loop {
             interval.tick().await;
@@ -1045,7 +1051,7 @@ where
                     kind, duration_sec, ..
                 } = engine.observe(node_id, &hostname, &env, heartbeat, now_ms)
                 {
-                    fires.push((kind, duration_sec));
+                    fires.push((kind, duration_sec, None));
                 }
                 // Правило CPU: смотрим текущую среднюю нагрузку ноды.
                 let cpu = self.metrics.node_cpu_avg(&node_id);
@@ -1053,11 +1059,28 @@ where
                     kind, duration_sec, ..
                 } = engine.observe_cpu(node_id, &hostname, &env, cpu)
                 {
-                    fires.push((kind, duration_sec));
+                    fires.push((kind, duration_sec, None));
+                }
+                // Правило диска: разделы и их заполнение.
+                let disks = self.metrics.node_disks(&node_id);
+                if let Some(crate::alerts::Decision::Fire {
+                    kind,
+                    duration_sec,
+                    detail,
+                    ..
+                }) = engine.observe_disk(node_id, &hostname, &env, &disks)
+                {
+                    fires.push((kind, duration_sec, detail));
                 }
 
-                for (kind, duration_sec) in fires {
-                    let text = crate::alerts::format_message(&kind, &hostname, &env, duration_sec);
+                for (kind, duration_sec, detail) in fires {
+                    let text = crate::alerts::format_message_full(
+                        &kind,
+                        &hostname,
+                        &env,
+                        duration_sec,
+                        detail.as_deref(),
+                    );
                     let delivered = match (
                         cfg.telegram_bot_token.as_deref(),
                         cfg.telegram_chat_id.as_deref(),
@@ -1091,7 +1114,11 @@ where
                         delivered
                     );
 
-                    let details = serde_json::json!({ "hostname": hostname, "env": env });
+                    let details = serde_json::json!({
+                        "hostname": hostname,
+                        "env": env,
+                        "detail": detail,
+                    });
                     if let Err(e) = self
                         .sync
                         .db
