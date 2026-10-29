@@ -288,6 +288,65 @@ impl PgReport {
         }
     }
 
+    /// Сырые наблюдения для поддержки: по подписке, по адресу или просто потоком.
+    ///
+    /// Это то, что нужно, когда юзер пишет «я отправил отчёт» — открыть его и
+    /// увидеть по каждой цели: хост, порт, протокол, состояние, RTT, ICMP,
+    /// версию приложения и с какой ноды смотрели.
+    pub async fn observations(
+        &self,
+        subscription_id: Option<uuid::Uuid>,
+        address: Option<std::net::IpAddr>,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                r#"
+                SELECT created_at, source, subscription_id, support_tag, app_version, platform,
+                       target_host, host(address) AS addr, port, protocol, transport, state,
+                       rtt_ms, icmp_ok, node_host, asn, client_country, target_country,
+                       note, error
+                FROM block_observations
+                WHERE ($1::uuid IS NULL OR subscription_id = $1)
+                  AND ($2::inet IS NULL OR address = $2)
+                ORDER BY created_at DESC
+                LIMIT $3
+                "#,
+                &[&subscription_id, &address, &limit],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "at": r.get::<_, DateTime<Utc>>("created_at"),
+                    "source": r.get::<_, String>("source"),
+                    "subscription_id": r.get::<_, Option<uuid::Uuid>>("subscription_id"),
+                    "support_tag": r.get::<_, Option<String>>("support_tag"),
+                    "app_version": r.get::<_, String>("app_version"),
+                    "platform": r.get::<_, String>("platform"),
+                    "host": r.get::<_, Option<String>>("target_host"),
+                    "address": r.get::<_, Option<String>>("addr"),
+                    "port": r.get::<_, i32>("port"),
+                    "protocol": r.get::<_, String>("protocol"),
+                    "transport": r.get::<_, Option<String>>("transport"),
+                    "state": r.get::<_, Option<String>>("state"),
+                    "rtt_ms": r.get::<_, Option<i32>>("rtt_ms"),
+                    "icmp_ok": r.get::<_, Option<bool>>("icmp_ok"),
+                    "node_host": r.get::<_, Option<String>>("node_host"),
+                    "asn": r.get::<_, Option<i32>>("asn"),
+                    "client_country": r.get::<_, Option<String>>("client_country"),
+                    "target_country": r.get::<_, Option<String>>("target_country"),
+                    "note": r.get::<_, Option<String>>("note"),
+                    "error": r.get::<_, Option<serde_json::Value>>("error"),
+                })
+            })
+            .collect())
+    }
+
     /// Агрегат для админки по скользящему окну.
     pub async fn aggregate(
         &self,

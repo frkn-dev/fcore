@@ -688,6 +688,89 @@ pub struct BlockReportAggregateQuery {
     pub min_observations: Option<i64>,
 }
 
+#[derive(serde::Deserialize, Debug, Default)]
+pub struct ObservationsQuery {
+    #[serde(default)]
+    pub subscription: Option<String>,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// GET /v1/admin/report/observations — сырые наблюдения для поддержки.
+///
+/// Юзер пишет «отправил отчёт, ID такой-то» → открываем по подписке и видим
+/// по каждой цели: состояние пробы, RTT, ICMP, ноду и версию приложения.
+pub async fn admin_observations_handler<N, C, S>(
+    query: ObservationsQuery,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<warp::reply::Response, Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(json_status(404, "not found"));
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(json_status(401, "unauthorized"));
+    }
+
+    let subscription = match query.subscription.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => match raw.trim().parse::<uuid::Uuid>() {
+            Ok(v) => Some(v),
+            Err(_) => return Ok(json_status(400, "invalid_subscription")),
+        },
+        _ => None,
+    };
+    let address = match query.address.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => match raw.trim().parse::<std::net::IpAddr>() {
+            Ok(v) => Some(v),
+            Err(_) => return Ok(json_status(400, "invalid_address")),
+        },
+        _ => None,
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+
+    match memory
+        .db
+        .report()
+        .observations(subscription, address, limit)
+        .await
+    {
+        Ok(rows) => Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "status": 200,
+                "response": {
+                    "subscription": subscription,
+                    "address": address,
+                    "count": rows.len(),
+                    "observations": rows,
+                }
+            })),
+            warp::http::StatusCode::OK,
+        )
+        .into_response()),
+        Err(err) => {
+            tracing::error!("report observations failed: {err}");
+            Ok(json_status(500, "observations_failed"))
+        }
+    }
+}
+
 pub async fn admin_block_report_handler<N, C, S>(
     query: BlockReportAggregateQuery,
     memory: MemSync<N, C, S>,
