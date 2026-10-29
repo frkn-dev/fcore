@@ -39,6 +39,15 @@ pub struct AlertsConfig {
     /// Минимальный интервал между одинаковыми алертами по одной ноде.
     #[serde(default = "default_throttle")]
     pub throttle_sec: u64,
+    /// Тишина короче порога офлайна, но длиннее этого значения, считается «миганием».
+    #[serde(default = "default_flap_gap")]
+    pub flap_gap_sec: u64,
+    /// Окно, за которое считаем мигания.
+    #[serde(default = "default_flap_window")]
+    pub flap_window_sec: u64,
+    /// Сколько переходов offline↔online в окне считаем «нода мигает».
+    #[serde(default = "default_flap_threshold")]
+    pub flap_threshold: u64,
     /// База Telegram Bot API (можно подменить на прокси).
     #[serde(default = "default_api_base")]
     pub telegram_api_base: String,
@@ -56,6 +65,15 @@ fn default_new_node_grace() -> u64 {
 fn default_throttle() -> u64 {
     1800
 }
+fn default_flap_gap() -> u64 {
+    120
+}
+fn default_flap_window() -> u64 {
+    3600
+}
+fn default_flap_threshold() -> u64 {
+    3
+}
 fn default_api_base() -> String {
     "https://api.telegram.org".to_string()
 }
@@ -70,6 +88,9 @@ impl Default for AlertsConfig {
             recovery_grace_sec: default_recovery_grace(),
             new_node_grace_sec: default_new_node_grace(),
             throttle_sec: default_throttle(),
+            flap_gap_sec: default_flap_gap(),
+            flap_window_sec: default_flap_window(),
+            flap_threshold: default_flap_threshold(),
             telegram_api_base: default_api_base(),
         }
     }
@@ -86,6 +107,8 @@ impl AlertsConfig {
 pub enum AlertKind {
     NodeOffline,
     NodeRecovered,
+    /// Нода мигает: много переходов за окно (короткие обрывы, не ловимые порогом).
+    NodeFlapping,
 }
 
 impl AlertKind {
@@ -93,6 +116,7 @@ impl AlertKind {
         match self {
             Self::NodeOffline => "node_offline",
             Self::NodeRecovered => "node_recovered",
+            Self::NodeFlapping => "node_flapping",
         }
     }
 }
@@ -131,6 +155,14 @@ struct NodeTrack {
     ok_since: Option<Instant>,
     /// Уже отправили «офлайн» и ждём отбоя.
     alerted: bool,
+    /// Последние переходы offline↔online (для правила «мигает»).
+    transitions: std::collections::VecDeque<Instant>,
+    /// Последнее наблюдённое состояние: true = онлайн.
+    last_online: Option<bool>,
+    /// Уже отправили алерт «мигает» и ждём, пока окно очистится.
+    flap_alerted: bool,
+    /// Сейчас длится эпизод тишины (чтобы не считать его много раз).
+    hiccup_active: bool,
     /// Последний отправленный алерт по типу — для подавления повторов.
     last_sent: HashMap<&'static str, Instant>,
 }
@@ -142,6 +174,10 @@ impl NodeTrack {
             offline_since: None,
             ok_since: None,
             alerted: false,
+            transitions: std::collections::VecDeque::new(),
+            last_online: None,
+            flap_alerted: false,
+            hiccup_active: false,
             last_sent: HashMap::new(),
         }
     }
@@ -177,6 +213,9 @@ impl AlertsEngine {
         // читаем настройки заранее: дальше занимаем self.nodes мутабельно
         let throttle_sec = self.cfg.throttle_sec;
         let new_node_grace = self.cfg.new_node_grace_sec;
+        let flap_window = Duration::from_secs(self.cfg.flap_window_sec);
+        let flap_threshold = self.cfg.flap_threshold.max(2) as usize;
+        let flap_gap_sec = self.cfg.flap_gap_sec.max(60) as i64;
         let track = self
             .nodes
             .entry(node_id)
@@ -193,6 +232,38 @@ impl AlertsEngine {
 
         let silence_sec = (now_ms - last_ms) / 1000;
         let offline = silence_sec >= self.cfg.offline_threshold_sec as i64;
+
+        // Правило «нода мигает»: эпизоды тишины длиннее flap_gap_sec, но короче
+        // порога офлайна. Именно такие обрывы не видит правило node_offline.
+        if silence_sec >= flap_gap_sec {
+            if !track.hiccup_active {
+                track.hiccup_active = true;
+                track.transitions.push_back(now);
+                while let Some(front) = track.transitions.front() {
+                    if now.duration_since(*front) > flap_window {
+                        track.transitions.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                if track.transitions.len() < flap_threshold {
+                    track.flap_alerted = false;
+                }
+                if track.transitions.len() >= flap_threshold && !track.flap_alerted && !new_node {
+                    track.flap_alerted = true;
+                    let count = track.transitions.len() as i64;
+                    return Decision::Fire {
+                        kind: AlertKind::NodeFlapping,
+                        node_id,
+                        hostname: hostname.to_string(),
+                        env: env.to_string(),
+                        duration_sec: count,
+                    };
+                }
+            }
+        } else if silence_sec * 2 < flap_gap_sec {
+            track.hiccup_active = false;
+        }
 
         if offline {
             track.ok_since = None;
@@ -318,6 +389,10 @@ pub fn format_message(kind: &AlertKind, hostname: &str, env: &str, duration_sec:
             "🟢 Нода вернулась\n{hostname} ({env})\nстабильна: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
+        AlertKind::NodeFlapping => format!(
+            "🟠 Нода мигает\n{hostname} ({env})\n{duration_sec} перехода за окно\nвремя: {}",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ),
     }
 }
 
@@ -346,6 +421,9 @@ mod tests {
             recovery_grace_sec: 120,
             new_node_grace_sec: 0,
             throttle_sec: 1800,
+            flap_gap_sec: 120,
+            flap_window_sec: 3600,
+            flap_threshold: 3,
             telegram_api_base: default_api_base(),
         }
     }
@@ -416,6 +494,38 @@ mod tests {
             e.observe(node(), "n1", "ru", Some(now), now),
             Decision::Idle
         );
+    }
+
+    #[test]
+    fn flapping_counts_silence_episodes() {
+        let mut e = AlertsEngine::new(cfg());
+        let now = 1_700_000_000_000i64;
+        // три эпизода тишины по 150с (> flap_gap 120с), между ними свежие heartbeat
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now - 150_000), now), Decision::Idle);
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now - 150_000), now), Decision::Idle);
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        match e.observe(node(), "n1", "ru", Some(now - 150_000), now) {
+            Decision::Fire { kind, .. } => assert_eq!(kind, AlertKind::NodeFlapping),
+            other => panic!("ожидали node_flapping, получили {other:?}"),
+        }
+        // дальше молчим, пока окно не очистится
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now - 150_000), now), Decision::Idle);
+    }
+
+    #[test]
+    fn single_short_glitch_does_not_trigger_flapping() {
+        let mut e = AlertsEngine::new(cfg());
+        let now = 1_700_000_000_000i64;
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        // один короткий обрыв 40 секунд — ниже и порога офлайна, и flap_gap
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now - 40_000), now),
+            Decision::Idle
+        );
+        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
     }
 
     #[test]
