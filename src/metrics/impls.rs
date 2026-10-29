@@ -10,11 +10,15 @@ use super::Metrics;
 
 static BEAT_INDEX: OnceLock<AtomicUsize> = OnceLock::new();
 
+/// Момент старта процесса — чтобы api видел перезапуски ноды.
+static START: OnceLock<std::time::Instant> = OnceLock::new();
+
 impl<T> Metrics for T
 where
     T: HasMetrics + Sync + Send,
 {
     async fn heartbeat(&self) {
+        let started = *START.get_or_init(std::time::Instant::now);
         let pattern: &[f64] = &[
             1.0, 1.0, 2.5, 0.4, 0.6, 1.3, 1.0, 1.0, 1.1, 1.0, 1.0, 0.8, 1.0, 1.9, 0.3, 0.5, 1.0,
         ];
@@ -31,7 +35,14 @@ where
         let node_uuid = node.uuid;
 
         self.metrics()
-            .write(&node_uuid, "sys.heartbeat", value, tags);
+            .write(&node_uuid, "sys.heartbeat", value, tags.clone());
+        // Аптайм процесса: если значение уменьшилось — нода перезапускалась.
+        self.metrics().write(
+            &node_uuid,
+            "sys.uptime",
+            started.elapsed().as_secs_f64(),
+            tags,
+        );
     }
 
     async fn memory(&self) {

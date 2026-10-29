@@ -254,6 +254,17 @@ pub struct AlertsEngine {
     cpu: HashMap<Uuid, CpuTrack>,
     /// Состояние правила диска: (нода, раздел) → с какого момента заполнен.
     disks: HashMap<(Uuid, String), CpuTrack>,
+    /// Последний uptime ноды — для обнаружения перезапусков.
+    restarts: HashMap<Uuid, RestartTrack>,
+}
+
+/// Перезапуски ноды по метрике sys.uptime (ловит короткие мигания 10–48 с).
+#[derive(Debug, Clone)]
+struct RestartTrack {
+    last_uptime: f64,
+    count: u32,
+    window_start: Instant,
+    alerted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +280,7 @@ impl AlertsEngine {
             nodes: HashMap::new(),
             cpu: HashMap::new(),
             disks: HashMap::new(),
+            restarts: HashMap::new(),
         }
     }
 
@@ -520,6 +532,78 @@ impl AlertsEngine {
         fire
     }
 
+    /// Правило перезапусков: uptime уменьшился → нода перезапускалась.
+    ///
+    /// Это единственный сигнал, который ловит короткие мигания (10–48 с):
+    /// тишина такого размера неотличима от штатного интервала heartbeat-а.
+    pub fn observe_restarts(
+        &mut self,
+        node_id: Uuid,
+        hostname: &str,
+        env: &str,
+        uptime_sec: Option<f64>,
+    ) -> Decision {
+        self.observe_restarts_at(node_id, hostname, env, uptime_sec, Instant::now())
+    }
+
+    fn observe_restarts_at(
+        &mut self,
+        node_id: Uuid,
+        hostname: &str,
+        env: &str,
+        uptime_sec: Option<f64>,
+        now: Instant,
+    ) -> Decision {
+        let Some(uptime) = uptime_sec else {
+            return Decision::Idle;
+        };
+        let window = Duration::from_secs(self.cfg.flap_window_sec);
+        let threshold = self.cfg.flap_threshold.max(2);
+
+        let track = match self.restarts.get_mut(&node_id) {
+            Some(t) => t,
+            None => {
+                self.restarts.insert(
+                    node_id,
+                    RestartTrack {
+                        last_uptime: uptime,
+                        count: 0,
+                        window_start: now,
+                        alerted: false,
+                    },
+                );
+                return Decision::Idle;
+            }
+        };
+
+        // Перезапуск: аптайм упал существенно (не путаем с округлением).
+        let restarted = uptime + 5.0 < track.last_uptime;
+        track.last_uptime = uptime;
+        if !restarted {
+            return Decision::Idle;
+        }
+
+        if now.duration_since(track.window_start) > window {
+            track.count = 0;
+            track.window_start = now;
+            track.alerted = false;
+        }
+        track.count += 1;
+        let count = track.count;
+        if track.alerted || u64::from(count) < threshold {
+            return Decision::Idle;
+        }
+        track.alerted = true;
+        Decision::Fire {
+            kind: AlertKind::NodeFlapping,
+            node_id,
+            hostname: hostname.to_string(),
+            env: env.to_string(),
+            duration_sec: count as i64,
+            detail: Some(format!("перезапусков за окно: {count}")),
+        }
+    }
+
     /// Затравка состояния из PG после старта процесса.
     ///
     /// Без неё правило не видит ноды, которые молчат с прошлого запуска:
@@ -729,6 +813,42 @@ mod tests {
             e.observe(node(), "n1", "ru", Some(now), now),
             Decision::Idle
         );
+    }
+
+    #[test]
+    fn restarts_detected_by_uptime_drop() {
+        let mut e = AlertsEngine::new(cfg());
+        let base = std::time::Instant::now();
+        let step = |e: &mut AlertsEngine, up: f64, secs: u64| {
+            e.observe_restarts_at(
+                node(),
+                "n1",
+                "ru",
+                Some(up),
+                base + Duration::from_secs(secs),
+            )
+        };
+
+        assert_eq!(step(&mut e, 1000.0, 0), Decision::Idle); // первое наблюдение
+        assert_eq!(step(&mut e, 1030.0, 30), Decision::Idle); // растёт — всё хорошо
+                                                              // 1-й перезапуск
+        assert_eq!(step(&mut e, 5.0, 60), Decision::Idle);
+        assert_eq!(step(&mut e, 40.0, 100), Decision::Idle);
+        // 2-й перезапуск
+        assert_eq!(step(&mut e, 3.0, 120), Decision::Idle);
+        assert_eq!(step(&mut e, 30.0, 150), Decision::Idle);
+        // 3-й перезапуск → алерт
+        match step(&mut e, 2.0, 180) {
+            Decision::Fire {
+                kind, duration_sec, ..
+            } => {
+                assert_eq!(kind, AlertKind::NodeFlapping);
+                assert_eq!(duration_sec, 3);
+            }
+            other => panic!("ожидали node_flapping по перезапускам, получили {other:?}"),
+        }
+        // повторно не шлём
+        assert_eq!(step(&mut e, 20.0, 210), Decision::Idle);
     }
 
     #[test]
