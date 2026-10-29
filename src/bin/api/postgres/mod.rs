@@ -11,3 +11,4 @@ pub(crate) mod report;
 pub(crate) mod share;
 pub(crate) mod subscription;
 pub(crate) mod traffic;
+pub(crate) mod usage;

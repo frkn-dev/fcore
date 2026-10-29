@@ -16,6 +16,7 @@ pub(crate) mod report;
 pub mod score;
 pub mod share;
 pub mod subscription;
+pub(crate) mod usage;
 
 use warp::http::StatusCode;
 

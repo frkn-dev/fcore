@@ -33,6 +33,8 @@ pub trait Tasks {
     async fn restore_subscriptions(&self, interval_sec: u64);
     async fn purge_block_observations(&self, interval_sec: u64);
     async fn purge_alert_events(&self, interval_sec: u64);
+    async fn persist_exit_usage(&self, interval_sec: u64);
+    async fn purge_usage(&self, interval_sec: u64);
     async fn monitor_alerts(&self, interval_sec: u64);
 
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
@@ -1145,6 +1147,38 @@ where
     }
 
     /// Ретенция наблюдений о блокировках (30 дней).
+    /// Часовой срез «подписка → нода → IP выхода».
+    async fn persist_exit_usage(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+        loop {
+            interval.tick().await;
+            match self.sync.db.usage().snapshot_exit().await {
+                Ok(0) => tracing::debug!("exit usage: no live connections"),
+                Ok(n) => tracing::info!("exit usage: snapshot wrote {n} rows"),
+                Err(e) => tracing::error!("exit usage: snapshot failed: {e}"),
+            }
+        }
+    }
+
+    /// Ретенция истории использования (400 дней).
+    async fn purge_usage(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+        loop {
+            interval.tick().await;
+            match self
+                .sync
+                .db
+                .usage()
+                .purge_old(crate::postgres::usage::USAGE_RETENTION_DAYS)
+                .await
+            {
+                Ok(0) => tracing::debug!("usage: nothing to purge"),
+                Ok(n) => tracing::info!("usage: purged {n} old rows"),
+                Err(e) => tracing::error!("usage: purge failed: {e}"),
+            }
+        }
+    }
+
     /// Ретенция истории алертов (180 дней): таблица растёт вечно иначе.
     async fn purge_alert_events(&self, interval_sec: u64) {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));

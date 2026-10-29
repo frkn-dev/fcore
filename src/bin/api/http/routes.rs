@@ -1095,6 +1095,64 @@ where
                 },
             );
 
+        // GET /v1/admin/usage/exit — кто через какой выход ходил.
+        let get_exit_usage_admin_route = warp::get()
+            .and(warp::path("v1"))
+            .and(warp::path("admin"))
+            .and(warp::path("usage"))
+            .and(warp::path("exit"))
+            .and(warp::path::end())
+            .and(warp::query::<crate::http::handlers::usage::UsageQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(
+                |query: crate::http::handlers::usage::UsageQuery,
+                 sync: MemSync<N, C, S>,
+                 admin_enabled: bool,
+                 admin_token: String,
+                 auth_header: Option<String>| async move {
+                    crate::http::handlers::usage::admin_exit_usage_handler(
+                        query,
+                        sync,
+                        admin_enabled,
+                        admin_token,
+                        auth_header,
+                    )
+                    .await
+                },
+            );
+
+        // GET /v1/admin/usage/entry — откуда подключались.
+        let get_entry_usage_admin_route = warp::get()
+            .and(warp::path("v1"))
+            .and(warp::path("admin"))
+            .and(warp::path("usage"))
+            .and(warp::path("entry"))
+            .and(warp::path::end())
+            .and(warp::query::<crate::http::handlers::usage::UsageQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(
+                |query: crate::http::handlers::usage::UsageQuery,
+                 sync: MemSync<N, C, S>,
+                 admin_enabled: bool,
+                 admin_token: String,
+                 auth_header: Option<String>| async move {
+                    crate::http::handlers::usage::admin_entry_usage_handler(
+                        query,
+                        sync,
+                        admin_enabled,
+                        admin_token,
+                        auth_header,
+                    )
+                    .await
+                },
+            );
+
         // GET /v1/admin/report/block — агрегат с вердиктами (под admin-токеном).
         let get_block_report_admin_route = warp::get()
             .and(warp::path("v1"))
@@ -1493,6 +1551,8 @@ where
             .or(post_block_report_route)
             .or(post_scan_report_route)
             .or(get_block_report_admin_route)
+            .or(get_exit_usage_admin_route)
+            .or(get_entry_usage_admin_route)
             .or(get_admin_alerts_route)
             .or(post_admin_alerts_test_route)
             // Mesh

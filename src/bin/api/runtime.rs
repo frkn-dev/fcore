@@ -160,6 +160,21 @@ where
             }
         });
 
+        spawn_task("persist_exit_usage", {
+            let service = Arc::clone(&self);
+            // Раз в час: история «кто через какой выход ходил».
+            async move {
+                service.persist_exit_usage(3_600).await;
+            }
+        });
+
+        spawn_task("purge_usage", {
+            let service = Arc::clone(&self);
+            async move {
+                service.purge_usage(86_400).await;
+            }
+        });
+
         spawn_task("cleanup_expired_connections", {
             let interval = self.settings.tasks.connection_expire_interval;
             let service = Arc::clone(&self);
