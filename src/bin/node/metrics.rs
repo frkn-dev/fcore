@@ -171,7 +171,18 @@ where
 
         for (conn_id, subscription_id, pubkey) in wg_conns {
             if let Ok(pubkey) = pubkey {
-                if let Ok((uplink, downlink, last_handshake_ms)) = wg_client.peer_stats(&pubkey) {
+                if let Ok((uplink, downlink, last_handshake_ms, endpoint)) =
+                    wg_client.peer_stats(&pubkey)
+                {
+                    if let Some(addr) = endpoint {
+                        self.metrics.push_entry(
+                            node_uuid,
+                            conn_id,
+                            subscription_id,
+                            "wireguard",
+                            addr.ip(),
+                        );
+                    }
                     let mut metric_tags = base_tags.clone();
                     metric_tags.insert("conn_id".to_string(), conn_id.to_string());
                     metric_tags.insert("proto".to_string(), "wireguard".to_string());
@@ -294,6 +305,16 @@ where
                 peer_online_by_handshake(stats.last_handshake.map(|ns| ns / 1_000_000)),
                 metric_tags,
             );
+
+            if let Some(addr) = stats.endpoint {
+                self.metrics.push_entry(
+                    node_uuid,
+                    conn_id,
+                    subscription_id,
+                    proto_label,
+                    addr.ip(),
+                );
+            }
         }
     }
 }

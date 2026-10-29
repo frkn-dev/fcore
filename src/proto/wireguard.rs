@@ -151,7 +151,12 @@ impl WgApi {
         Err(Error::Custom("No available IPs in the subnet".into()))
     }
 
-    pub fn peer_stats(&self, pubkey: &str) -> Result<(i64, i64, Option<u64>)> {
+    /// Статистика пира. Последний элемент — `endpoint`, то есть реальный
+    /// адрес, с которого клиент подключён (для журнала входов).
+    pub fn peer_stats(
+        &self,
+        pubkey: &str,
+    ) -> Result<(i64, i64, Option<u64>, Option<std::net::SocketAddr>)> {
         let data = self.client.read_interface_data()?;
         let key = Self::decode_pubkey(pubkey)?;
         let peer = data
@@ -169,6 +174,7 @@ impl WgApi {
             peer.rx_bytes as i64,
             peer.tx_bytes as i64,
             last_handshake_ms,
+            peer.endpoint,
         ))
     }
 

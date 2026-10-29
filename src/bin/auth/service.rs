@@ -101,6 +101,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
 
     let metrics = MetricBuffer {
         batch: parking_lot::Mutex::new(Vec::new()),
+        entries: parking_lot::Mutex::new(Vec::new()),
+        entry_seen: parking_lot::Mutex::new(std::collections::HashMap::new()),
         publisher: Publisher::connect(&settings.metrics.publisher).await?,
     };
 

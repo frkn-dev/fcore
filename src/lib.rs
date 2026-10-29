@@ -81,7 +81,7 @@ pub use memory::{
 
 pub use metrics::{
     storage::{HasMetrics, MetricBuffer, MetricStorage},
-    MetricEnvelope, MetricPoint, Metrics,
+    EntryEnvelope, MetricEnvelope, MetricPoint, Metrics,
 };
 #[cfg(feature = "amnezia-wg")]
 pub use proto::amnezia_wg::AwgInterface;

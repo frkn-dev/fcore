@@ -285,11 +285,12 @@ where
         spawn_task("metric_worker", {
             let metrics = Arc::clone(&self.metrics);
             let receiver = self.settings.metrics.reciever.clone();
+            let usage = self.sync.db.usage();
 
             async move {
-                match Subscriber::new_bound(&receiver, vec![Topic::Metrics]) {
+                match Subscriber::new_bound(&receiver, vec![Topic::Metrics, Topic::Entries]) {
                     Ok(subscriber) => {
-                        MetricWorker::start(metrics, subscriber).await;
+                        MetricWorker::start(metrics, subscriber, usage).await;
                     }
                     Err(err) => {
                         error!("Failed to start MetricWorker: {}", err);

@@ -42,6 +42,8 @@ pub struct PeerStats {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub last_handshake: Option<u64>,
+    /// Реальный адрес клиента (endpoint пира) — для журнала входов.
+    pub endpoint: Option<std::net::SocketAddr>,
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +350,7 @@ impl AwgInterface {
             let mut rx = 0;
             let mut tx = 0;
             let mut hs = None;
+            let mut endpoint = None;
 
             for attr in peer.0 {
                 match attr {
@@ -367,6 +370,10 @@ impl AwgInterface {
                         hs = Some((time.seconds * 1_000_000_000 + time.nano_seconds) as u64);
                     }
 
+                    AmneziaWireguardPeerAttribute::Endpoint(addr) => {
+                        endpoint = Some(addr);
+                    }
+
                     _ => {}
                 }
             }
@@ -378,6 +385,7 @@ impl AwgInterface {
                         rx_bytes: rx,
                         tx_bytes: tx,
                         last_handshake: hs,
+                        endpoint,
                     },
                 );
             }

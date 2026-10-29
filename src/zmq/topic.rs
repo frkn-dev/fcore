@@ -9,6 +9,8 @@ use crate::memory::env::Env;
 pub enum Topic {
     Auth,
     Metrics,
+    /// Наблюдения о входах: с какого адреса клиент подключён к ноде.
+    Entries,
     Updates(Env),
     Init(uuid::Uuid),
 }
@@ -18,6 +20,7 @@ impl fmt::Display for Topic {
         match self {
             Self::Auth => write!(f, "auth"),
             Self::Metrics => write!(f, "metrics",),
+            Self::Entries => write!(f, "entries",),
             Self::Updates(env) => write!(f, "updates-{}", env),
             Self::Init(uuid) => write!(f, "init-{}", uuid),
         }
@@ -37,6 +40,9 @@ impl FromStr for Topic {
         }
         if s == "metrics" {
             return Ok(Topic::Metrics);
+        }
+        if s == "entries" {
+            return Ok(Topic::Entries);
         }
 
         if let Some(env_str) = s.strip_prefix("updates-") {
@@ -85,6 +91,7 @@ impl Topic {
         match self {
             Topic::Auth => "auth".to_string(),
             Topic::Metrics => "metrics".to_string(),
+            Topic::Entries => "entries".to_string(),
             Topic::Updates(s) => format!("updates-{}", s),
             Topic::Init(s) => format!("init-{}", s),
         }
@@ -94,6 +101,7 @@ impl Topic {
         match self {
             Topic::Auth => Cow::Borrowed("auth"),
             Topic::Metrics => Cow::Borrowed("metrics"),
+            Topic::Entries => Cow::Borrowed("entries"),
             Topic::Updates(env) => format!("updates-{}", env).into(),
             Topic::Init(uuid) => Cow::Owned(format!("init-{}", uuid)),
         }
@@ -102,6 +110,7 @@ impl Topic {
         match self {
             Topic::Auth => b"auth".to_vec(),
             Topic::Metrics => b"metrics".to_vec(),
+            Topic::Entries => b"entries".to_vec(),
             _ => self.as_str().as_bytes().to_vec(),
         }
     }

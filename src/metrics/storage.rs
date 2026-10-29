@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use super::{MetricEnvelope, MetricPoint};
 use crate::memory::node::Node;
+use crate::metrics::EntryEnvelope;
 use crate::zmq::{publisher::Publisher, topic::Topic};
 
 pub trait HasMetrics {
@@ -38,6 +39,12 @@ impl MetricSink for MetricBuffer {
 
 pub struct MetricBuffer {
     pub batch: parking_lot::Mutex<Vec<MetricEnvelope>>,
+    /// Наблюдения о входах — разовые события, не временной ряд.
+    pub entries: parking_lot::Mutex<Vec<EntryEnvelope>>,
+    /// conn_id -> (последний отправленный адрес, время отправки, мс).
+    /// Нужен, чтобы не слать один и тот же вход каждую минуту: шлём при смене
+    /// адреса либо раз в полчаса, чтобы `last_seen` не устаревал.
+    pub entry_seen: parking_lot::Mutex<std::collections::HashMap<uuid::Uuid, (String, i64)>>,
     pub publisher: Publisher,
 }
 
@@ -59,6 +66,63 @@ impl MetricBuffer {
         });
     }
 
+    /// Отмечает вход клиента. Дубликаты отсекаются: тот же адрес по тому же
+    /// коннекту уходит не чаще, чем раз в `ENTRY_REFRESH_MS`.
+    pub fn push_entry(
+        &self,
+        node_id: uuid::Uuid,
+        conn_id: uuid::Uuid,
+        subscription_id: Option<uuid::Uuid>,
+        proto: &str,
+        ip: std::net::IpAddr,
+    ) {
+        const ENTRY_REFRESH_MS: i64 = 30 * 60 * 1000;
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let ip_text = ip.to_string();
+        {
+            let mut seen = self.entry_seen.lock();
+            match seen.get(&conn_id) {
+                Some((last_ip, last_ms)) if last_ip == &ip_text && now - last_ms < ENTRY_REFRESH_MS => {
+                    return;
+                }
+                _ => {}
+            }
+            seen.insert(conn_id, (ip_text.clone(), now));
+        }
+
+        self.entries.lock().push(EntryEnvelope {
+            node_id,
+            conn_id,
+            subscription_id,
+            proto: proto.to_string(),
+            ip: ip_text,
+            timestamp: now,
+        });
+    }
+
+    async fn flush_entries_to_zmq(&self) {
+        let entries = {
+            let mut buf = self.entries.lock();
+            if buf.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *buf)
+        };
+
+        let bytes = match rkyv::to_bytes::<_, 65536>(&entries) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("Entry batch serialize failed: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = self.publisher.send_binary(&Topic::Entries, bytes.as_slice()).await {
+            tracing::error!("Entry batch publish failed: {}", e);
+        }
+    }
+
     pub async fn flush_to_zmq(&self) {
         let metrics = {
             let mut batch = self.batch.lock();
@@ -77,6 +141,8 @@ impl MetricBuffer {
         {
             tracing::error!("Batch publish failed: {}", e);
         }
+
+        self.flush_entries_to_zmq().await;
     }
 
     /// Return the current batch contents as Prometheus text exposition.
@@ -704,6 +770,8 @@ mod tests {
             .expect("connect publisher");
         let buffer = MetricBuffer {
             batch: parking_lot::Mutex::new(Vec::new()),
+            entries: parking_lot::Mutex::new(Vec::new()),
+            entry_seen: parking_lot::Mutex::new(std::collections::HashMap::new()),
             publisher,
         };
 
