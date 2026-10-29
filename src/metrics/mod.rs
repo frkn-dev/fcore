@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 pub(crate) mod impls;
 
-pub use impls::process_uptime_secs;
+pub use impls::{mark_process_start, process_uptime_secs};
 pub(crate) mod snapshot;
 pub(crate) mod storage;
 

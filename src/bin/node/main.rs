@@ -12,6 +12,7 @@ use config::ServiceSettings;
 use fcore::{utils::level_from_settings, Settings, BANNER, VERSION};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    fcore::metrics::mark_process_start();
     println!(">>> Node {}", VERSION);
     println!("{}", BANNER);
 

@@ -10,6 +10,12 @@ use super::Metrics;
 
 static BEAT_INDEX: OnceLock<AtomicUsize> = OnceLock::new();
 
+/// Фиксирует старт процесса — вызывается в main, чтобы аптайм не начинался
+/// с первого обращения к /healthcheck.
+pub fn mark_process_start() {
+    START.get_or_init(std::time::Instant::now);
+}
+
 /// Сколько секунд работает процесс (для /healthcheck).
 pub fn process_uptime_secs() -> f64 {
     let started = *START.get_or_init(std::time::Instant::now);
