@@ -1155,7 +1155,7 @@ where
             match self.sync.db.usage().snapshot_exit().await {
                 Ok(0) => tracing::debug!("exit usage: no live connections"),
                 Ok(n) => tracing::info!("exit usage: snapshot wrote {n} rows"),
-                Err(e) => tracing::error!("exit usage: snapshot failed: {e}"),
+                Err(e) => tracing::error!("exit usage: snapshot failed: {e:?}"),
             }
         }
     }

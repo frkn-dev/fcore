@@ -87,14 +87,22 @@ impl PgUsage {
             .execute(
                 r#"
                 INSERT INTO exit_usage (day, subscription_id, node_id, exit_ip, proto, samples, first_seen, last_seen)
-                SELECT current_date, c.subscription_id, c.node_id, n.address, c.proto::text, 1, now(), now()
+                SELECT current_date,
+                       c.subscription_id,
+                       c.node_id,
+                       n.address,
+                       c.proto::text,
+                       count(*)::bigint,
+                       now(),
+                       now()
                 FROM connections c
                 JOIN nodes n ON n.id = c.node_id
                 WHERE c.is_deleted = false
                   AND c.subscription_id IS NOT NULL
                   AND (c.expires_at IS NULL OR c.expires_at > now())
+                GROUP BY 1, 2, 3, 4, 5
                 ON CONFLICT (day, subscription_id, node_id, proto)
-                DO UPDATE SET samples = exit_usage.samples + 1,
+                DO UPDATE SET samples = exit_usage.samples + EXCLUDED.samples,
                               last_seen = now(),
                               exit_ip = EXCLUDED.exit_ip
                 "#,
