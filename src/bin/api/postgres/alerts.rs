@@ -56,6 +56,24 @@ impl PgAlerts {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Ретенция истории алертов: сколько дней держим.
+    pub const RETENTION_DAYS: i64 = 180;
+
+    /// Удаляет события старше `days` дней.
+    pub async fn purge_old(&self, days: i64) -> Result<u64> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let deleted = client
+            .execute(
+                "DELETE FROM alert_events WHERE created_at < now() - ($1 || ' days')::interval",
+                &[&days.to_string()],
+            )
+            .await?;
+
+        Ok(deleted)
+    }
+
     pub async fn record(
         &self,
         rule: &str,

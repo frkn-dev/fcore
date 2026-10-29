@@ -152,6 +152,14 @@ where
             }
         });
 
+        spawn_task("purge_alert_events", {
+            let service = Arc::clone(&self);
+            // Раз в сутки: история алертов живёт 180 дней.
+            async move {
+                service.purge_alert_events(86_400).await;
+            }
+        });
+
         spawn_task("cleanup_expired_connections", {
             let interval = self.settings.tasks.connection_expire_interval;
             let service = Arc::clone(&self);

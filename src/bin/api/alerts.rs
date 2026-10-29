@@ -699,7 +699,9 @@ mod tests {
         let base = std::time::Instant::now();
         let disks = vec![("/".to_string(), 93.0), ("/opt".to_string(), 40.0)];
         // первый тик — только начинаем отсчёт
-        assert!(e.observe_disk_at(node(), "n1", "ru", &disks, base).is_none());
+        assert!(e
+            .observe_disk_at(node(), "n1", "ru", &disks, base)
+            .is_none());
         // 15 минут — алерт, в уточнении раздел и процент
         match e.observe_disk_at(node(), "n1", "ru", &disks, base + Duration::from_secs(901)) {
             Some(Decision::Fire { kind, detail, .. }) => {

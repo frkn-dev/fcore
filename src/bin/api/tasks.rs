@@ -32,6 +32,7 @@ pub trait Tasks {
     async fn cleanup_expired_subscriptions(&self, interval_sec: u64);
     async fn restore_subscriptions(&self, interval_sec: u64);
     async fn purge_block_observations(&self, interval_sec: u64);
+    async fn purge_alert_events(&self, interval_sec: u64);
     async fn monitor_alerts(&self, interval_sec: u64);
 
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
@@ -1143,6 +1144,26 @@ where
     }
 
     /// Ретенция наблюдений о блокировках (30 дней).
+    /// Ретенция истории алертов (180 дней): таблица растёт вечно иначе.
+    async fn purge_alert_events(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            match self
+                .sync
+                .db
+                .alerts()
+                .purge_old(crate::postgres::alerts::PgAlerts::RETENTION_DAYS)
+                .await
+            {
+                Ok(0) => tracing::debug!("alert events: nothing to purge"),
+                Ok(n) => tracing::info!("alert events: purged {n} rows"),
+                Err(e) => tracing::error!("alert events: purge failed: {e}"),
+            }
+        }
+    }
+
     async fn purge_block_observations(&self, interval_sec: u64) {
         use crate::postgres::report::BLOCK_OBSERVATION_RETENTION_DAYS;
 
