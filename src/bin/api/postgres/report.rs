@@ -313,7 +313,7 @@ impl PgReport {
             WITH base AS (
                 SELECT coalesce(target_host, address::text) AS target_host,
                        address, port, protocol, coalesce(node_host,'') AS node_host,
-                       asn, client_country, state, icmp_ok, ip_hash, created_at
+                       asn, client_country, state, transport, icmp_ok, ip_hash, created_at
                 FROM block_observations
                 WHERE created_at BETWEEN $1 AND $2
                   AND ($3::inet IS NULL OR address = $3)
