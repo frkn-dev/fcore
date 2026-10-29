@@ -7,7 +7,8 @@ use warp::http::StatusCode;
 
 use fcore::{
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricStorage, Node,
-    NodeStatus, NodeStorageOperations, Status, Subscription, SubscriptionOperations, SubscriptionStorageOperations,
+    NodeStatus, NodeStorageOperations, Status, Subscription, SubscriptionOperations,
+    SubscriptionStorageOperations,
 };
 
 use crate::sync::{
@@ -307,14 +308,10 @@ where
         };
         let disk_usage_percent = metrics.node_disk_usage(&node.uuid, "root");
 
-        let load_percent = [
-            cpu_percent,
-            memory_percent,
-            disk_usage_percent,
-        ]
-        .iter()
-        .filter_map(|v| *v)
-        .reduce(f64::max);
+        let load_percent = [cpu_percent, memory_percent, disk_usage_percent]
+            .iter()
+            .filter_map(|v| *v)
+            .reduce(f64::max);
 
         admin_node.metrics = NodeMetricsSnapshot {
             memory_used_bytes: mem_used,
@@ -595,8 +592,9 @@ pub async fn admin_api_node_metrics_handler(
     let to = query.to.unwrap_or(now);
 
     let Some(node_map) = metrics.inner.get(&node_id) else {
-        return Ok(Box::new(warp::reply::json(&AdminNodeMetricsResponse { metrics: vec![] },
-        )));
+        return Ok(Box::new(warp::reply::json(&AdminNodeMetricsResponse {
+            metrics: vec![],
+        })));
     };
 
     let mut result = Vec::new();
@@ -632,15 +630,12 @@ pub async fn admin_api_node_metrics_handler(
             continue;
         }
 
-        result.push(AdminNodeMetricSeries {
-            name,
-            tags,
-            points,
-        });
+        result.push(AdminNodeMetricSeries { name, tags, points });
     }
 
-    Ok(Box::new(warp::reply::json(&AdminNodeMetricsResponse { metrics: result },
-    )))
+    Ok(Box::new(warp::reply::json(&AdminNodeMetricsResponse {
+        metrics: result,
+    })))
 }
 
 pub async fn admin_api_assign_premium_handler<N, C, S>(
@@ -683,10 +678,12 @@ where
         let mut mem = memory.memory.write().await;
         let sub = match mem.subscriptions.find_by_id_mut(&subscription_id) {
             Some(s) => s,
-            None => return Ok(Box::new(warp::reply::with_status(
-                "Subscription not found",
-                StatusCode::NOT_FOUND,
-            ))),
+            None => {
+                return Ok(Box::new(warp::reply::with_status(
+                    "Subscription not found",
+                    StatusCode::NOT_FOUND,
+                )))
+            }
         };
         sub.set_scope_env(env.clone());
         sub.set_premium_token(premium_token.clone());
@@ -859,9 +856,7 @@ where
     let expires_at = Utc::now() + chrono::Duration::days(req.days);
     let sub = Subscription::new(sub_id, ref_code, Some(expires_at), req.limit_bytes);
 
-    match SyncOp::add_sub(&memory, sub.clone())
-        .await
-    {
+    match SyncOp::add_sub(&memory, sub.clone()).await {
         Ok(Status::Ok(_)) | Ok(Status::Updated(_)) => Ok(Box::new(warp::reply::json(
             &serde_json::json!({"id": sub_id, "ref_code": sub.refer_code()}),
         ))),
@@ -880,9 +875,7 @@ where
         Err(e) => {
             error!("Failed to create subscription: {:?}", e);
             Ok(Box::new(warp::reply::with_status(
-                warp::reply::json(
-                    &serde_json::json!({"status": 500, "message": "Internal error"}),
-                ),
+                warp::reply::json(&serde_json::json!({"status": 500, "message": "Internal error"})),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )))
         }
@@ -926,9 +919,7 @@ where
         )));
     }
 
-    match SyncOp::add_days(&memory, &subscription_id, req.days)
-        .await
-    {
+    match SyncOp::add_days(&memory, &subscription_id, req.days).await {
         Ok(Status::Updated(_)) => Ok(Box::new(warp::reply::json(
             &serde_json::json!({"id": subscription_id, "days_added": req.days}),
         ))),
@@ -947,9 +938,7 @@ where
         Err(e) => {
             error!("Failed to extend subscription: {:?}", e);
             Ok(Box::new(warp::reply::with_status(
-                warp::reply::json(
-                    &serde_json::json!({"status": 500, "message": "Internal error"}),
-                ),
+                warp::reply::json(&serde_json::json!({"status": 500, "message": "Internal error"})),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )))
         }
@@ -987,7 +976,9 @@ where
         let mem = memory.memory.read().await;
         mem.connections
             .iter()
-            .filter(|(_, conn)| conn.get_subscription_id() == Some(subscription_id) && !conn.get_deleted())
+            .filter(|(_, conn)| {
+                conn.get_subscription_id() == Some(subscription_id) && !conn.get_deleted()
+            })
             .map(|(id, _)| *id)
             .collect()
     };
@@ -998,8 +989,14 @@ where
             mem.connections.get(&conn_id).cloned()
         };
         if let Some(conn) = conn_opt {
-            if let Err(e) = SyncOp::delete_connection(&memory, &conn_id, &conn, Some(DELETE_REASON_MANUAL)).await {
-                error!("Failed to delete connection {} for subscription {}: {:?}", conn_id, subscription_id, e);
+            if let Err(e) =
+                SyncOp::delete_connection(&memory, &conn_id, &conn, Some(DELETE_REASON_MANUAL))
+                    .await
+            {
+                error!(
+                    "Failed to delete connection {} for subscription {}: {:?}",
+                    conn_id, subscription_id, e
+                );
             }
         }
     }
@@ -1019,11 +1016,12 @@ where
     }
 
     if let Err(e) = memory.db.sub().delete(&subscription_id).await {
-        error!("Failed to delete subscription {} from database: {:?}", subscription_id, e);
+        error!(
+            "Failed to delete subscription {} from database: {:?}",
+            subscription_id, e
+        );
         return Ok(Box::new(warp::reply::with_status(
-            warp::reply::json(
-                &serde_json::json!({"status": 500, "message": "Database error"}),
-            ),
+            warp::reply::json(&serde_json::json!({"status": 500, "message": "Database error"})),
             StatusCode::INTERNAL_SERVER_ERROR,
         )));
     }
@@ -1083,7 +1081,9 @@ where
         )));
     }
 
-    match SyncOp::delete_connection(&memory, &connection_id, &conn, Some(DELETE_REASON_MANUAL)).await {
+    match SyncOp::delete_connection(&memory, &connection_id, &conn, Some(DELETE_REASON_MANUAL))
+        .await
+    {
         Ok(Status::Ok(_)) => Ok(Box::new(warp::reply::json(
             &serde_json::json!({"id": connection_id, "deleted": true}),
         ))),
@@ -1102,9 +1102,7 @@ where
         Err(e) => {
             error!("Failed to delete connection {}: {:?}", connection_id, e);
             Ok(Box::new(warp::reply::with_status(
-                warp::reply::json(
-                    &serde_json::json!({"status": 500, "message": "Internal error"}),
-                ),
+                warp::reply::json(&serde_json::json!({"status": 500, "message": "Internal error"})),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )))
         }
@@ -1129,10 +1127,10 @@ mod tests {
     fn count_subscriptions_skips_deleted_and_counts_active() {
         let now = Utc::now();
         let subs = vec![
-            sub(Some(now + Duration::days(1)), false),  // active
-            sub(Some(now - Duration::days(1)), false),  // expired
-            sub(Some(now + Duration::days(1)), true),   // deleted
-            sub(None, false),                           // no expiry => active
+            sub(Some(now + Duration::days(1)), false), // active
+            sub(Some(now - Duration::days(1)), false), // expired
+            sub(Some(now + Duration::days(1)), true),  // deleted
+            sub(None, false),                          // no expiry => active
         ];
 
         let counts = count_subscriptions(subs.iter());

@@ -32,16 +32,18 @@ pub fn decrypt_request(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let key_payload = key_payload
-        .ok_or_else(|| AgwCryptoError("keyPayload missing".to_string()))?;
-    let api_payload = api_payload
-        .ok_or_else(|| AgwCryptoError("apiPayload missing".to_string()))?;
+    let key_payload =
+        key_payload.ok_or_else(|| AgwCryptoError("keyPayload missing".to_string()))?;
+    let api_payload =
+        api_payload.ok_or_else(|| AgwCryptoError("apiPayload missing".to_string()))?;
 
     let encrypted_key = base64::engine::general_purpose::STANDARD
         .decode(key_payload)
         .map_err(|e| AgwCryptoError(format!("keyPayload base64 decode failed: {e}")))?;
 
-    let rsa = private_key.rsa().map_err(|e| AgwCryptoError(e.to_string()))?;
+    let rsa = private_key
+        .rsa()
+        .map_err(|e| AgwCryptoError(e.to_string()))?;
     let rsa_size = rsa.size() as usize;
     let mut decrypted_key_buf = vec![0u8; rsa_size];
     let decrypted_len = rsa
@@ -88,8 +90,13 @@ pub fn decrypt_request(
         .decode(api_payload)
         .map_err(|e| AgwCryptoError(format!("apiPayload base64 decode failed: {e}")))?;
 
-    let decrypted_api = aes_decrypt(Cipher::aes_256_cbc(), &aes_key, Some(&aes_iv), &encrypted_api)
-        .map_err(|e| AgwCryptoError(format!("AES decryption failed: {e}")))?;
+    let decrypted_api = aes_decrypt(
+        Cipher::aes_256_cbc(),
+        &aes_key,
+        Some(&aes_iv),
+        &encrypted_api,
+    )
+    .map_err(|e| AgwCryptoError(format!("AES decryption failed: {e}")))?;
 
     let api_json: serde_json::Value = serde_json::from_slice(&decrypted_api)
         .map_err(|e| AgwCryptoError(format!("apiPayload JSON parse failed: {e}")))?;
@@ -129,8 +136,9 @@ where
 
                 let (decrypted, ctx) = decrypt_request(&key, body).map_err(warp::reject::custom)?;
 
-                let typed: T = serde_json::from_value(decrypted)
-                    .map_err(|e| warp::reject::custom(AgwCryptoError(format!("JSON parse failed: {e}"))))?;
+                let typed: T = serde_json::from_value(decrypted).map_err(|e| {
+                    warp::reject::custom(AgwCryptoError(format!("JSON parse failed: {e}")))
+                })?;
 
                 Ok::<_, Rejection>((typed, ctx))
             }
@@ -147,9 +155,9 @@ pub async fn encrypt_gateway_reply(
     match aes_ctx {
         Some(ctx) => {
             let (parts, body) = response.into_parts();
-            let body_bytes = warp::hyper::body::to_bytes(body)
-                .await
-                .map_err(|e| warp::reject::custom(AgwCryptoError(format!("Failed to read response body: {e}"))))?;
+            let body_bytes = warp::hyper::body::to_bytes(body).await.map_err(|e| {
+                warp::reject::custom(AgwCryptoError(format!("Failed to read response body: {e}")))
+            })?;
 
             let encrypted = encrypt_response(&ctx, &body_bytes)?;
 
@@ -160,7 +168,9 @@ pub async fn encrypt_gateway_reply(
                     warp::http::HeaderValue::from_static("application/octet-stream"),
                 )
                 .body(warp::hyper::Body::from(encrypted))
-                .map_err(|e| warp::reject::custom(AgwCryptoError(format!("Failed to build response: {e}"))))?;
+                .map_err(|e| {
+                    warp::reject::custom(AgwCryptoError(format!("Failed to build response: {e}")))
+                })?;
 
             Ok(response)
         }

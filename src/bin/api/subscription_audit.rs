@@ -25,9 +25,7 @@ pub fn transaction_span(handler: &str, sub_id: Uuid, trace_id: Option<Uuid>) -> 
 /// Computes how many full days remain until the given expiration date.
 fn days_remaining(expires_at: Option<DateTime<Utc>>) -> i64 {
     let now = Utc::now();
-    expires_at
-        .map(|exp| (exp - now).num_days())
-        .unwrap_or(0)
+    expires_at.map(|exp| (exp - now).num_days()).unwrap_or(0)
 }
 
 /// Logs the start of a subscription-days transaction.

@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use fcore::{
-    mesh::MeshRegistry, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    Connections, MetricStorage, NodeStorageOperations, Subscription, SubscriptionOperations,
-    Subscriptions,
+    mesh::MeshRegistry, Connection, ConnectionApiOperations, ConnectionBaseOperations, Connections,
+    MetricStorage, NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions,
 };
 
 use super::{config::ServiceSettings, sync::MemSync};

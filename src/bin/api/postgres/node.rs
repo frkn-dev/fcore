@@ -448,8 +448,7 @@ impl PgNode {
                 .get::<_, Option<serde_json::Value>>("awg_obfuscation")
                 .and_then(|v| serde_json::from_value(v).ok());
 
-            let keepalive: Option<u16> =
-                row.get::<_, Option<i32>>("keepalive").map(|k| k as u16);
+            let keepalive: Option<u16> = row.get::<_, Option<i32>>("keepalive").map(|k| k as u16);
 
             let dns: Option<Vec<Ipv4Addr>> = row.get::<_, Option<Vec<IpAddr>>>("dns").map(|ips| {
                 ips.into_iter()

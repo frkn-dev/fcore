@@ -10,9 +10,7 @@ use fcore::{
 };
 
 use super::super::{
-    http::request::Subscription as SubReq,
-    postgres::connection::ConnRow,
-    subscription_audit,
+    http::request::Subscription as SubReq, postgres::connection::ConnRow, subscription_audit,
 };
 use super::MemSync;
 
@@ -181,7 +179,8 @@ where
 }
 
 #[async_trait::async_trait]
-impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
+impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>
+where
     N: NodeStorageOperations + Send + Sync + Clone + 'static,
     C: ConnectionBaseOperations
         + ConnectionApiOperations
@@ -559,10 +558,7 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
                 let reason = reasons.get(conn_id).and_then(|r| r.as_deref());
                 let restorable = connection_restorable(reason, used_bytes, limit_bytes);
                 if !restorable {
-                    debug!(
-                        "Connection {} not restored (reason: {:?})",
-                        conn_id, reason
-                    );
+                    debug!("Connection {} not restored (reason: {:?})", conn_id, reason);
                 }
                 restorable
             })
@@ -570,23 +566,24 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
 
         // Traffic mode: only metered protocols come back — protocols without
         // per-connection traffic accounting would burn the balance uncounted.
-        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> = match metered_conns {
-            Some(metered) => conns_to_restore
-                .into_iter()
-                .filter(|(conn_id, conn, _)| {
-                    let proto = conn.get_proto().proto();
-                    let allowed = proto.is_metered(metered);
-                    if !allowed {
-                        warn!(
+        let conns_to_restore: Vec<(uuid::Uuid, Connection, Option<uuid::Uuid>)> =
+            match metered_conns {
+                Some(metered) => conns_to_restore
+                    .into_iter()
+                    .filter(|(conn_id, conn, _)| {
+                        let proto = conn.get_proto().proto();
+                        let allowed = proto.is_metered(metered);
+                        if !allowed {
+                            warn!(
                             "Connection {} ({}) not restored: protocol unavailable in traffic mode",
                             conn_id, proto
                         );
-                    }
-                    allowed
-                })
-                .collect(),
-            None => conns_to_restore,
-        };
+                        }
+                        allowed
+                    })
+                    .collect(),
+                None => conns_to_restore,
+            };
 
         if conns_to_restore.is_empty() {
             return Ok(vec![]);
@@ -960,7 +957,6 @@ impl<N, C, S> SyncOp<N, C, S> for MemSync<N, C, S>where
             Err(e) => Err(SyncError::Database(e)),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1013,7 +1009,11 @@ mod tests {
     fn test_connection_restorable_device_kick_and_unknown() {
         // Device-kicked connections never revive; unknown reasons are
         // treated conservatively the same way.
-        assert!(!connection_restorable(Some(DELETE_REASON_DEVICE_KICK), 0, None));
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_DEVICE_KICK),
+            0,
+            None
+        ));
         assert!(!connection_restorable(
             Some(DELETE_REASON_DEVICE_KICK),
             0,

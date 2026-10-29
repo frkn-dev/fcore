@@ -371,9 +371,7 @@ where
 
     let expires_at = match tx.expires_date {
         Some(exp) => exp,
-        None => {
-            return Ok(http::bad_request("Transaction has no expires_date").into_response())
-        }
+        None => return Ok(http::bad_request("Transaction has no expires_date").into_response()),
     };
 
     if expires_at <= Utc::now() {

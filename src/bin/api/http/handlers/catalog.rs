@@ -197,7 +197,10 @@ mod tests {
     #[test]
     fn catalog_version_changes_on_node_status_flip() {
         let mut cache = test_cache();
-        let node = test_node(Env::Ru, [(Tag::Wireguard, wg_inbound())].into_iter().collect());
+        let node = test_node(
+            Env::Ru,
+            [(Tag::Wireguard, wg_inbound())].into_iter().collect(),
+        );
         let node_id = node.uuid;
         cache.nodes.entry(Env::Ru).or_default().push(node);
 
@@ -233,8 +236,14 @@ mod tests {
     fn catalog_version_changes_on_pool_membership() {
         let mut cache = test_cache();
 
-        let mut a = test_node(Env::Ru, [(Tag::Wireguard, wg_inbound())].into_iter().collect());
-        let mut b = test_node(Env::Ru, [(Tag::Wireguard, wg_inbound())].into_iter().collect());
+        let mut a = test_node(
+            Env::Ru,
+            [(Tag::Wireguard, wg_inbound())].into_iter().collect(),
+        );
+        let mut b = test_node(
+            Env::Ru,
+            [(Tag::Wireguard, wg_inbound())].into_iter().collect(),
+        );
         a.address = "192.168.1.100".parse().unwrap();
         b.address = "192.168.1.101".parse().unwrap();
         a.pool = Some("RU Рилзопровод".to_string());
@@ -249,7 +258,10 @@ mod tests {
         // row and has nothing to fail over to, so the version must move.
         cache.nodes.get_mut(&Env::Ru).unwrap()[1].pool = None;
         let (single, _) = catalog_version(&cache);
-        assert_ne!(pooled, single, "pool membership must move the catalog version");
+        assert_ne!(
+            pooled, single,
+            "pool membership must move the catalog version"
+        );
 
         cache.nodes.get_mut(&Env::Ru).unwrap()[1].pool = Some("RU Рилзопровод".to_string());
         let (pooled_again, _) = catalog_version(&cache);

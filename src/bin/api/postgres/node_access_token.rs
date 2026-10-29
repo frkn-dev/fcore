@@ -41,10 +41,7 @@ impl PgNodeAccessToken {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
         let rows = client
-            .query(
-                "SELECT token, node_uuid FROM node_access_tokens",
-                &[],
-            )
+            .query("SELECT token, node_uuid FROM node_access_tokens", &[])
             .await?;
         Ok(rows
             .into_iter()

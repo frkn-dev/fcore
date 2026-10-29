@@ -20,8 +20,8 @@ use chrono::{DateTime, Utc};
 use warp::Reply;
 
 use fcore::{
-    Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, NodeStatus, NodeStorageOperations, NodeType, SubscriptionOperations,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, ConnectionStorageApiOperations,
+    NodeStatus, NodeStorageOperations, NodeType, SubscriptionOperations,
 };
 
 use crate::http::handlers::admin::{check_token, not_found, unauthorized};
@@ -63,8 +63,8 @@ where
         // слотов живут personal-энвами (каждый клиент получил свой), а
         // node_type при регистрации приходит «common» — fnode его не шлёт,
         // поэтому единственный надёжный признак для них — имя хоста prem*.
-        let on_premium_host = node.hostname.starts_with("prem")
-            || matches!(node.r#type, NodeType::PremiumNode);
+        let on_premium_host =
+            node.hostname.starts_with("prem") || matches!(node.r#type, NodeType::PremiumNode);
         if !node.env.is_premium() && !on_premium_host {
             continue;
         }
@@ -157,7 +157,10 @@ where
         .iter()
         .filter(|s| s["subscription_id"].is_string())
         .count();
-    let free = slots.iter().filter(|s| s["subscription_id"].is_null()).count();
+    let free = slots
+        .iter()
+        .filter(|s| s["subscription_id"].is_null())
+        .count();
 
     Ok(Box::new(warp::reply::json(&serde_json::json!({
         "status": 200,

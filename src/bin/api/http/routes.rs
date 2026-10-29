@@ -11,12 +11,13 @@ use fcore::{
 };
 
 use super::{
-    crypto::{self, AesContext},
     super::{iap::AppleIapClient, service::Service, sync::MemSync},
+    crypto::{self, AesContext},
     filters::*,
     handlers::{
-        admin::*, amnezia::*, catalog::*, cluster::*, connection::*, healthcheck_handler, iap::*, key::*,
-        mesh::*, metrics::*, node::*, premium::*, premium_inventory::*, private::*, score::*, share::*, subscription::*,
+        admin::*, amnezia::*, catalog::*, cluster::*, connection::*, healthcheck_handler, iap::*,
+        key::*, mesh::*, metrics::*, node::*, premium::*, premium_inventory::*, private::*,
+        score::*, share::*, subscription::*,
     },
     param::*,
     rejection,
@@ -56,7 +57,12 @@ where
     Vec<(Uuid, fcore::Connection)>: FromIterator<(Uuid, C)>,
 {
     async fn run_http(&self) -> Result<()> {
-        let admin_token = self.settings.service.admin_token.clone().unwrap_or_default();
+        let admin_token = self
+            .settings
+            .service
+            .admin_token
+            .clone()
+            .unwrap_or_default();
         let mgmt_auth = with_service_or_admin_auth(
             Arc::new(self.settings.service.token.clone()),
             admin_token.clone(),
@@ -428,7 +434,9 @@ where
             .and_then(admin_api_subscriptions_count_handler);
 
         let admin_api_subscription_connections_route = warp::get()
-            .and(warp::path!("admin" / "api" / "subscriptions" / Uuid / "connections"))
+            .and(warp::path!(
+                "admin" / "api" / "subscriptions" / Uuid / "connections"
+            ))
             .and(warp::path::end())
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(admin_enabled))
@@ -450,7 +458,9 @@ where
         let admin_api_node_metrics_route = warp::get()
             .and(warp::path!("admin" / "api" / "nodes" / Uuid / "metrics"))
             .and(warp::path::end())
-            .and(warp::query::<crate::http::handlers::admin::AdminNodeMetricsQuery>())
+            .and(warp::query::<
+                crate::http::handlers::admin::AdminNodeMetricsQuery,
+            >())
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
             .and(warp::header::optional::<String>("authorization"))
@@ -458,7 +468,9 @@ where
             .and_then(admin_api_node_metrics_handler);
 
         let admin_api_assign_premium_route = warp::post()
-            .and(warp::path!("admin" / "api" / "subscriptions" / Uuid / "premium"))
+            .and(warp::path!(
+                "admin" / "api" / "subscriptions" / Uuid / "premium"
+            ))
             .and(warp::path::end())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
@@ -478,7 +490,9 @@ where
             .and_then(admin_api_create_subscription_handler);
 
         let admin_api_extend_subscription_route = warp::post()
-            .and(warp::path!("admin" / "api" / "subscriptions" / Uuid / "extend"))
+            .and(warp::path!(
+                "admin" / "api" / "subscriptions" / Uuid / "extend"
+            ))
             .and(warp::path::end())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
@@ -618,7 +632,9 @@ where
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
-            .and(with_param_ipaddrmask(params.amnezia_wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
             .and(warp::any().map({
                 let net = params.amnezia_wireguard_mobile_network.clone();
                 move || net.clone()
@@ -838,7 +854,9 @@ where
             .and(warp::header::optional::<String>("x-trace-id"))
             .and(with_sync(self.sync.clone()))
             .and(with_param_ipaddrmask(params.wireguard_network.clone()))
-            .and(with_param_ipaddrmask(params.amnezia_wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
             .and(warp::any().map({
                 let net = params.amnezia_wireguard_mobile_network.clone();
                 move || net.clone()
@@ -864,7 +882,9 @@ where
             .and(warp::path("v1"))
             .and(warp::path("services"))
             .and(warp::path::end())
-            .and(crypto::with_agw_decryption::<GatewayServicesRequest>(agw_key.clone()))
+            .and(crypto::with_agw_decryption::<GatewayServicesRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(with_labels.clone())
             .and(with_param_bool(params.traffic_mode_enabled))
@@ -879,9 +899,14 @@ where
                  labels: GatewayLabels,
                  traffic_mode_enabled: bool,
                  metered_conns: Vec<String>| async move {
-                    let response =
-                        gateway_services_handler(req, sync, labels, traffic_mode_enabled, metered_conns)
-                            .await?;
+                    let response = gateway_services_handler(
+                        req,
+                        sync,
+                        labels,
+                        traffic_mode_enabled,
+                        metered_conns,
+                    )
+                    .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
@@ -890,7 +915,9 @@ where
             .and(warp::path("v1"))
             .and(warp::path("account_info"))
             .and(warp::path::end())
-            .and(crypto::with_agw_decryption::<GatewayAccountInfoRequest>(agw_key.clone()))
+            .and(crypto::with_agw_decryption::<GatewayAccountInfoRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(params.traffic_mode_enabled))
             .and_then(
@@ -955,16 +982,15 @@ where
                  x_forwarded_for: Option<String>,
                  rate_limiter: Arc<RateLimiter>,
                  sub_limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
-                    let response =
-                        crate::http::handlers::report::gateway_block_report_handler(
-                            req,
-                            sync,
-                            remote,
-                            x_forwarded_for,
-                            rate_limiter,
-                            sub_limiter,
-                        )
-                        .await?;
+                    let response = crate::http::handlers::report::gateway_block_report_handler(
+                        req,
+                        sync,
+                        remote,
+                        x_forwarded_for,
+                        rate_limiter,
+                        sub_limiter,
+                    )
+                    .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
@@ -993,16 +1019,15 @@ where
                  x_forwarded_for: Option<String>,
                  rate_limiter: Arc<RateLimiter>,
                  sub_limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
-                    let response =
-                        crate::http::handlers::report::gateway_scan_report_handler(
-                            req,
-                            sync,
-                            remote,
-                            x_forwarded_for,
-                            rate_limiter,
-                            sub_limiter,
-                        )
-                        .await?;
+                    let response = crate::http::handlers::report::gateway_scan_report_handler(
+                        req,
+                        sync,
+                        remote,
+                        x_forwarded_for,
+                        rate_limiter,
+                        sub_limiter,
+                    )
+                    .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
@@ -1077,7 +1102,9 @@ where
             .and(warp::path("report"))
             .and(warp::path("block"))
             .and(warp::path::end())
-            .and(warp::query::<crate::http::handlers::report::BlockReportAggregateQuery>())
+            .and(warp::query::<
+                crate::http::handlers::report::BlockReportAggregateQuery,
+            >())
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
@@ -1107,7 +1134,9 @@ where
             .and(warp::path("v1"))
             .and(warp::path("config"))
             .and(warp::path::end())
-            .and(crypto::with_agw_decryption::<GatewayConfigRequest>(agw_key.clone()))
+            .and(crypto::with_agw_decryption::<GatewayConfigRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(params.traffic_mode_enabled))
             .and(warp::any().map({
@@ -1135,7 +1164,7 @@ where
                         x_forwarded_for,
                         rate_limiter,
                     )
-                            .await?;
+                    .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
@@ -1144,7 +1173,9 @@ where
             .and(warp::path("v1"))
             .and(warp::path("share"))
             .and(warp::path::end())
-            .and(crypto::with_agw_decryption::<ShareMintRequest>(agw_key.clone()))
+            .and(crypto::with_agw_decryption::<ShareMintRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
@@ -1189,7 +1220,9 @@ where
             .and(warp::path("v1"))
             .and(warp::path("shares"))
             .and(warp::path::end())
-            .and(crypto::with_agw_decryption::<ShareListRequest>(agw_key.clone()))
+            .and(crypto::with_agw_decryption::<ShareListRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
@@ -1201,9 +1234,14 @@ where
                  remote: Option<std::net::SocketAddr>,
                  x_forwarded_for: Option<String>,
                  rate_limiter: Arc<RateLimiter>| async move {
-                    let response =
-                        gateway_shares_list_handler(req, sync, remote, x_forwarded_for, rate_limiter)
-                            .await?;
+                    let response = gateway_shares_list_handler(
+                        req,
+                        sync,
+                        remote,
+                        x_forwarded_for,
+                        rate_limiter,
+                    )
+                    .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
                 },
             );
@@ -1213,7 +1251,9 @@ where
             .and(warp::path("share"))
             .and(warp::path("revoke"))
             .and(warp::path::end())
-            .and(crypto::with_agw_decryption::<ShareRevokeRequest>(agw_key.clone()))
+            .and(crypto::with_agw_decryption::<ShareRevokeRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
@@ -1325,8 +1365,10 @@ where
 
         // App Store IAP: the client is optional — without [service.apple] the
         // route stays mounted and answers 503.
-        let apple_iap = params.apple.as_ref().and_then(|cfg| {
-            match AppleIapClient::new(cfg) {
+        let apple_iap = params
+            .apple
+            .as_ref()
+            .and_then(|cfg| match AppleIapClient::new(cfg) {
                 Ok(client) => {
                     tracing::info!(
                         "Apple IAP client initialized ({} environment)",
@@ -1340,8 +1382,7 @@ where
                     );
                     None
                 }
-            }
-        });
+            });
 
         let iap_wg_network = params.wireguard_network.clone();
         let iap_awg_network = params.amnezia_wireguard_network.clone();

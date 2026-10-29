@@ -130,7 +130,12 @@ impl PgAlerts {
 
         Ok(rows
             .iter()
-            .map(|r| (r.get::<_, uuid::Uuid>("node_id"), r.get::<_, i64>("last_ms")))
+            .map(|r| {
+                (
+                    r.get::<_, uuid::Uuid>("node_id"),
+                    r.get::<_, i64>("last_ms"),
+                )
+            })
             .collect())
     }
 
@@ -154,7 +159,10 @@ impl PgAlerts {
             )
             .await?;
 
-        Ok(rows.iter().map(|r| r.get::<_, uuid::Uuid>("node_id")).collect())
+        Ok(rows
+            .iter()
+            .map(|r| r.get::<_, uuid::Uuid>("node_id"))
+            .collect())
     }
 
     /// Последние срабатывания — для отладки и будущей админки.

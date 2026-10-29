@@ -245,7 +245,17 @@ where
 
     let messages = vec![msg];
 
-    match SyncOp::add_conn(memory, &conn_id, conn.clone(), label, node_id, issued_via, include_in_main).await {
+    match SyncOp::add_conn(
+        memory,
+        &conn_id,
+        conn.clone(),
+        label,
+        node_id,
+        issued_via,
+        include_in_main,
+    )
+    .await
+    {
         Ok(Status::Ok(id)) => {
             let bytes = match rkyv::to_bytes::<_, 1024>(&messages) {
                 Ok(b) => b,
@@ -700,9 +710,7 @@ where
             mem.conn_nodes
                 .get(&conn_id)
                 .and_then(|node_id| mem.nodes.get_by_id(node_id))
-                .filter(|node| {
-                    node.env.is_personal() && !mem.main_feed_nodes.contains(&node.uuid)
-                })
+                .filter(|node| node.env.is_personal() && !mem.main_feed_nodes.contains(&node.uuid))
                 .map(|node| node.uuid)
         } else {
             None
@@ -711,7 +719,10 @@ where
 
     if let Some(node_id) = personal_node_to_add {
         if let Err(e) = memory.db.private_feed().insert(node_id).await {
-            error!("Failed to include personal node {} in main feed: {}", node_id, e);
+            error!(
+                "Failed to include personal node {} in main feed: {}",
+                node_id, e
+            );
             return Ok(Box::new(http::internal_error("db error")));
         }
     }
@@ -1289,8 +1300,7 @@ mod tests {
     fn test_main_feed_connection_visible() {
         let excluded_id = uuid::Uuid::new_v4();
         let included_id = uuid::Uuid::new_v4();
-        let excluded: std::collections::HashSet<uuid::Uuid> =
-            [excluded_id].into_iter().collect();
+        let excluded: std::collections::HashSet<uuid::Uuid> = [excluded_id].into_iter().collect();
 
         assert!(!main_feed_connection_visible(&excluded, &excluded_id, true));
         assert!(main_feed_connection_visible(&excluded, &excluded_id, false));

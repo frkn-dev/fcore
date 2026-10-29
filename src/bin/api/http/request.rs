@@ -244,8 +244,7 @@ impl NodeRequest {
 }
 
 pub(crate) fn normalized_pool(pool: Option<String>) -> Option<String> {
-    pool.map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    pool.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 pub(crate) fn pool_inbounds_conflict(peers: &[Node], incoming: &Node) -> bool {
@@ -445,7 +444,6 @@ impl ConnectionInfoRequest {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,7 +592,9 @@ mod tests {
         });
         if !extra.is_empty() {
             let extra: serde_json::Value = serde_json::from_str(extra).unwrap();
-            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
         }
         v
     }

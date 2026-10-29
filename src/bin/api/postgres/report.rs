@@ -229,7 +229,13 @@ impl PgReport {
                   AND ($4::uuid IS NULL OR subscription_id = $4)
                   AND created_at > now() - ($5 || ' seconds')::interval
                 "#,
-                &[&address, &host, &port, &subscription_id, &window_secs.to_string()],
+                &[
+                    &address,
+                    &host,
+                    &port,
+                    &subscription_id,
+                    &window_secs.to_string(),
+                ],
             )
             .await?;
 
@@ -331,10 +337,7 @@ impl PgReport {
         let ok: Vec<String> = OK_STATES.iter().map(|s| s.to_string()).collect();
 
         let rows = client
-            .query(
-                &sql,
-                &[&from, &to, &address, &min_observations, &fail, &ok],
-            )
+            .query(&sql, &[&from, &to, &address, &min_observations, &fail, &ok])
             .await?;
 
         Ok(rows

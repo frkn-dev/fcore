@@ -34,11 +34,7 @@ where
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + 'static,
 {
-    pub fn new(
-        memory: Arc<RwLock<Cache<N, C, S>>>,
-        db: PgContext,
-        publisher: Publisher,
-    ) -> Self {
+    pub fn new(memory: Arc<RwLock<Cache<N, C, S>>>, db: PgContext, publisher: Publisher) -> Self {
         Self {
             memory,
             db,

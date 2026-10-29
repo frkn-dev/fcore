@@ -1,3 +1,4 @@
+pub(crate) mod alerts;
 pub(crate) mod connection;
 pub(crate) mod iap;
 pub(crate) mod install_token;
@@ -6,7 +7,6 @@ pub(crate) mod node;
 pub(crate) mod node_access_token;
 pub(crate) mod pg;
 pub(crate) mod private_feed;
-pub(crate) mod alerts;
 pub(crate) mod report;
 pub(crate) mod share;
 pub(crate) mod subscription;

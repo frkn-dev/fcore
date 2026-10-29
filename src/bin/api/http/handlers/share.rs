@@ -19,19 +19,20 @@ use warp::Reply;
 
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, InboundConnLink, IpAddrMask, MetricStorage, Node, NodeStatus, NodeStorageOperations,
-    Subscription, SubscriptionOperations, SubscriptionStorageOperations,
+    ConnectionStorageApiOperations, InboundConnLink, IpAddrMask, MetricStorage, Node, NodeStatus,
+    NodeStorageOperations, Subscription, SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use super::super::super::{
     postgres::share::{ShareTokenRow, ISSUED_VIA_SHARE, ISSUED_VIA_SHARED_SUB},
-    sync::{tasks::{SyncOp, DELETE_REASON_MANUAL}, MemSync},
+    sync::{
+        tasks::{SyncOp, DELETE_REASON_MANUAL},
+        MemSync,
+    },
 };
 
 pub(crate) use super::super::super::postgres::share::{SHARE_KIND_CONN, SHARE_KIND_SUB};
-use super::super::request::{
-    EnvFilter, ShareFeedQuery, SubscriptionInfoRequest, TagReq,
-};
+use super::super::request::{EnvFilter, ShareFeedQuery, SubscriptionInfoRequest, TagReq};
 use super::amnezia::{
     build_gateway_config_response, extract_subscription_id, GatewayConfigParams,
     GatewayConfigRequest,
@@ -86,11 +87,11 @@ pub(crate) fn normalize_share_token(raw: &str) -> Option<String> {
         .map(|c| c.to_ascii_lowercase())
         .collect();
 
-    let legacy = normalized.len() == TOKEN_LEN
-        && normalized.chars().all(|c| TOKEN_ALPHABET.contains(c));
+    let legacy =
+        normalized.len() == TOKEN_LEN && normalized.chars().all(|c| TOKEN_ALPHABET.contains(c));
     // Shared-subscription tokens are UUIDs written without dashes.
-    let uuid_like = normalized.len() == UUID_TOKEN_LEN
-        && normalized.chars().all(|c| c.is_ascii_hexdigit());
+    let uuid_like =
+        normalized.len() == UUID_TOKEN_LEN && normalized.chars().all(|c| c.is_ascii_hexdigit());
     if legacy || uuid_like {
         Some(normalized)
     } else {
@@ -352,7 +353,9 @@ async fn delete_child_connection<N, C, S>(
     Connection: From<C>,
 {
     let conn: C = child.into();
-    if let Err(e) = SyncOp::delete_connection(memory, child_id, &conn, Some(DELETE_REASON_MANUAL)).await {
+    if let Err(e) =
+        SyncOp::delete_connection(memory, child_id, &conn, Some(DELETE_REASON_MANUAL)).await
+    {
         error!(
             "share mint rollback: failed to delete child connection {}: {}",
             child_id, e
@@ -652,7 +655,10 @@ where
         }
     }
 
-    error!("share mint: token allocation retries exhausted for sub {}", sub_id);
+    error!(
+        "share mint: token allocation retries exhausted for sub {}",
+        sub_id
+    );
     delete_child_connection(memory, &child_id, child).await;
     Err(http::internal_error("failed to allocate share token").into_response())
 }
@@ -902,15 +908,13 @@ where
         }
         None => {
             let mem = memory.memory.read().await;
-            mem.connections
-                .get(&row.connection_id)
-                .and_then(|conn| {
-                    let env = conn.get_env();
-                    let proto = conn.get_proto().proto();
-                    mem.nodes
-                        .get_by_env(&env)
-                        .and_then(|nodes| env_serving_node(&nodes, proto))
-                })
+            mem.connections.get(&row.connection_id).and_then(|conn| {
+                let env = conn.get_env();
+                let proto = conn.get_proto().proto();
+                mem.nodes
+                    .get_by_env(&env)
+                    .and_then(|nodes| env_serving_node(&nodes, proto))
+            })
         }
     };
     let Some(node_id) = node_id else {
@@ -1005,10 +1009,7 @@ pub(crate) fn env_serving_node(nodes: &[Node], proto: fcore::Tag) -> Option<uuid
 
 /// Flattens nodes into the (uuid, is_online, has_inbound) triples the
 /// selection rules are written against.
-pub(crate) fn node_candidates(
-    nodes: &[Node],
-    proto: fcore::Tag,
-) -> Vec<(uuid::Uuid, bool, bool)> {
+pub(crate) fn node_candidates(nodes: &[Node], proto: fcore::Tag) -> Vec<(uuid::Uuid, bool, bool)> {
     nodes
         .iter()
         .map(|n| {
@@ -1251,7 +1252,10 @@ where
         }
         Ok(None) => {}
         Err(e) => {
-            error!("share sub mint: lookup failed for sub {}: {}", req.subscription_id, e);
+            error!(
+                "share sub mint: lookup failed for sub {}: {}",
+                req.subscription_id, e
+            );
             return Ok(http::internal_error("share lookup failed").into_response());
         }
     }
@@ -1285,7 +1289,8 @@ where
 /// POST /share/revoke — revoke via mgmt auth. Revokes only when the token's
 /// subscription matches the request's; unknown/revoked/mismatched tokens all
 /// get the uniform 404 share_not_found.
-pub async fn mgmt_share_revoke_handler<N, C, S>(    req: MgmtShareRevokeRequest,
+pub async fn mgmt_share_revoke_handler<N, C, S>(
+    req: MgmtShareRevokeRequest,
     memory: MemSync<N, C, S>,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
@@ -1378,12 +1383,18 @@ where
     let row = match memory.db.share().get(&token).await {
         Ok(Some(row)) if row.revoked_at.is_none() => row,
         Ok(_) => {
-            warn!("share feed: unknown/revoked token {} from {}", mask_token(&token), ip);
+            warn!(
+                "share feed: unknown/revoked token {} from {}",
+                mask_token(&token),
+                ip
+            );
             return Ok(Box::new(share_not_found()));
         }
         Err(e) => {
             error!("share feed: token lookup failed: {}", e);
-            return Ok(Box::new(http::internal_error("share lookup failed").into_response()));
+            return Ok(Box::new(
+                http::internal_error("share lookup failed").into_response(),
+            ));
         }
     };
 
@@ -1415,21 +1426,28 @@ where
             };
             let conn: Connection = child.into();
             match node_id.and_then(|id| mem.nodes.get_by_id(&id)) {
-                Some(node) if node.status == NodeStatus::Online => match node.inbounds.get(&proto)
-                {
-                    Some(inbound) => {
-                        let host = node.connection_host();
-                        let label = conn_link_label(
-                            &mem.conn_labels,
-                            &row.connection_id,
-                            node.cluster.clone().unwrap_or(node.label.clone()),
-                        );
-                        inbound
-                            .create_link(&row.connection_id, &conn, &node.hostname, &host, &label)
-                            .ok()
+                Some(node) if node.status == NodeStatus::Online => {
+                    match node.inbounds.get(&proto) {
+                        Some(inbound) => {
+                            let host = node.connection_host();
+                            let label = conn_link_label(
+                                &mem.conn_labels,
+                                &row.connection_id,
+                                node.cluster.clone().unwrap_or(node.label.clone()),
+                            );
+                            inbound
+                                .create_link(
+                                    &row.connection_id,
+                                    &conn,
+                                    &node.hostname,
+                                    &host,
+                                    &label,
+                                )
+                                .ok()
+                        }
+                        None => None,
                     }
-                    None => None,
-                },
+                }
                 _ => None,
             }
         };
@@ -1459,7 +1477,11 @@ where
         conn_id: row.connection_id,
         node_id: row.node_id,
         title: row.label.clone(),
-        feed_url: format!("{}/sub/{}", base_url.trim_end_matches('/'), grouped_token(&token)),
+        feed_url: format!(
+            "{}/sub/{}",
+            base_url.trim_end_matches('/'),
+            grouped_token(&token)
+        ),
     };
 
     let req = SubscriptionInfoRequest {
@@ -1499,7 +1521,8 @@ where
 }
 
 #[cfg(test)]
-mod tests {    use super::*;
+mod tests {
+    use super::*;
 
     #[test]
     fn test_generate_share_token_charset_and_length() {
@@ -1525,9 +1548,18 @@ mod tests {    use super::*;
         let dashed = id.to_string();
 
         // Both the compact and the dashed form resolve to the stored token.
-        assert_eq!(normalize_share_token(&compact).as_deref(), Some(compact.as_str()));
-        assert_eq!(normalize_share_token(&dashed).as_deref(), Some(compact.as_str()));
-        assert_eq!(normalize_share_feed_token(&dashed).as_deref(), Some(compact.as_str()));
+        assert_eq!(
+            normalize_share_token(&compact).as_deref(),
+            Some(compact.as_str())
+        );
+        assert_eq!(
+            normalize_share_token(&dashed).as_deref(),
+            Some(compact.as_str())
+        );
+        assert_eq!(
+            normalize_share_feed_token(&dashed).as_deref(),
+            Some(compact.as_str())
+        );
 
         // The link shows the canonical dashed form.
         assert_eq!(display_token(&compact), dashed);
@@ -1547,7 +1579,10 @@ mod tests {    use super::*;
             Some(fcore::Tag::AmneziaWgMobile)
         );
         assert_eq!(shared_sub_tag(" hysteria2 "), Some(fcore::Tag::Hysteria2));
-        assert_eq!(shared_sub_tag("VlessTcpReality"), Some(fcore::Tag::VlessTcpReality));
+        assert_eq!(
+            shared_sub_tag("VlessTcpReality"),
+            Some(fcore::Tag::VlessTcpReality)
+        );
         assert_eq!(shared_sub_tag("nonsense"), None);
     }
 
@@ -1599,9 +1634,18 @@ mod tests {    use super::*;
     fn test_normalize_share_feed_token_crockford_mapping() {
         let bare = "k7f29mxq4tvzabcd";
         // Display forms and case are tolerated, same as the app routes.
-        assert_eq!(normalize_share_feed_token("k7f2-9mxq-4tvz-abcd").as_deref(), Some(bare));
-        assert_eq!(normalize_share_feed_token("K7F29MXQ4TVZABCD").as_deref(), Some(bare));
-        assert_eq!(normalize_share_feed_token("k7f2 9mxq 4tvz abcd").as_deref(), Some(bare));
+        assert_eq!(
+            normalize_share_feed_token("k7f2-9mxq-4tvz-abcd").as_deref(),
+            Some(bare)
+        );
+        assert_eq!(
+            normalize_share_feed_token("K7F29MXQ4TVZABCD").as_deref(),
+            Some(bare)
+        );
+        assert_eq!(
+            normalize_share_feed_token("k7f2 9mxq 4tvz abcd").as_deref(),
+            Some(bare)
+        );
         // Ambiguous chars map the Crockford way (mrkting short codes rule):
         // o→0, i/l→1.
         assert_eq!(
@@ -1696,8 +1740,8 @@ mod tests {    use super::*;
 
         // First online node with a matching inbound wins.
         let candidates = vec![
-            (a, false, true),  // offline
-            (b, true, false),  // no matching inbound
+            (a, false, true), // offline
+            (b, true, false), // no matching inbound
             (c, true, true),
         ];
         assert_eq!(pick_share_node(&candidates), Some(c));

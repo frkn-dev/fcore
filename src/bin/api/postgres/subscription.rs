@@ -4,10 +4,7 @@ use tokio::sync::Mutex;
 
 use fcore::{Env, Result, Subscription};
 
-use super::{
-    super::subscription_audit,
-    pg::PgClientManager,
-};
+use super::{super::subscription_audit, pg::PgClientManager};
 
 pub struct PgSubscription {
     pub manager: Arc<Mutex<PgClientManager>>,

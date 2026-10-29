@@ -1,5 +1,5 @@
-use tracing::{error, Instrument};
 use std::str::FromStr;
+use tracing::{error, Instrument};
 
 use fcore::{
     http::{helpers as http, response::Instance},
@@ -282,7 +282,10 @@ where
                     return Ok(http::not_found("Subscription not found"));
                 }
                 Ok(Status::BadRequest(_, msg)) => {
-                    return Ok(http::bad_request(&format!("Failed to create subscription: {}", msg)));
+                    return Ok(http::bad_request(&format!(
+                        "Failed to create subscription: {}",
+                        msg
+                    )));
                 }
                 Err(err) => {
                     return Ok(http::bad_request(&format!(
@@ -303,37 +306,27 @@ where
         KeyKind::Lite => match req.subscription_id {
             None => Ok(Status::Updated(sub_id)),
             Some(_) => {
-                SyncOp::add_limit_bytes(
-                    &memory,
-                    &sub_id,
-                    key.traffic_bytes.unwrap_or(0),
-                    &key.id,
-                )
+                SyncOp::add_limit_bytes(&memory, &sub_id, key.traffic_bytes.unwrap_or(0), &key.id)
+                    .instrument(subscription_audit::transaction_span(
+                        "key_activate_lite_topup",
+                        sub_id,
+                        Some(trace_id),
+                    ))
+                    .await
+            }
+        },
+        KeyKind::Standard => {
+            SyncOp::add_days(&memory, &sub_id, key.days as i64)
                 .instrument(subscription_audit::transaction_span(
-                    "key_activate_lite_topup",
+                    "key_activate_handler",
                     sub_id,
                     Some(trace_id),
                 ))
                 .await
-            }
-        },
-        KeyKind::Standard => {
-            SyncOp::add_days(
-                &memory,
-                &sub_id,
-                key.days as i64,
-            )
-            .instrument(subscription_audit::transaction_span(
-                "key_activate_handler",
-                sub_id,
-                Some(trace_id),
-            ))
-            .await
         }
     };
 
-    match add_days_status
-    {
+    match add_days_status {
         Ok(Status::Updated(_)) => {
             key.activate(&sub_id);
             if let Err(err) = key_db.activate(&key).await {
@@ -376,7 +369,10 @@ where
 
             if let Some(mrkting) = &mrkting {
                 let client = reqwest::Client::new();
-                let url = format!("{}/keys/activations", mrkting.endpoint.trim_end_matches('/'));
+                let url = format!(
+                    "{}/keys/activations",
+                    mrkting.endpoint.trim_end_matches('/')
+                );
                 let body = serde_json::json!({
                     "subscription_id": sub_id,
                     "key_code": req.code,
@@ -403,10 +399,7 @@ where
                                 text
                             );
                         } else {
-                            tracing::info!(
-                                "mrkting key activation recorded for sub {}",
-                                sub_id
-                            );
+                            tracing::info!("mrkting key activation recorded for sub {}", sub_id);
                         }
                     }
                     Err(err) => {
@@ -456,10 +449,7 @@ where
                                         text
                                     );
                                 } else {
-                                    tracing::info!(
-                                        "mrkting account bound for lite sub {}",
-                                        sub_id
-                                    );
+                                    tracing::info!("mrkting account bound for lite sub {}", sub_id);
                                 }
                             }
                             Err(err) => {

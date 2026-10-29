@@ -48,6 +48,15 @@ pub struct AlertsConfig {
     /// Сколько переходов offline↔online в окне считаем «нода мигает».
     #[serde(default = "default_flap_threshold")]
     pub flap_threshold: u64,
+    /// Порог CPU, выше которого копим время.
+    #[serde(default = "default_cpu_threshold")]
+    pub cpu_threshold_pct: f64,
+    /// Сколько секунд держится высокая нагрузка, чтобы алертить.
+    #[serde(default = "default_cpu_hold")]
+    pub cpu_hold_sec: u64,
+    /// Ниже этого значения считаем, что нагрузка спала (гистерезис).
+    #[serde(default = "default_cpu_reset")]
+    pub cpu_reset_pct: f64,
     /// База Telegram Bot API (можно подменить на прокси).
     #[serde(default = "default_api_base")]
     pub telegram_api_base: String,
@@ -64,6 +73,15 @@ fn default_new_node_grace() -> u64 {
 }
 fn default_throttle() -> u64 {
     1800
+}
+fn default_cpu_threshold() -> f64 {
+    85.0
+}
+fn default_cpu_hold() -> u64 {
+    600
+}
+fn default_cpu_reset() -> f64 {
+    70.0
 }
 fn default_flap_gap() -> u64 {
     120
@@ -88,6 +106,9 @@ impl Default for AlertsConfig {
             recovery_grace_sec: default_recovery_grace(),
             new_node_grace_sec: default_new_node_grace(),
             throttle_sec: default_throttle(),
+            cpu_threshold_pct: default_cpu_threshold(),
+            cpu_hold_sec: default_cpu_hold(),
+            cpu_reset_pct: default_cpu_reset(),
             flap_gap_sec: default_flap_gap(),
             flap_window_sec: default_flap_window(),
             flap_threshold: default_flap_threshold(),
@@ -109,6 +130,8 @@ pub enum AlertKind {
     NodeRecovered,
     /// Нода мигает: много переходов за окно (короткие обрывы, не ловимые порогом).
     NodeFlapping,
+    /// CPU держится выше порога дольше заданного времени.
+    NodeCpuHigh,
 }
 
 impl AlertKind {
@@ -117,6 +140,7 @@ impl AlertKind {
             Self::NodeOffline => "node_offline",
             Self::NodeRecovered => "node_recovered",
             Self::NodeFlapping => "node_flapping",
+            Self::NodeCpuHigh => "node_cpu_high",
         }
     }
 }
@@ -187,6 +211,14 @@ impl NodeTrack {
 pub struct AlertsEngine {
     cfg: AlertsConfig,
     nodes: HashMap<Uuid, NodeTrack>,
+    /// Состояние правила CPU: когда нагрузка поднялась и отправлен ли алерт.
+    cpu: HashMap<Uuid, CpuTrack>,
+}
+
+#[derive(Debug, Clone)]
+struct CpuTrack {
+    high_since: std::time::Instant,
+    alerted: bool,
 }
 
 impl AlertsEngine {
@@ -194,6 +226,7 @@ impl AlertsEngine {
         Self {
             cfg,
             nodes: HashMap::new(),
+            cpu: HashMap::new(),
         }
     }
 
@@ -278,9 +311,7 @@ impl AlertsEngine {
                 return Decision::Idle;
             }
             track.alerted = true;
-            track
-                .last_sent
-                .insert(AlertKind::NodeOffline.as_str(), now);
+            track.last_sent.insert(AlertKind::NodeOffline.as_str(), now);
             return Decision::Fire {
                 kind: AlertKind::NodeOffline,
                 node_id,
@@ -311,6 +342,62 @@ impl AlertsEngine {
             env: env.to_string(),
             duration_sec: stable_for as i64,
         }
+    }
+
+    /// Правило CPU: держится выше порога дольше `cpu_hold_sec`.
+    ///
+    /// Состояние копим сами (хранилище метрик отдаёт только последнее значение),
+    /// поэтому после рестарта api отсчёт начинается заново — это осознанно.
+    pub fn observe_cpu(
+        &mut self,
+        node_id: Uuid,
+        hostname: &str,
+        env: &str,
+        cpu_pct: Option<f64>,
+    ) -> Decision {
+        self.observe_cpu_at(node_id, hostname, env, cpu_pct, Instant::now())
+    }
+
+    fn observe_cpu_at(
+        &mut self,
+        node_id: Uuid,
+        hostname: &str,
+        env: &str,
+        cpu_pct: Option<f64>,
+        now: Instant,
+    ) -> Decision {
+        let Some(cpu) = cpu_pct else {
+            return Decision::Idle;
+        };
+        let hold = Duration::from_secs(self.cfg.cpu_hold_sec.max(60));
+        let threshold = self.cfg.cpu_threshold_pct;
+        let reset = self.cfg.cpu_reset_pct.min(threshold - 1.0);
+
+        if cpu >= threshold {
+            let track = self.cpu.entry(node_id).or_insert(CpuTrack {
+                high_since: now,
+                alerted: false,
+            });
+            if track.alerted {
+                return Decision::Idle;
+            }
+            let held = now.duration_since(track.high_since);
+            if held >= hold {
+                track.alerted = true;
+                return Decision::Fire {
+                    kind: AlertKind::NodeCpuHigh,
+                    node_id,
+                    hostname: hostname.to_string(),
+                    env: env.to_string(),
+                    duration_sec: held.as_secs() as i64,
+                };
+            }
+        } else if cpu < reset {
+            // нагрузка спала — сбрасываем накопление
+            self.cpu.remove(&node_id);
+        }
+
+        Decision::Idle
     }
 
     /// Затравка состояния из PG после старта процесса.
@@ -351,10 +438,7 @@ pub async fn send_telegram(
     chat_id: &str,
     text: &str,
 ) -> Result<(), String> {
-    let url = format!(
-        "{}/bot{token}/sendMessage",
-        api_base.trim_end_matches('/')
-    );
+    let url = format!("{}/bot{token}/sendMessage", api_base.trim_end_matches('/'));
     let response = client
         .post(&url)
         .json(&serde_json::json!({
@@ -389,6 +473,10 @@ pub fn format_message(kind: &AlertKind, hostname: &str, env: &str, duration_sec:
             "🟢 Нода вернулась\n{hostname} ({env})\nстабильна: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
+        AlertKind::NodeCpuHigh => format!(
+            "🔥 Высокая нагрузка CPU\n{hostname} ({env})\nдержится: {human}\nвремя: {}",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ),
         AlertKind::NodeFlapping => format!(
             "🟠 Нода мигает\n{hostname} ({env})\n{duration_sec} перехода за окно\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
@@ -421,6 +509,9 @@ mod tests {
             recovery_grace_sec: 120,
             new_node_grace_sec: 0,
             throttle_sec: 1800,
+            cpu_threshold_pct: 85.0,
+            cpu_hold_sec: 600,
+            cpu_reset_pct: 70.0,
             flap_gap_sec: 120,
             flap_window_sec: 3600,
             flap_threshold: 3,
@@ -489,7 +580,7 @@ mod tests {
         let mut e = AlertsEngine::new(cfg());
         let now = 1_700_000_000_000i64;
         e.observe(node(), "n1", "ru", Some(now - 900_000), now); // fired
-                                                     // первый свежий heartbeat — ещё не отбой
+                                                                 // первый свежий heartbeat — ещё не отбой
         assert_eq!(
             e.observe(node(), "n1", "ru", Some(now), now),
             Decision::Idle
@@ -497,35 +588,142 @@ mod tests {
     }
 
     #[test]
+    fn cpu_high_needs_full_hold_window() {
+        let mut e = AlertsEngine::new(cfg());
+        let base = std::time::Instant::now();
+        // всплеск 3 минуты — не алертим
+        for m in 0..3 {
+            assert_eq!(
+                e.observe_cpu_at(
+                    node(),
+                    "n1",
+                    "ru",
+                    Some(92.0),
+                    base + Duration::from_secs(60 * m)
+                ),
+                Decision::Idle
+            );
+        }
+        // спокойно 10 минут выше порога — алерт ровно один
+        let mut fired = 0;
+        for m in 3..=13 {
+            if let Decision::Fire { kind, .. } = e.observe_cpu_at(
+                node(),
+                "n1",
+                "ru",
+                Some(92.0),
+                base + Duration::from_secs(60 * m),
+            ) {
+                assert_eq!(kind, AlertKind::NodeCpuHigh);
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 1, "алерт должен быть ровно один");
+        // повторно не шлём, пока нагрузка не спадёт
+        assert_eq!(
+            e.observe_cpu_at(
+                node(),
+                "n1",
+                "ru",
+                Some(95.0),
+                base + Duration::from_secs(60 * 20)
+            ),
+            Decision::Idle
+        );
+    }
+
+    #[test]
+    fn cpu_drop_below_hysteresis_resets_accumulation() {
+        let mut e = AlertsEngine::new(cfg());
+        let base = std::time::Instant::now();
+        assert_eq!(
+            e.observe_cpu_at(node(), "n1", "ru", Some(90.0), base),
+            Decision::Idle
+        );
+        // на 6-й минуте просадка ниже гистерезиса — накопление сбрасывается
+        assert_eq!(
+            e.observe_cpu_at(
+                node(),
+                "n1",
+                "ru",
+                Some(50.0),
+                base + Duration::from_secs(360)
+            ),
+            Decision::Idle
+        );
+        // ещё 9 минут выше порога — до 10 не дотянули
+        let mut fired = false;
+        for m in 7..=15 {
+            if let Decision::Fire { .. } = e.observe_cpu_at(
+                node(),
+                "n1",
+                "ru",
+                Some(90.0),
+                base + Duration::from_secs(60 * m),
+            ) {
+                fired = true;
+            }
+        }
+        assert!(!fired, "после сброса окно должно считаться заново");
+    }
+
+    #[test]
     fn flapping_counts_silence_episodes() {
         let mut e = AlertsEngine::new(cfg());
         let now = 1_700_000_000_000i64;
         // три эпизода тишины по 150с (> flap_gap 120с), между ними свежие heartbeat
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now - 150_000), now), Decision::Idle);
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now - 150_000), now), Decision::Idle);
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now), now),
+            Decision::Idle
+        );
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now - 150_000), now),
+            Decision::Idle
+        );
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now), now),
+            Decision::Idle
+        );
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now - 150_000), now),
+            Decision::Idle
+        );
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now), now),
+            Decision::Idle
+        );
         match e.observe(node(), "n1", "ru", Some(now - 150_000), now) {
             Decision::Fire { kind, .. } => assert_eq!(kind, AlertKind::NodeFlapping),
             other => panic!("ожидали node_flapping, получили {other:?}"),
         }
         // дальше молчим, пока окно не очистится
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now - 150_000), now), Decision::Idle);
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now), now),
+            Decision::Idle
+        );
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now - 150_000), now),
+            Decision::Idle
+        );
     }
 
     #[test]
     fn single_short_glitch_does_not_trigger_flapping() {
         let mut e = AlertsEngine::new(cfg());
         let now = 1_700_000_000_000i64;
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now), now),
+            Decision::Idle
+        );
         // один короткий обрыв 40 секунд — ниже и порога офлайна, и flap_gap
         assert_eq!(
             e.observe(node(), "n1", "ru", Some(now - 40_000), now),
             Decision::Idle
         );
-        assert_eq!(e.observe(node(), "n1", "ru", Some(now), now), Decision::Idle);
+        assert_eq!(
+            e.observe(node(), "n1", "ru", Some(now), now),
+            Decision::Idle
+        );
     }
 
     #[test]

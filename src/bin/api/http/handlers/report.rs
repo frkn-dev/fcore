@@ -213,7 +213,12 @@ pub(crate) fn batch_uuid(raw: &str, sub_id: Option<uuid::Uuid>) -> uuid::Uuid {
     uuid::Uuid::from_bytes(bytes)
 }
 
-fn observation_uuid(batch: uuid::Uuid, index: usize, address: Option<IpAddr>, host: Option<&str>) -> uuid::Uuid {
+fn observation_uuid(
+    batch: uuid::Uuid,
+    index: usize,
+    address: Option<IpAddr>,
+    host: Option<&str>,
+) -> uuid::Uuid {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(batch.as_bytes());
@@ -268,7 +273,10 @@ fn opt_trimmed(s: &Option<String>, max: usize) -> Option<String> {
 fn parse_address(raw: &Option<String>) -> Result<Option<IpAddr>, String> {
     match raw.as_deref().map(str::trim) {
         None | Some("") => Ok(None),
-        Some(s) => s.parse::<IpAddr>().map(Some).map_err(|_| "invalid_address".into()),
+        Some(s) => s
+            .parse::<IpAddr>()
+            .map(Some)
+            .map_err(|_| "invalid_address".into()),
     }
 }
 
@@ -452,7 +460,8 @@ where
         network: req.report.network.clone().unwrap_or(Value::Null),
         probe: req.report.probe.clone().unwrap_or(Value::Null),
         session: req.report.session.clone().unwrap_or(Value::Null),
-        country_code: opt_trimmed(&target.country_code, 2).or_else(|| opt_trimmed(&target.country_code, 3)),
+        country_code: opt_trimmed(&target.country_code, 2)
+            .or_else(|| opt_trimmed(&target.country_code, 3)),
         asn: asn.map(|v| v as i32),
         client_country,
         ip_prefix: ip_prefix(ip),
@@ -482,7 +491,12 @@ where
         }
     }
 
-    match memory.db.report().insert_batch(batch_id, std::slice::from_ref(&row)).await {
+    match memory
+        .db
+        .report()
+        .insert_batch(batch_id, std::slice::from_ref(&row))
+        .await
+    {
         Ok(true) => Ok(accepted(serde_json::json!({
             "id": row.id,
             "dedup": false,
@@ -786,7 +800,9 @@ mod tests {
         // DNS не ответил — самый ценный отчёт, а не 400.
         assert_eq!(parse_address(&Some(String::new())).unwrap(), None);
         assert_eq!(parse_address(&None).unwrap(), None);
-        assert!(parse_address(&Some("93.89.220.49".into())).unwrap().is_some());
+        assert!(parse_address(&Some("93.89.220.49".into()))
+            .unwrap()
+            .is_some());
         assert!(parse_address(&Some("не-ip".into())).is_err());
     }
 
@@ -830,7 +846,10 @@ mod tests {
         assert_eq!(parse_time(&Some(future)).unwrap_err(), "at_in_future");
         let now = Utc::now().to_rfc3339();
         assert!(parse_time(&Some(now)).unwrap().is_some());
-        assert_eq!(parse_time(&Some("не-дата".into())).unwrap_err(), "invalid_at");
+        assert_eq!(
+            parse_time(&Some("не-дата".into())).unwrap_err(),
+            "invalid_at"
+        );
     }
 
     #[test]

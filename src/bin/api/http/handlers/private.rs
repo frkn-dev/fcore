@@ -9,9 +9,9 @@ use warp::reply::Reply;
 use fcore::{
     http::{helpers as http, IdResponse, ResponseMessage},
     Connection, ConnectionApiOperations, ConnectionBaseOperations, ConnectionStorageApiOperations,
-    Env, IpAddrMask, MetricEnvelope,
-    MetricStorage, Node, NodeStatus, NodeStorageOperations, NodeType, PlanKind, Status, Subscription,
-    SubscriptionOperations, SubscriptionStorageOperations, Tag,
+    Env, IpAddrMask, MetricEnvelope, MetricStorage, Node, NodeStatus, NodeStorageOperations,
+    NodeType, PlanKind, Status, Subscription, SubscriptionOperations,
+    SubscriptionStorageOperations, Tag,
 };
 
 use super::super::{
@@ -445,11 +445,7 @@ where
         memory
             .db
             .sub()
-            .set_premium_fields(
-                &subscription_id,
-                Some(&personal),
-                existing_token.as_deref(),
-            )
+            .set_premium_fields(&subscription_id, Some(&personal), existing_token.as_deref())
             .await
             .map_err(|_| http::internal_error("failed to set personal scope"))?;
 
@@ -486,8 +482,9 @@ where
         let mem = memory.memory.read().await;
         if let Some(sub) = mem.subscriptions.find_by_id(&req.subscription_id) {
             if sub.parent_id().is_some() {
-                return Ok(forbidden("a user of a selfhosted account cannot host nodes")
-                    .into_response());
+                return Ok(
+                    forbidden("a user of a selfhosted account cannot host nodes").into_response(),
+                );
             }
         }
     }
@@ -589,7 +586,7 @@ where
     let ip = super::share::client_ip(remote, x_forwarded_for.as_deref());
     if !rate_limiter.check(ip) {
         return Ok(
-            too_many_requests("too many account creations, try again later").into_response()
+            too_many_requests("too many account creations, try again later").into_response(),
         );
     }
 
@@ -662,9 +659,7 @@ where
 
     let row = match memory.db.install_token().find_usable(token).await {
         Ok(Some(row)) => row,
-        Ok(None) => {
-            return Ok(unauthorized("invalid or expired install token").into_response())
-        }
+        Ok(None) => return Ok(unauthorized("invalid or expired install token").into_response()),
         Err(_) => return Ok(http::internal_error("db error").into_response()),
     };
 
@@ -899,7 +894,14 @@ async fn owned_node<N, C, S>(
 ) -> Option<Node>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
-    C: ConnectionApiOperations + ConnectionBaseOperations + Sync + Send + Clone + 'static + From<Connection> + PartialEq,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
@@ -1386,19 +1388,15 @@ where
         return Err(http::not_found("subscription not found").into_response());
     }
     if owner.parent_id().is_some() {
-        return Err(http::bad_request(
-            "a user of a selfhosted account cannot invite users",
-        )
-        .into_response());
+        return Err(
+            http::bad_request("a user of a selfhosted account cannot invite users").into_response(),
+        );
     }
     // Своих юзеров может заводить любой аккаунт, а не только selfhosted:
     // «своё железо + свои люди» не должно требовать второго аккаунта. Границу
     // задаёт лимит (`user_limit`), его поднимает админ.
     if owner.user_limit() <= 0 {
-        return Err(http::bad_request(
-            "user limit is 0 for this account",
-        )
-        .into_response());
+        return Err(http::bad_request("user limit is 0 for this account").into_response());
     }
     Ok(())
 }
@@ -1540,9 +1538,7 @@ where
                 };
                 let protos = protos_of(node);
                 if protos.is_empty() {
-                    return Ok(
-                        http::bad_request("node has no amnezia-wg inbound").into_response()
-                    );
+                    return Ok(http::bad_request("node has no amnezia-wg inbound").into_response());
                 }
                 node_ids.push(*id);
                 for proto in protos {
@@ -1555,8 +1551,9 @@ where
         }
 
         if plans.is_empty() {
-            return Ok(http::bad_request("the account has no amnezia-wg servers yet")
-                .into_response());
+            return Ok(
+                http::bad_request("the account has no amnezia-wg servers yet").into_response(),
+            );
         }
 
         (plans, node_ids)
@@ -1869,8 +1866,9 @@ where
         {
             Ok(Some(slot)) if slot.inserted => {}
             Ok(Some(slot)) => {
-                return Ok(limit_reached("server_limit_reached", slot.used, slot.limit)
-                    .into_response())
+                return Ok(
+                    limit_reached("server_limit_reached", slot.used, slot.limit).into_response()
+                )
             }
             Ok(None) => return Ok(http::bad_request("unknown personal scope").into_response()),
             Err(e) => {
@@ -2052,10 +2050,7 @@ mod tests {
         let node_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
         let storage = metrics_with(
             node_id,
-            &[
-                ("sys.cpu.0", 1_000, 5.0),
-                ("sys.cpu.0", 5_000, 90.0),
-            ],
+            &[("sys.cpu.0", 1_000, 5.0), ("sys.cpu.0", 5_000, 90.0)],
         );
         // Only the point inside the window survives the filter.
         let series = node_series(&storage, &node_id, 4_000, 6_000);

@@ -87,11 +87,7 @@ impl Transport for ReqwestTransport {
             request = request.header(name, value);
         }
 
-        let response = request
-            .body(body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+        let response = request.body(body).send().await.map_err(map_reqwest_error)?;
 
         let mut builder = ::http::Response::builder().status(response.status());
         for (name, value) in response.headers().iter() {
@@ -130,12 +126,8 @@ impl AppleIapClient {
             )
         })?;
 
-        let root_ca = std::fs::read(&config.root_ca_path).map_err(|e| {
-            format!(
-                "failed to read Apple root CA {}: {e}",
-                config.root_ca_path
-            )
-        })?;
+        let root_ca = std::fs::read(&config.root_ca_path)
+            .map_err(|e| format!("failed to read Apple root CA {}: {e}", config.root_ca_path))?;
 
         let api = AppStoreServerApiClient::new(
             signing_key,

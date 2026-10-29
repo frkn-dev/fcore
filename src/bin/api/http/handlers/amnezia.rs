@@ -1,13 +1,13 @@
-use crate::sync::MemSync;
 use super::{resolve_serving_access, serving_access, ServingAccess};
+use crate::sync::MemSync;
 use base64::Engine;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
     ConnectionStorageApiOperations, InboundConnLink, NodeStatus, NodeStorageOperations,
     SubscriptionOperations, SubscriptionStorageOperations, Tag,
 };
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -329,9 +329,7 @@ fn inbound_label(tag: Tag) -> &'static str {
 
 fn label_is_host(label: &str, hostname: &str, address: &str) -> bool {
     let label = label.trim();
-    label.is_empty()
-        || label.eq_ignore_ascii_case(hostname.trim())
-        || label == address
+    label.is_empty() || label.eq_ignore_ascii_case(hostname.trim()) || label == address
 }
 
 /// Title of one (device, node) entry in the app's server list.
@@ -469,7 +467,11 @@ fn entry_ips(node: &fcore::Node) -> Vec<String> {
         .unwrap_or_else(|| vec![node.address.to_string()])
 }
 
-pub(crate) fn pooled_entry_ips<N: NodeStorageOperations>(nodes: &N, env: &fcore::Env, pool: &str) -> Vec<String> {
+pub(crate) fn pooled_entry_ips<N: NodeStorageOperations>(
+    nodes: &N,
+    env: &fcore::Env,
+    pool: &str,
+) -> Vec<String> {
     let mut members: Vec<&fcore::Node> = nodes
         .iter_nodes()
         .map(|(_, n)| n)
@@ -588,7 +590,11 @@ where
                     service_protocol: proto_label(tag).to_string(),
                     env: conn.get_env().to_string(),
                     connection_label: label,
-                    node_ips: if ips.is_empty() { None } else { Some(ips.clone()) },
+                    node_ips: if ips.is_empty() {
+                        None
+                    } else {
+                        Some(ips.clone())
+                    },
                     pool: node.pool.clone(),
                     pool_translation: node.pool_translation.clone(),
                     config_rev: config_rev(node, tag, &ips),
@@ -842,10 +848,7 @@ fn build_h2_server_config(
         settings["down_mbps"] = serde_json::json!(down);
     }
 
-    let alpn = h2
-        .alpn
-        .clone()
-        .unwrap_or_else(|| vec!["h3".to_string()]);
+    let alpn = h2.alpn.clone().unwrap_or_else(|| vec!["h3".to_string()]);
 
     let outbound = serde_json::json!({
         "outbounds": [{
@@ -1203,8 +1206,12 @@ where
     // Expired/revoked subscription: paywall signal, same as /v1/config.
     let mut traffic_mode = false;
     if let (Some(sub), Some(sub_id)) = (sub, sub_id) {
-        match resolve_serving_access(&memory.db, sub_id, serving_access(sub, traffic_mode_enabled))
-            .await
+        match resolve_serving_access(
+            &memory.db,
+            sub_id,
+            serving_access(sub, traffic_mode_enabled),
+        )
+        .await
         {
             ServingAccess::Expired => {
                 return Ok(subscription_expired_response(sub.expires_at()));
@@ -1242,18 +1249,53 @@ where
     };
     let conns_slice = conns.as_deref();
 
-    let vless_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "vless", conns_slice, !req.pool_off);
-    let awg_connections = connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "awg", conns_slice, !req.pool_off);
+    let vless_connections = connections_for_protocol(
+        &mem.nodes,
+        &mem.conn_nodes,
+        &mem.conn_labels,
+        "vless",
+        conns_slice,
+        !req.pool_off,
+    );
+    let awg_connections = connections_for_protocol(
+        &mem.nodes,
+        &mem.conn_nodes,
+        &mem.conn_labels,
+        "awg",
+        conns_slice,
+        !req.pool_off,
+    );
 
     // One merged service: the client must not offer a protocol choice at purchase.
     let mut connections = vless_connections;
     connections.extend(awg_connections);
     // Hysteria2 has no per-connection traffic accounting: hidden in traffic mode.
     if !traffic_mode || Tag::Hysteria2.is_metered(&metered_conns) {
-        connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "hysteria2", conns_slice, !req.pool_off));
+        connections.extend(connections_for_protocol(
+            &mem.nodes,
+            &mem.conn_nodes,
+            &mem.conn_labels,
+            "hysteria2",
+            conns_slice,
+            !req.pool_off,
+        ));
     }
-    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "awg-mobile", conns_slice, !req.pool_off));
-    connections.extend(connections_for_protocol(&mem.nodes, &mem.conn_nodes, &mem.conn_labels, "wireguard", conns_slice, !req.pool_off));
+    connections.extend(connections_for_protocol(
+        &mem.nodes,
+        &mem.conn_nodes,
+        &mem.conn_labels,
+        "awg-mobile",
+        conns_slice,
+        !req.pool_off,
+    ));
+    connections.extend(connections_for_protocol(
+        &mem.nodes,
+        &mem.conn_nodes,
+        &mem.conn_labels,
+        "wireguard",
+        conns_slice,
+        !req.pool_off,
+    ));
     let countries = available_countries_from_connections(&connections);
 
     let info = GatewayServiceInfo {
@@ -1331,9 +1373,12 @@ where
     };
 
     // Informational endpoint: traffic mode counts as active, only expired blocks.
-    let access =
-        resolve_serving_access(&memory.db, sub_id, serving_access(sub, traffic_mode_enabled))
-            .await;
+    let access = resolve_serving_access(
+        &memory.db,
+        sub_id,
+        serving_access(sub, traffic_mode_enabled),
+    )
+    .await;
     if access == ServingAccess::Expired {
         return Ok(http::not_found("Subscription expired").into_response());
     }
@@ -1384,16 +1429,14 @@ where
             "awg-mobile".to_string(),
             "wireguard".to_string(),
         ],
-        available_countries: vec![
-            GatewayCountry {
-                country_code: String::new(),
-                country_name: "All countries".to_string(),
-                connection_uuid: None,
-                connection_label: "All countries".to_string(),
-                pool: None,
-                pool_translation: None,
-            },
-        ],
+        available_countries: vec![GatewayCountry {
+            country_code: String::new(),
+            country_name: "All countries".to_string(),
+            connection_uuid: None,
+            connection_label: "All countries".to_string(),
+            pool: None,
+            pool_translation: None,
+        }],
         active_device_count: active_devices,
         max_device_count: 5,
         subscription_end_date,
@@ -1406,7 +1449,8 @@ where
             website_name: "FRKN".to_string(),
             telegram: "https://t.me/frkn_org".to_string(),
         },
-    }).into_response())
+    })
+    .into_response())
 }
 
 fn gzip_json(value: &serde_json::Value) -> Result<Vec<u8>, fcore::Error> {
@@ -1445,7 +1489,8 @@ fn subscription_expired_response(
 
 /// Parameters for building a gateway VPN config, shared by
 /// `gateway_config_handler` and `gateway_subscriptions_handler`.
-pub struct GatewayConfigParams<'a> {    pub service_protocol: &'a str,
+pub struct GatewayConfigParams<'a> {
+    pub service_protocol: &'a str,
     pub service_type: &'a str,
     pub user_country_code: Option<&'a str>,
     pub server_country_code: Option<&'a str>,
@@ -1484,9 +1529,12 @@ where
         None => return Err(http::not_found("Subscription not found").into_response()),
     };
 
-    let access =
-        resolve_serving_access(&memory.db, *sub_id, serving_access(sub, traffic_mode_enabled))
-            .await;
+    let access = resolve_serving_access(
+        &memory.db,
+        *sub_id,
+        serving_access(sub, traffic_mode_enabled),
+    )
+    .await;
     let traffic_mode = match access {
         ServingAccess::Expired => {
             return Err(subscription_expired_response(sub.expires_at()));
@@ -1585,10 +1633,7 @@ where
             if params.node_id.is_some() {
                 return Err(http::not_found("node_not_found").into_response());
             }
-            return Err(http::not_found(
-                "No suitable connection/node found",
-            )
-            .into_response())
+            return Err(http::not_found("No suitable connection/node found").into_response());
         }
     };
 
@@ -1612,7 +1657,11 @@ where
     };
     let node_ips = if let Some(pool) = &pool {
         let ips = pooled_entry_ips(&mem.nodes, &node.env, pool);
-        if ips.is_empty() { None } else { Some(ips) }
+        if ips.is_empty() {
+            None
+        } else {
+            Some(ips)
+        }
     } else {
         node.node_ips
             .as_ref()
@@ -1632,18 +1681,16 @@ where
     // service card: an explicitly requested connection may be of either type.
     let conn_tag = conn.get_proto().proto();
     let server_config_json = if conn_tag == Tag::Hysteria2 {
-        let inbound = node
-            .inbounds
-            .get(&conn_tag)
-            .ok_or_else(|| {
-                http::internal_error("Node has no matching Hysteria2 inbound").into_response()
-            })?;
+        let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
+            http::internal_error("Node has no matching Hysteria2 inbound").into_response()
+        })?;
         let token = conn.get_token().ok_or_else(|| {
             http::internal_error("Connection has no Hysteria2 token").into_response()
         })?;
         let host = node.connection_host();
-        build_h2_server_config(inbound, &host, &token)
-            .map_err(|e| http::internal_error(&format!("Failed to build Hysteria2 config: {e}")).into_response())?
+        build_h2_server_config(inbound, &host, &token).map_err(|e| {
+            http::internal_error(&format!("Failed to build Hysteria2 config: {e}")).into_response()
+        })?
     } else if conn_tag == Tag::Wireguard {
         let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
             http::internal_error("Node has no matching WireGuard inbound").into_response()
@@ -1660,8 +1707,9 @@ where
             http::internal_error("Failed to derive WireGuard public key").into_response()
         })?;
 
-        build_wg_server_config(inbound, &conn, &client_pub_key, &host)
-            .map_err(|e| http::internal_error(&format!("Failed to build WireGuard config: {e}")).into_response())?
+        build_wg_server_config(inbound, &conn, &client_pub_key, &host).map_err(|e| {
+            http::internal_error(&format!("Failed to build WireGuard config: {e}")).into_response()
+        })?
     } else if matches!(conn_tag, Tag::AmneziaWg | Tag::AmneziaWgMobile) {
         let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
             http::internal_error("Node has no matching AmneziaWG inbound").into_response()
@@ -1669,9 +1717,7 @@ where
         let host = node.connection_host();
         let link = inbound
             .create_link(&conn_id, &conn, &node.hostname, &host, &node.label)
-            .map_err(|_| {
-                http::internal_error("Failed to build AWG link").into_response()
-            })?;
+            .map_err(|_| http::internal_error("Failed to build AWG link").into_response())?;
 
         let awg_param = conn.get_amneziawg().ok_or_else(|| {
             http::internal_error("Connection has no AmneziaWG params").into_response()
@@ -1688,12 +1734,9 @@ where
         // Match the inbound by the connection's exact tag (like the
         // subscription link handler does). No fallback: serving a config
         // from a different inbound means a broken host.
-        let inbound = node
-            .inbounds
-            .get(&conn_tag)
-            .ok_or_else(|| {
-                http::internal_error("Node has no matching VLESS inbound").into_response()
-            })?;
+        let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
+            http::internal_error("Node has no matching VLESS inbound").into_response()
+        })?;
 
         // The user id is always the connection's uuid (as in the
         // subscription link handler) — never the client's public_key,
@@ -1804,10 +1847,9 @@ where
 
     // Owner path: both fields are required (share_token auth returns above
     // and never needs them).
-    let (Some(service_type), Some(service_protocol)) = (
-        req.service_type.as_deref(),
-        req.service_protocol.as_deref(),
-    ) else {
+    let (Some(service_type), Some(service_protocol)) =
+        (req.service_type.as_deref(), req.service_protocol.as_deref())
+    else {
         return Ok(warp::reply::with_status(
             "Missing service_type/service_protocol",
             warp::http::StatusCode::BAD_REQUEST,
@@ -1841,10 +1883,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcore::{Proto, WgKeys, WgParam};
     use fcore::H2Settings;
     use fcore::Tag;
     use fcore::{Env, IpAddrMask, WireguardSettings};
+    use fcore::{Proto, WgKeys, WgParam};
 
     fn h2_inbound() -> fcore::Inbound {
         fcore::Inbound {
@@ -2045,13 +2087,19 @@ mod tests {
             pool_translation: None,
         };
         let rev = config_rev(&node, Tag::Wireguard, &[]).unwrap();
-        assert_eq!(config_rev(&node, Tag::Wireguard, &[]).as_deref(), Some(rev.as_str()));
+        assert_eq!(
+            config_rev(&node, Tag::Wireguard, &[]).as_deref(),
+            Some(rev.as_str())
+        );
         assert_eq!(rev.len(), 64);
 
         let mut renamed = node.clone();
         renamed.label = "Other".into();
         renamed.country = "DE".into();
-        assert_eq!(config_rev(&renamed, Tag::Wireguard, &[]).as_deref(), Some(rev.as_str()));
+        assert_eq!(
+            config_rev(&renamed, Tag::Wireguard, &[]).as_deref(),
+            Some(rev.as_str())
+        );
 
         let mut moved = node.clone();
         moved.address = "203.0.113.8".parse().unwrap();
@@ -2166,25 +2214,60 @@ mod tests {
             "Suomi"
         );
         assert_eq!(
-            connection_title("vps.example", "vps.example", "203.0.113.7", "FI", true, None),
+            connection_title(
+                "vps.example",
+                "vps.example",
+                "203.0.113.7",
+                "FI",
+                true,
+                None
+            ),
             "FI| Private"
         );
         assert_eq!(
-            connection_title("vps.example", "vps.example", "203.0.113.7", "FI", false, None),
+            connection_title(
+                "vps.example",
+                "vps.example",
+                "203.0.113.7",
+                "FI",
+                false,
+                None
+            ),
             "vps.example"
         );
         assert_eq!(
-            connection_title("CZ| Private", "vps.example", "203.0.113.7", "XX", true, None),
+            connection_title(
+                "CZ| Private",
+                "vps.example",
+                "203.0.113.7",
+                "XX",
+                true,
+                None
+            ),
             "CZ| Private"
         );
         assert_eq!(
-            connection_title("203.0.113.7", "vps.example", "203.0.113.7", "FI", true, Some("Кухня")),
+            connection_title(
+                "203.0.113.7",
+                "vps.example",
+                "203.0.113.7",
+                "FI",
+                true,
+                Some("Кухня")
+            ),
             "Кухня"
         );
         // A named device prefixes the node it lives on: with an env-wide device
         // the same name would otherwise repeat on every server.
         assert_eq!(
-            connection_title("Kitchen", "vps.example", "203.0.113.7", "FI", true, Some("Кухня")),
+            connection_title(
+                "Kitchen",
+                "vps.example",
+                "203.0.113.7",
+                "FI",
+                true,
+                Some("Кухня")
+            ),
             "Кухня (Kitchen)"
         );
         assert_eq!(
@@ -2199,7 +2282,14 @@ mod tests {
             "Телефон (Premium-a65e52c6af0e)"
         );
         assert_eq!(
-            connection_title("NL4", "nl4.example", "203.0.113.7", "NL", false, Some("Мама")),
+            connection_title(
+                "NL4",
+                "nl4.example",
+                "203.0.113.7",
+                "NL",
+                false,
+                Some("Мама")
+            ),
             "Мама (NL4)"
         );
         assert_eq!(
@@ -2286,10 +2376,18 @@ mod tests {
         };
 
         let cards = real(connections_for_protocol(
-            &nodes, &pins, &labels, "vless", Some(&conns), true,
+            &nodes,
+            &pins,
+            &labels,
+            "vless",
+            Some(&conns),
+            true,
         ));
         assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].connection_label, "EU Рилзопровод · VLESS TCP Reality");
+        assert_eq!(
+            cards[0].connection_label,
+            "EU Рилзопровод · VLESS TCP Reality"
+        );
         assert_eq!(
             cards[0].node_ips.as_deref(),
             Some(
@@ -2301,7 +2399,12 @@ mod tests {
 
         nodes.get_mut(&Env::Ru).unwrap()[1].status = NodeStatus::Offline;
         let cards = real(connections_for_protocol(
-            &nodes, &pins, &labels, "vless", Some(&conns), true,
+            &nodes,
+            &pins,
+            &labels,
+            "vless",
+            Some(&conns),
+            true,
         ));
         assert_eq!(cards.len(), 1);
         assert_eq!(
@@ -2314,7 +2417,12 @@ mod tests {
             n.status = NodeStatus::Online;
         }
         let cards = real(connections_for_protocol(
-            &nodes, &pins, &labels, "vless", Some(&conns), true,
+            &nodes,
+            &pins,
+            &labels,
+            "vless",
+            Some(&conns),
+            true,
         ));
         assert_eq!(cards.len(), 2);
 
@@ -2322,7 +2430,12 @@ mod tests {
             n.pool = Some("EU Рилзопровод".into());
         }
         let cards = real(connections_for_protocol(
-            &nodes, &pins, &labels, "vless", Some(&conns), false,
+            &nodes,
+            &pins,
+            &labels,
+            "vless",
+            Some(&conns),
+            false,
         ));
         assert_eq!(cards.len(), 2);
     }

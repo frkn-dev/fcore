@@ -1,9 +1,9 @@
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use tracing::Instrument;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tracing::Instrument;
 use warp::http::{Response, StatusCode};
 
 use fcore::http::{
@@ -32,9 +32,9 @@ use super::super::{
     request::EnvFilter,
     request::{AddTrafficReq, FormatReq, Subscription as SubReq, SubscriptionInfoRequest},
 };
-use super::{resolve_serving_access, serving_access, ServingAccess};
-use super::share::{display_token, grouped_token, is_share_connection};
 use super::connection::{main_feed_connection_visible, pinned_to};
+use super::share::{display_token, grouped_token, is_share_connection};
+use super::{resolve_serving_access, serving_access, ServingAccess};
 
 #[derive(Debug, Deserialize)]
 pub struct TrafficHistoryQuery {
@@ -204,12 +204,7 @@ where
         .days
         .map(|days| Utc::now() + chrono::Duration::days(days));
 
-    let sub = Subscription::new(
-        sub_id,
-        ref_code,
-        expires_at,
-        req.limit_bytes,
-    );
+    let sub = Subscription::new(sub_id, ref_code, expires_at, req.limit_bytes);
 
     subscription_audit::log_transaction_start(sub_id, req.days);
 
@@ -272,17 +267,13 @@ where
 
     subscription_audit::log_transaction_start(sub_id, req.days);
 
-    match SyncOp::update_sub(
-        &memory,
-        &sub_id,
-        req,
-    )
-    .instrument(subscription_audit::transaction_span(
-        "put_subscription_handler",
-        sub_id,
-        Some(trace_id),
-    ))
-    .await
+    match SyncOp::update_sub(&memory, &sub_id, req)
+        .instrument(subscription_audit::transaction_span(
+            "put_subscription_handler",
+            sub_id,
+            Some(trace_id),
+        ))
+        .await
     {
         Ok(Status::Updated(id)) => {
             // Renewal (incl. reactivation of an expired sub): make sure the
@@ -597,8 +588,11 @@ where
                 if let Some(share) = by_source.get(&c.id) {
                     let grouped = grouped_token(&share.token);
                     c.share_url = Some(format!("frkn://conn/{}", grouped));
-                    c.share_feed_url =
-                        Some(format!("{}/sub/{}", base_url.trim_end_matches('/'), grouped));
+                    c.share_feed_url = Some(format!(
+                        "{}/sub/{}",
+                        base_url.trim_end_matches('/'),
+                        grouped
+                    ));
                     c.share_token = Some(share.token.clone());
                     c.share_node_id = share.node_id;
                 }
@@ -625,11 +619,7 @@ where
             }
         }
         Err(e) => {
-            tracing::warn!(
-                "Share token read failed for sub {}: {}",
-                subscription_id,
-                e
-            );
+            tracing::warn!("Share token read failed for sub {}: {}", subscription_id, e);
         }
     }
 
@@ -717,12 +707,7 @@ pub async fn get_subscription_by_ref_code_handler<N, C, S>(
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
-    C: ConnectionApiOperations
-        + ConnectionBaseOperations
-        + Sync
-        + Send
-        + Clone
-        + 'static,
+    C: ConnectionApiOperations + ConnectionBaseOperations + Sync + Send + Clone + 'static,
 {
     let mem = memory.memory.read().await;
 
@@ -741,7 +726,9 @@ where
     let Some(sub) = sub else {
         tracing::debug!("Ref code {} not found in memory", query.code);
         return Ok(Box::new(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({"status": 404, "message": "Subscription not found"})),
+            warp::reply::json(
+                &serde_json::json!({"status": 404, "message": "Subscription not found"}),
+            ),
             warp::http::StatusCode::NOT_FOUND,
         )));
     };
@@ -1008,10 +995,7 @@ where
     // -------------------------
     let conns: Vec<(uuid::Uuid, Connection)> = match req.conn {
         Some(conn_id) => {
-            let filtered: Vec<_> = conns
-                .into_iter()
-                .filter(|(id, _)| *id == conn_id)
-                .collect();
+            let filtered: Vec<_> = conns.into_iter().filter(|(id, _)| *id == conn_id).collect();
             if filtered.is_empty() {
                 return Ok(Box::new(http::not_found("Connection not found")));
             }
@@ -1243,7 +1227,10 @@ where
                         .map_err(|e| {
                             tracing::warn!(
                                 "Skipping broken {:?} link for conn {} (host '{}'): {}",
-                                inbound.tag, conn_id, host, e
+                                inbound.tag,
+                                conn_id,
+                                host,
+                                e
                             );
                         })
                         .ok()
@@ -1273,7 +1260,10 @@ where
                         .map_err(|e| {
                             tracing::warn!(
                                 "Skipping broken {:?} link for conn {} (host '{}'): {}",
-                                inbound.tag, conn_id, host, e
+                                inbound.tag,
+                                conn_id,
+                                host,
+                                e
                             );
                         })
                         .ok()
@@ -1307,7 +1297,11 @@ where
 
             let yaml = serde_yaml::to_string(&clash_config)
                 .unwrap_or_else(|_| "---\nerror: failed to serialize\n".into());
-            let yaml = if happ_mode { sanitize_for_happ(&yaml) } else { yaml };
+            let yaml = if happ_mode {
+                sanitize_for_happ(&yaml)
+            } else {
+                yaml
+            };
 
             let response = Response::builder()
                 .header("Content-Type", "application/yaml")
@@ -1467,7 +1461,9 @@ where
     }
 
     if req.add_bytes <= 0 {
-        return Ok(Box::new(http::bad_request("add_bytes must be greater than 0")));
+        return Ok(Box::new(http::bad_request(
+            "add_bytes must be greater than 0",
+        )));
     }
 
     match SyncOp::add_limit_bytes(&memory, &subscription_id, req.add_bytes, &req.trace_id).await {
@@ -1480,7 +1476,11 @@ where
                     .unwrap_or(0)
             };
 
-            let used_bytes = match memory.db.traffic().total_for_subscription(subscription_id).await
+            let used_bytes = match memory
+                .db
+                .traffic()
+                .total_for_subscription(subscription_id)
+                .await
             {
                 Ok((uplink, downlink)) => (uplink + downlink).max(0),
                 Err(e) => {

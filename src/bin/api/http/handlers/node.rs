@@ -1,6 +1,6 @@
+use serde::Serialize;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use serde::Serialize;
 use warp::http::StatusCode;
 
 use fcore::{

@@ -336,10 +336,7 @@ mod tests {
         let resolver = resolver();
 
         let standard = Subscription::default();
-        assert_eq!(
-            resolver.resolve_for(&standard).unwrap().unwrap(),
-            classic()
-        );
+        assert_eq!(resolver.resolve_for(&standard).unwrap().unwrap(), classic());
 
         let mut sub = Subscription::default();
         sub.set_product(Product::Gaming);

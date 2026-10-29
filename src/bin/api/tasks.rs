@@ -18,7 +18,7 @@ use super::{
     service::{Cache, Service},
     subscription_audit,
     sync::tasks::{
-        SyncOp, publish_conn_delete, DELETE_REASON_DEVICE_KICK, DELETE_REASON_EXPIRED,
+        publish_conn_delete, SyncOp, DELETE_REASON_DEVICE_KICK, DELETE_REASON_EXPIRED,
         DELETE_REASON_TRAFFIC_EXHAUSTED,
     },
     traffic,
@@ -156,9 +156,9 @@ where
                 if traffic_mode_enabled {
                     let check = {
                         let mem = self.sync.memory.read().await;
-                        mem.subscriptions.find_by_id(&sub_id).map(|s| {
-                            (s.is_deleted(), s.limit_bytes(), s.time_expired())
-                        })
+                        mem.subscriptions
+                            .find_by_id(&sub_id)
+                            .map(|s| (s.is_deleted(), s.limit_bytes(), s.time_expired()))
                     };
                     if let Some((false, Some(_), true)) = check {
                         match self.sync.db.traffic().total_for_subscription(sub_id).await {
@@ -233,11 +233,7 @@ where
                     }
                 }
 
-                subscription_audit::log_subscription_expired(
-                    sub_id,
-                    expires_at,
-                    connections_count,
-                );
+                subscription_audit::log_subscription_expired(sub_id, expires_at, connections_count);
             }
         }
     }
@@ -262,8 +258,7 @@ where
                     .filter_map(|(id, sub)| {
                         if sub.is_active() {
                             Some((*id, false))
-                        } else if traffic_mode_enabled && !sub.is_deleted() && sub.time_expired()
-                        {
+                        } else if traffic_mode_enabled && !sub.is_deleted() && sub.time_expired() {
                             Some((*id, true))
                         } else {
                             None
@@ -299,7 +294,13 @@ where
                     None
                 };
 
-                match SyncOp::restore_connections_by_subscription(&self.sync, &sub_id, metered.as_deref()).await {
+                match SyncOp::restore_connections_by_subscription(
+                    &self.sync,
+                    &sub_id,
+                    metered.as_deref(),
+                )
+                .await
+                {
                     Ok(restored) => {
                         if !restored.is_empty() {
                             info!(
@@ -414,9 +415,9 @@ where
             for sub_id in subs {
                 let snapshot = {
                     let mem = self.sync.memory.read().await;
-                    mem.subscriptions.find_by_id(&sub_id).map(|s| {
-                        (s.plan_kind(), s.product(), s.is_active(), s.time_expired())
-                    })
+                    mem.subscriptions
+                        .find_by_id(&sub_id)
+                        .map(|s| (s.plan_kind(), s.product(), s.is_active(), s.time_expired()))
                 };
                 let Some((plan_kind, product, is_active, time_expired)) = snapshot else {
                     continue;
@@ -567,10 +568,7 @@ where
                             info!("Traffic-exhausted connection {} deleted", conn_id);
                         }
                         Ok(status) => {
-                            warn!(
-                                "Connection {} could not be deleted: {:?}",
-                                conn_id, status
-                            );
+                            warn!("Connection {} could not be deleted: {:?}", conn_id, status);
                         }
                         Err(e) => {
                             error!(
@@ -627,9 +625,7 @@ where
 
             // Keep the strike map small: drop entries for connections that
             // no longer exist or are deleted.
-            strikes.retain(|conn_id, _| {
-                lite_conns.iter().any(|(id, _, _)| id == conn_id)
-            });
+            strikes.retain(|conn_id, _| lite_conns.iter().any(|(id, _, _)| id == conn_id));
 
             for (conn_id, sub_id, conn) in lite_conns {
                 let online = self.metrics.get_connection_online_count(&conn_id);
@@ -707,10 +703,7 @@ where
                         info!("Device-kicked connection {} deleted", conn_id);
                     }
                     Ok(status) => {
-                        warn!(
-                            "Connection {} could not be deleted: {:?}",
-                            conn_id, status
-                        );
+                        warn!("Connection {} could not be deleted: {:?}", conn_id, status);
                     }
                     Err(e) => {
                         error!(
@@ -994,10 +987,15 @@ where
         let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
 
         tracing::info!(
-            "alerts: started (offline>{}s, recovery {}s, new node grace {}s)",
+            "alerts: started (offline>{}s, recovery {}s, new node grace {}s, flap>{}s x{} / {}s, cpu>{}% {}s)",
             cfg.offline_threshold_sec,
             cfg.recovery_grace_sec,
-            cfg.new_node_grace_sec
+            cfg.new_node_grace_sec,
+            cfg.flap_gap_sec,
+            cfg.flap_threshold,
+            cfg.flap_window_sec,
+            cfg.cpu_threshold_pct,
+            cfg.cpu_hold_sec
         );
 
         loop {
@@ -1042,59 +1040,76 @@ where
                     engine.seed(node_id, engine.is_alerted(&node_id));
                 }
 
-                let crate::alerts::Decision::Fire {
-                    kind,
-                    duration_sec,
-                    ..
+                let mut fires = Vec::new();
+                if let crate::alerts::Decision::Fire {
+                    kind, duration_sec, ..
                 } = engine.observe(node_id, &hostname, &env, heartbeat, now_ms)
-                else {
-                    continue;
-                };
+                {
+                    fires.push((kind, duration_sec));
+                }
+                // Правило CPU: смотрим текущую среднюю нагрузку ноды.
+                let cpu = self.metrics.node_cpu_avg(&node_id);
+                if let crate::alerts::Decision::Fire {
+                    kind, duration_sec, ..
+                } = engine.observe_cpu(node_id, &hostname, &env, cpu)
+                {
+                    fires.push((kind, duration_sec));
+                }
 
-                let text = crate::alerts::format_message(&kind, &hostname, &env, duration_sec);
-                let delivered = match (
-                    cfg.telegram_bot_token.as_deref(),
-                    cfg.telegram_chat_id.as_deref(),
-                ) {
-                    (Some(token), Some(chat)) => {
-                        match crate::alerts::send_telegram(&client, &cfg.telegram_api_base, token, chat, &text).await {
-                            Ok(()) => true,
-                            Err(e) => {
-                                tracing::error!("alerts: delivery failed: {e}");
-                                false
+                for (kind, duration_sec) in fires {
+                    let text = crate::alerts::format_message(&kind, &hostname, &env, duration_sec);
+                    let delivered = match (
+                        cfg.telegram_bot_token.as_deref(),
+                        cfg.telegram_chat_id.as_deref(),
+                    ) {
+                        (Some(token), Some(chat)) => {
+                            match crate::alerts::send_telegram(
+                                &client,
+                                &cfg.telegram_api_base,
+                                token,
+                                chat,
+                                &text,
+                            )
+                            .await
+                            {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::error!("alerts: delivery failed: {e}");
+                                    false
+                                }
                             }
                         }
-                    }
-                    _ => false,
-                };
+                        _ => false,
+                    };
 
-                tracing::info!(
-                    "alert {}: {} ({}) duration={}s delivered={}",
-                    kind.as_str(),
-                    hostname,
-                    env,
-                    duration_sec,
-                    delivered
-                );
-
-                let details = serde_json::json!({ "hostname": hostname, "env": env });
-                if let Err(e) = self
-                    .sync
-                    .db
-                    .alerts()
-                    .record(
+                    tracing::info!(
+                        "alert {}: {} ({}) duration={}s delivered={}",
                         kind.as_str(),
-                        Some(node_id),
-                        Some(&hostname),
-                        Some(&env),
+                        hostname,
+                        env,
                         duration_sec,
-                        delivered,
-                        &details,
-                        chrono::Utc::now(),
-                    )
-                    .await
-                {
-                    tracing::error!("alerts: cannot record event: {e}");
+                        delivered
+                    );
+
+                    let details = serde_json::json!({ "hostname": hostname, "env": env });
+                    if let Err(e) = self
+                        .sync
+                        .db
+                        .alerts()
+                        .record(
+                            kind.as_str(),
+                            Some(node_id),
+                            Some(&hostname),
+                            Some(&env),
+                            duration_sec,
+                            delivered,
+                            &details,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                    {
+                        tracing::error!("alerts: cannot record event: {e}");
+                    }
                 }
             }
         }

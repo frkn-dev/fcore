@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use tracing::Instrument;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use tracing::Instrument;
 use uuid::Uuid;
 use warp::{http::StatusCode, Rejection, Reply};
 
@@ -208,9 +208,7 @@ where
 
     if let Err(e) = req.validate() {
         return Ok(Box::new(warp::reply::with_status(
-            warp::reply::json(
-                &serde_json::json!({"status": 400, "message": e}),
-            ),
+            warp::reply::json(&serde_json::json!({"status": 400, "message": e})),
             warp::http::StatusCode::BAD_REQUEST,
         )));
     }
@@ -278,17 +276,13 @@ where
 
     subscription_audit::log_transaction_start(child_id, req.days);
 
-    match SyncOp::update_sub(
-        &memory,
-        &child_id,
-        update_req,
-    )
-    .instrument(subscription_audit::transaction_span(
-        "premium_update_child_handler",
-        child_id,
-        Some(trace_id),
-    ))
-    .await
+    match SyncOp::update_sub(&memory, &child_id, update_req)
+        .instrument(subscription_audit::transaction_span(
+            "premium_update_child_handler",
+            child_id,
+            Some(trace_id),
+        ))
+        .await
     {
         Ok(_) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({ "id": child_id })),
@@ -320,9 +314,10 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
     let mem = memory.memory.read().await;
-    let child = mem.subscriptions.find_by_id(&child_id).ok_or_else(|| {
-        warp::reject::custom(fcore::Error::Custom("Child not found".to_string()))
-    })?;
+    let child = mem
+        .subscriptions
+        .find_by_id(&child_id)
+        .ok_or_else(|| warp::reject::custom(fcore::Error::Custom("Child not found".to_string())))?;
     ensure_child_of(&parent, child)?;
 
     let conns = mem.connections.get_by_subscription_id(&child_id);
@@ -463,7 +458,9 @@ where
     };
 
     let conn_id = Uuid::new_v4();
-    let expires_at = req.days.map(|d| Utc::now() + chrono::Duration::days(d as i64));
+    let expires_at = req
+        .days
+        .map(|d| Utc::now() + chrono::Duration::days(d as i64));
     let conn = Connection::new(&req.env, Some(child_id), proto, expires_at);
 
     match SyncOp::add_conn(&memory, &conn_id, conn.clone(), None, None, None, true).await {
@@ -493,16 +490,19 @@ where
                 StatusCode::CREATED,
             ))
         }
-        Ok(Status::BadRequest(id, msg)) => Ok(http::bad_request(&format!(
-            "BadRequest {} {}",
-            id, msg
-        ))),
+        Ok(Status::BadRequest(id, msg)) => {
+            Ok(http::bad_request(&format!("BadRequest {} {}", id, msg)))
+        }
         Ok(status) => Ok(http::bad_request(&format!(
             "Unsupported operation status: {}",
             status
         ))),
         Err(err) => {
-            tracing::error!("Internal error while processing connection {}: {}", conn_id, err);
+            tracing::error!(
+                "Internal error while processing connection {}: {}",
+                conn_id,
+                err
+            );
             Ok(http::internal_error(&format!(
                 "Internal error while processing connection {}: {}",
                 conn_id, err
@@ -534,9 +534,9 @@ where
         let conn = mem.connections.get(&conn_id).ok_or_else(|| {
             warp::reject::custom(fcore::Error::Custom("Connection not found".to_string()))
         })?;
-        let sub_id = conn
-            .get_subscription_id()
-            .ok_or_else(|| warp::reject::custom(fcore::Error::Custom("Invalid connection".to_string())))?;
+        let sub_id = conn.get_subscription_id().ok_or_else(|| {
+            warp::reject::custom(fcore::Error::Custom("Invalid connection".to_string()))
+        })?;
         let child = mem.subscriptions.find_by_id(&sub_id).ok_or_else(|| {
             warp::reject::custom(fcore::Error::Custom("Subscription not found".to_string()))
         })?;
