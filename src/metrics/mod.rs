@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub(crate) mod impls;
+
+pub use impls::process_uptime_secs;
 pub(crate) mod snapshot;
 pub(crate) mod storage;
 

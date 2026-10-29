@@ -30,6 +30,10 @@ pub struct MetricsTxConfig {
     pub enabled: bool,
     #[serde(default = "default_metrics_endpoint")]
     pub endpoint: String,
+
+    /// Токен для /healthcheck на ноде. Пусто — ручка закрыта (404).
+    #[serde(default)]
+    pub healthcheck_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

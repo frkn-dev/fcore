@@ -287,10 +287,11 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
             .parse::<std::net::SocketAddr>()
             .expect("Invalid metrics.endpoint address");
         let node = node.clone();
+        let healthcheck_token = settings.metrics.healthcheck_token.clone();
         let mut shutdown = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             info!("Node metrics HTTP server listening on {}", addr);
-            let routes = crate::metrics_http::routes(node);
+            let routes = crate::metrics_http::routes(node, healthcheck_token);
             let (_, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async move {
                 let _ = shutdown.recv().await;
             });

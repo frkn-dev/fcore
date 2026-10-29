@@ -10,6 +10,12 @@ use super::Metrics;
 
 static BEAT_INDEX: OnceLock<AtomicUsize> = OnceLock::new();
 
+/// Сколько секунд работает процесс (для /healthcheck).
+pub fn process_uptime_secs() -> f64 {
+    let started = *START.get_or_init(std::time::Instant::now);
+    started.elapsed().as_secs_f64()
+}
+
 /// Момент старта процесса — чтобы api видел перезапуски ноды.
 static START: OnceLock<std::time::Instant> = OnceLock::new();
 
