@@ -19,8 +19,12 @@ use super::pg::PgClientManager;
 /// Ретенция сырых наблюдений.
 pub const BLOCK_OBSERVATION_RETENTION_DAYS: i64 = 30;
 
-/// Состояния проб, которые считаем «цель недоступна».
-pub const FAIL_STATES: &[&str] = &["timeout", "refused", "no-answer", "err", "no-host"];
+/// Состояния проб, которые считаем «цель недоступна» без оговорок.
+///
+/// `no-answer` сюда НЕ входит: для UDP (AWG/WireGuard) сервер молча дропает
+/// любой пакет, кроме валидного handshake, поэтому «нет ответа» на голую
+/// датаграмму — норма, а не блокировка. Такие пробы считаем неопределёнными.
+pub const FAIL_STATES: &[&str] = &["timeout", "refused", "err", "no-host"];
 /// Состояния «цель отвечает».
 pub const OK_STATES: &[&str] = &["open", "answered"];
 
@@ -318,8 +322,14 @@ impl PgReport {
                    count(*)::BIGINT AS observations,
                    count(DISTINCT asn)::BIGINT AS distinct_asn,
                    count(DISTINCT ip_hash)::BIGINT AS distinct_clients,
-                   count(*) FILTER (WHERE state = ANY($5))::BIGINT AS fail_count,
+                   count(*) FILTER (
+                       WHERE state = ANY($5)
+                          OR (state = 'no-answer' AND lower(coalesce(transport, 'tcp')) = 'tcp')
+                   )::BIGINT AS fail_count,
                    count(*) FILTER (WHERE state = ANY($6))::BIGINT AS ok_count,
+                   count(*) FILTER (
+                       WHERE state = 'no-answer' AND lower(coalesce(transport, 'udp')) <> 'tcp'
+                   )::BIGINT AS inconclusive_count,
                    count(*) FILTER (WHERE state = 'skipped')::BIGINT AS skipped_count,
                    count(*) FILTER (WHERE icmp_ok IS FALSE)::BIGINT AS icmp_fail,
                    min(created_at) AS first_at,
@@ -355,7 +365,7 @@ impl PgReport {
                     0.0
                 };
                 // Вердикт считается здесь, а не в часовом роллапе: окно скользящее.
-                let verdict = if distinct_asn >= 3 && ratio >= 0.8 {
+                let verdict = if distinct_asn >= 3 && fail_count >= 5 && ratio >= 0.8 {
                     "blocked"
                 } else if distinct_clients >= 5 && fail_count >= 5 && ratio >= 0.8 {
                     "blocked_single_asn"
@@ -370,10 +380,12 @@ impl PgReport {
                     "fail": fail_count,
                     "ok": ok_count,
                     "skipped": r.get::<_, i64>("skipped_count"),
+                    "inconclusive": r.get::<_, i64>("inconclusive_count"),
                     "icmp_fail": r.get::<_, i64>("icmp_fail"),
                     "first_at": r.get::<_, DateTime<Utc>>("first_at"),
                     "last_at": r.get::<_, DateTime<Utc>>("last_at"),
                     "fail_ratio": (ratio * 100.0).round() / 100.0,
+                    "judged": judged,
                     "verdict": verdict,
                 })
             })
