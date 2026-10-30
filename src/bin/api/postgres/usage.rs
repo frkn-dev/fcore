@@ -140,12 +140,33 @@ impl PgUsage {
         let touched = client
             .execute(
                 r#"
+                WITH src AS (
+                    SELECT * FROM UNNEST($3::uuid[], $4::uuid[], $5::text[], $6::text[],
+                                          $7::int[], $8::text[], $9::text[])
+                        AS t(s, n, p, pre, a, c, h)
+                ),
+                -- Конфликтный ключ — (day, node_id, subscription_id, entry_prefix),
+                -- а в батче легко оказываются ДВА разных адреса из одной /24 (разный
+                -- хеш) или несколько коннектов подписки с одного префикса. Без
+                -- свёртки Postgres отвечает «ON CONFLICT DO UPDATE command cannot
+                -- affect row a second time», и не пишется ничего.
+                agg AS (
+                    SELECT n,
+                           s,
+                           max(p) AS p,
+                           pre,
+                           max(a) AS a,
+                           max(c) AS c,
+                           max(h) AS h,
+                           count(*)::bigint AS cnt
+                    FROM src
+                    GROUP BY n, s, pre
+                )
                 INSERT INTO entry_usage (day, node_id, subscription_id, proto, entry_prefix, asn, country, ip_hash, samples, last_seen)
-                SELECT $1::date, n, s, p, pre::cidr, a, c::char(2), h, 1, $2
-                FROM UNNEST($3::uuid[], $4::uuid[], $5::text[], $6::text[], $7::int[], $8::text[], $9::text[])
-                     AS t(s, n, p, pre, a, c, h)
+                SELECT $1::date, n, s, p, pre::cidr, a, c::char(2), h, cnt, $2
+                FROM agg
                 ON CONFLICT (day, node_id, subscription_id, entry_prefix)
-                DO UPDATE SET samples = entry_usage.samples + 1,
+                DO UPDATE SET samples = entry_usage.samples + EXCLUDED.samples,
                               last_seen = EXCLUDED.last_seen,
                               asn = COALESCE(EXCLUDED.asn, entry_usage.asn),
                               country = COALESCE(EXCLUDED.country, entry_usage.country)
