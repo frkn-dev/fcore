@@ -106,7 +106,7 @@ pub struct GatewayCountry {
     pub pool_translation: Option<BTreeMap<String, String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GatewayConnection {
     #[serde(rename = "connection_uuid")]
     pub connection_uuid: uuid::Uuid,
@@ -134,6 +134,11 @@ pub struct GatewayConnection {
     /// Per-language translations of `pool`; absent when there is none.
     #[serde(rename = "pool_translation", skip_serializing_if = "Option::is_none")]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Приоритет ноды внутри пула: больше — предпочтительнее. Клиент
+    /// сортирует пул по весу (убывание), затем по задержке. 0 — нейтрально,
+    /// отрицательный вес = нода нежелательна, но остаётся рабочей.
+    #[serde(rename = "weight")]
+    pub weight: i32,
     #[serde(rename = "config_rev", skip_serializing_if = "Option::is_none")]
     pub config_rev: Option<String>,
 }
@@ -562,6 +567,7 @@ where
                             node_ips: None,
                             pool: Some(pool.clone()),
                             pool_translation: node.pool_translation.clone(),
+                            weight: node.weight,
                             config_rev: None,
                         });
                         continue;
@@ -597,6 +603,7 @@ where
                     },
                     pool: node.pool.clone(),
                     pool_translation: node.pool_translation.clone(),
+                    weight: node.weight,
                     config_rev: config_rev(node, tag, &ips),
                 });
             }
@@ -629,6 +636,7 @@ where
             node_ips: None,
             pool: None,
             pool_translation: None,
+            weight: 0,
             config_rev: None,
         }];
     }
@@ -2042,6 +2050,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            weight: 0,
             config_rev: None,
         };
         // Single-address node without a pool: both optional fields are omitted
@@ -2050,6 +2059,15 @@ mod tests {
         assert!(v.get("node_ips").is_none());
         assert!(v.get("pool").is_none());
         assert!(v.get("pool_translation").is_none());
+        // Вес отдаётся всегда (0 = нейтрально): клиент по нему сортирует пул.
+        assert_eq!(v["weight"], serde_json::json!(0));
+
+        let weighted = GatewayConnection {
+            weight: 50,
+            ..base.clone()
+        };
+        let v = serde_json::to_value(&weighted).unwrap();
+        assert_eq!(v["weight"], serde_json::json!(50));
 
         let multi = GatewayConnection {
             node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
@@ -2085,6 +2103,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            weight: 0,
         };
         let rev = config_rev(&node, Tag::Wireguard, &[]).unwrap();
         assert_eq!(
@@ -2136,6 +2155,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             ),
+            weight: 0,
             config_rev: None,
         };
         let v = serde_json::to_value(&base).unwrap();
@@ -2344,6 +2364,7 @@ mod tests {
                 node_ips: Some(ips),
                 pool: pool.map(|s| s.to_string()),
                 pool_translation: None,
+                weight: 0,
             }
         }
 

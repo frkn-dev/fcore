@@ -39,6 +39,10 @@ pub struct NodeRequest {
     /// Optional per-language translations of `pool`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Приоритет ноды в пуле (config.toml `[node] weight`). Старые api
+    /// игнорируют неизвестное поле.
+    #[serde(default)]
+    pub weight: i32,
 }
 
 #[async_trait]
@@ -167,6 +171,7 @@ where
             node_ips: node.node_ips.clone(),
             pool: node.pool.clone(),
             pool_translation: node.pool_translation.clone(),
+            weight: node.weight,
         };
 
         let res = HttpClient::new()

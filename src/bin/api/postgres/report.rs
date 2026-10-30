@@ -59,6 +59,10 @@ pub struct Observation {
     pub country_code: Option<String>,
     pub asn: Option<i32>,
     pub client_country: Option<String>,
+    /// Оператор клиента по AS («MegaFon»), из GeoLite2-ASN.
+    pub client_org: Option<String>,
+    /// Город клиента («Vladivostok»), из GeoLite2-City.
+    pub client_city: Option<String>,
     pub ip_prefix: Option<String>,
     pub ip_hash: Option<Vec<u8>>,
     pub observed_at: DateTime<Utc>,
@@ -110,6 +114,8 @@ impl PgReport {
                     country_code     char(2),
                     asn              int,
                     client_country   char(2),
+                    client_org       text,
+                    client_city      text,
                     ip_prefix        cidr,
                     ip_hash          bytea,
                     observed_at      timestamptz NOT NULL,
@@ -158,12 +164,13 @@ impl PgReport {
                     id, subscription_id, source, batch_id, support_tag, app_version,
                     platform, os, target_host, address, node_id, node_host, port,
                     protocol, transport, state, rtt_ms, icmp_ok, probe, session,
-                    country_code, asn, client_country, ip_prefix, ip_hash, observed_at,
+                    country_code, asn, client_country, client_org, client_city,
+                    ip_prefix, ip_hash, observed_at,
                     app, device, network, target_country, error, note
                 ) VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::inet,$11,$12,$13,$14,$15,$16,$17,$18,
-                    $19,$20,$21::text::char(2),$22,$23::text::char(2),$24::text::cidr,$25,$26,
-                    $27,$28,$29,$30,$31,$32
+                    $19,$20,$21::text::char(2),$22,$23,$24,$25::text::cidr,$26,$27,
+                    $28,$29,$30,$31,$32,$33
                 )
                 ON CONFLICT (id) DO NOTHING
                 "#,
@@ -191,6 +198,8 @@ impl PgReport {
                     &row.country_code,
                     &row.asn,
                     &row.client_country,
+                    &row.client_org,
+                    &row.client_city,
                     &row.ip_prefix,
                     &row.ip_hash,
                     &row.observed_at,
@@ -306,7 +315,8 @@ impl PgReport {
                 r#"
                 SELECT created_at, source, subscription_id, support_tag, app_version, platform,
                        target_host, host(address) AS addr, port, protocol, transport, state,
-                       rtt_ms, icmp_ok, node_host, asn, client_country, target_country,
+                       rtt_ms, icmp_ok, node_host, asn, client_country,
+                       client_org, client_city, target_country,
                        note, error
                 FROM block_observations
                 WHERE ($1::uuid IS NULL OR subscription_id = $1)
@@ -339,6 +349,8 @@ impl PgReport {
                     "node_host": r.get::<_, Option<String>>("node_host"),
                     "asn": r.get::<_, Option<i32>>("asn"),
                     "client_country": r.get::<_, Option<String>>("client_country"),
+                    "client_org": r.get::<_, Option<String>>("client_org"),
+                    "client_city": r.get::<_, Option<String>>("client_city"),
                     "target_country": r.get::<_, Option<String>>("target_country"),
                     "note": r.get::<_, Option<String>>("note"),
                     "error": r.get::<_, Option<serde_json::Value>>("error"),

@@ -164,6 +164,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            weight: 0,
         }
     }
 

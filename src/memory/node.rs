@@ -129,6 +129,9 @@ pub struct NodeResponse {
     pub node_ips: Option<Vec<Ipv4Addr>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
+    /// Приоритет ноды в пуле (config.toml `[node] weight`). 0 — нейтрально.
+    #[serde(default)]
+    pub weight: i32,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -177,6 +180,11 @@ pub struct Node {
     /// falls back to `pool`; an absent map means there is no translation.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Приоритет ноды в пуле: больше — предпочтительнее. Участвует в
+    /// derived PartialEq, поэтому смена веса в конфиге регистрируется как
+    /// обновление ноды (без перезапуска api).
+    #[serde(default)]
+    pub weight: i32,
 }
 
 impl Node {
@@ -301,6 +309,7 @@ impl Node {
             node_ips: settings.node_ips,
             pool: settings.pool,
             pool_translation: settings.pool_translation,
+            weight: settings.weight,
         }
     }
 
@@ -348,6 +357,7 @@ impl Node {
             cluster: self.cluster.clone(),
             node_ips: self.node_ips.clone(),
             pool: self.pool.clone(),
+            weight: self.weight,
         }
     }
 
@@ -412,6 +422,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            weight: 0,
         };
 
         let response = node.as_node_response();

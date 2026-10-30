@@ -69,7 +69,11 @@ where
         // Оффлайн geo-базы: без них телеметрия блокировок работает, но без
         // ASN/страны — вердикты не срабатывают, поэтому шумим в лог.
         if let Some(asn_path) = settings.service.geoip_asn_path.as_deref() {
-            match fcore::geoip::init(asn_path, settings.service.geoip_country_path.as_deref()) {
+            match fcore::geoip::init(
+                asn_path,
+                settings.service.geoip_country_path.as_deref(),
+                settings.service.geoip_city_path.as_deref(),
+            ) {
                 Ok(()) => tracing::info!("geoip: ASN db loaded from {asn_path}"),
                 Err(e) => tracing::warn!("geoip: disabled ({e})"),
             }

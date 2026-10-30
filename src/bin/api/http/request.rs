@@ -180,6 +180,10 @@ pub struct NodeRequest {
     /// binaries omit it, so old clients keep the previous behavior.
     #[serde(default)]
     pub pool: Option<String>,
+    /// Приоритет ноды в пуле (config.toml `[node] weight`). Старые бинари
+    /// ноды поле не шлют — тогда вес 0 (нода равноправна).
+    #[serde(default)]
+    pub weight: i32,
     /// Optional per-language translations of `pool` (en/ru/uk/...); `ua` is
     /// accepted as an alias of `uk`.
     #[serde(default)]
@@ -239,6 +243,7 @@ impl NodeRequest {
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty()),
             pool_translation: normalize_pool_translation(self.pool_translation.clone()),
+            weight: self.weight,
         }
     }
 }

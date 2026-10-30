@@ -58,6 +58,9 @@ pub struct NodeConfig {
     pub pool: Option<String>,
     /// Per-language translations of `pool` (e.g. en/ru/uk).
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Приоритет ноды в пуле: больше — предпочтительнее. Клиент сортирует
+    /// пул сначала по весу, потом по задержке/скору. 0 — нейтрально.
+    pub weight: i32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -84,6 +87,10 @@ pub struct NodeConfigRaw {
     /// and `ua` is accepted as an alias of `uk`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Приоритет ноды в пуле (config.toml `[node] weight`). Отсутствует =
+    /// 0, то есть нода равноправна с остальными.
+    #[serde(default)]
+    pub weight: i32,
 }
 
 /// Trims the configured pool name and treats a blank value as absent.
@@ -149,6 +156,7 @@ impl NodeConfig {
             node_ips: raw.node_ips,
             pool: normalize_pool(raw.pool),
             pool_translation: normalize_pool_translation(raw.pool_translation),
+            weight: raw.weight,
         })
     }
 }

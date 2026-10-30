@@ -416,7 +416,8 @@ where
         _ => (None, None),
     };
 
-    let (asn, client_country) = fcore::geoip::lookup(ip);
+    let geo = fcore::geoip::lookup_full(ip);
+    let (asn, client_country) = (geo.asn, geo.country.clone());
     let (app_version, platform, os) = app_fields(&req.report.app);
     let batch_id = batch_uuid(&req.report_id, sub_id);
 
@@ -464,6 +465,8 @@ where
             .or_else(|| opt_trimmed(&target.country_code, 3)),
         asn: asn.map(|v| v as i32),
         client_country,
+        client_org: geo.org.clone(),
+        client_city: geo.city.clone(),
         ip_prefix: ip_prefix(ip),
         ip_hash: Some(ip_hash(ip, b"frkn-block-telemetry-v1")),
         observed_at,
@@ -569,7 +572,8 @@ where
         Err(e) => return Ok(json_status(400, &e)),
     };
 
-    let (asn, client_country) = fcore::geoip::lookup(ip);
+    let geo = fcore::geoip::lookup_full(ip);
+    let (asn, client_country) = (geo.asn, geo.country.clone());
     let (app_version, platform, os) = app_fields(&req.scan.app);
     let batch_id = batch_uuid(&req.scan_id, sub_id);
     let support_tag = opt_trimmed(&req.scan.support_tag, 64);
@@ -644,6 +648,8 @@ where
             country_code: None,
             asn: asn.map(|v| v as i32),
             client_country: client_country.clone(),
+            client_org: geo.org.clone(),
+            client_city: geo.city.clone(),
             ip_prefix: ip_prefix(ip),
             ip_hash: Some(ip_hash(ip, b"frkn-block-telemetry-v1")),
             observed_at,

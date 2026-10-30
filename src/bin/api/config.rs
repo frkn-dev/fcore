@@ -170,6 +170,9 @@ pub struct ServiceConfig {
     pub geoip_asn_path: Option<String>,
     #[serde(default)]
     pub geoip_country_path: Option<String>,
+    /// City-база: даёт город клиента («Владивосток»). Опциональна.
+    #[serde(default)]
+    pub geoip_city_path: Option<String>,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     /// Connections created for lite (traffic-only) key activations, same
