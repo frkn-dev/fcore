@@ -68,6 +68,27 @@ pub struct Observation {
     pub observed_at: DateTime<Utc>,
 }
 
+/// Один INSERT на строку наблюдения.
+///
+/// Вынесен в константу, чтобы тест сверял число колонок с числом
+/// параметров: при добавлении колонки легко забыть продлить `$N`, и тогда
+/// каждый отчёт отвечает 500 «db error» — ошибка видна только в проде.
+const INSERT_OBSERVATION_SQL: &str = r#"
+                INSERT INTO block_observations (
+                    id, subscription_id, source, batch_id, support_tag, app_version,
+                    platform, os, target_host, address, node_id, node_host, port,
+                    protocol, transport, state, rtt_ms, icmp_ok, probe, session,
+                    country_code, asn, client_country, client_org, client_city,
+                    ip_prefix, ip_hash, observed_at,
+                    app, device, network, target_country, error, note
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::inet,$11,$12,$13,$14,$15,$16,$17,$18,
+                    $19,$20,$21::text::char(2),$22,$23,$24,$25::text::cidr,$26,$27,
+                    $28,$29,$30,$31,$32,$33,$34
+                )
+                ON CONFLICT (id) DO NOTHING
+                "#;
+
 pub struct PgReport {
     pub manager: Arc<Mutex<PgClientManager>>,
 }
@@ -159,21 +180,7 @@ impl PgReport {
 
         for row in rows {
             tx.execute(
-                r#"
-                INSERT INTO block_observations (
-                    id, subscription_id, source, batch_id, support_tag, app_version,
-                    platform, os, target_host, address, node_id, node_host, port,
-                    protocol, transport, state, rtt_ms, icmp_ok, probe, session,
-                    country_code, asn, client_country, client_org, client_city,
-                    ip_prefix, ip_hash, observed_at,
-                    app, device, network, target_country, error, note
-                ) VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::inet,$11,$12,$13,$14,$15,$16,$17,$18,
-                    $19,$20,$21::text::char(2),$22,$23,$24,$25::text::cidr,$26,$27,
-                    $28,$29,$30,$31,$32,$33
-                )
-                ON CONFLICT (id) DO NOTHING
-                "#,
+                INSERT_OBSERVATION_SQL,
                 &[
                     &row.id,
                     &row.subscription_id,
@@ -476,5 +483,44 @@ impl PgReport {
             .await?;
 
         Ok(deleted)
+    }
+}
+
+#[cfg(test)]
+mod sql_shape_tests {
+    use super::INSERT_OBSERVATION_SQL;
+
+    /// Число колонок, число `$N` и непрерывность нумерации должны совпадать:
+    /// иначе Postgres отвечает ошибкой уже в проде, а не в тестах.
+    #[test]
+    fn insert_observation_sql_columns_match_params() {
+        let cols_part = INSERT_OBSERVATION_SQL
+            .split("INSERT INTO block_observations (")
+            .nth(1)
+            .expect("список колонок")
+            .split(')')
+            .next()
+            .expect("конец списка колонок");
+        let cols = cols_part.split(',').filter(|c| !c.trim().is_empty()).count();
+
+        // `$N` встречаются только в списке значений, поэтому берём весь запрос.
+        let mut nums: Vec<u32> = Vec::new();
+        let mut rest = INSERT_OBSERVATION_SQL;
+        while let Some(pos) = rest.find('$') {
+            rest = &rest[pos + 1..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u32>() {
+                nums.push(n);
+            }
+        }
+        nums.sort_unstable();
+        nums.dedup();
+
+        assert_eq!(cols, nums.len(), "колонок {cols}, параметров {}", nums.len());
+        assert_eq!(
+            nums,
+            (1..=nums.len() as u32).collect::<Vec<_>>(),
+            "нумерация параметров должна быть непрерывной"
+        );
     }
 }
