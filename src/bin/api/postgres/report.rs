@@ -83,7 +83,7 @@ const INSERT_OBSERVATION_SQL: &str = r#"
                     app, device, network, target_country, error, note
                 ) VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::inet,$11,$12,$13,$14,$15,$16,$17,$18,
-                    $19,$20,$21::text::char(2),$22,$23,$24,$25::text::cidr,$26,$27,
+                    $19,$20,$21::text::char(2),$22,$23,$24,$25,$26::text::cidr,$27,
                     $28,$29,$30,$31,$32,$33,$34
                 )
                 ON CONFLICT (id) DO NOTHING
@@ -522,5 +522,67 @@ mod sql_shape_tests {
             (1..=nums.len() as u32).collect::<Vec<_>>(),
             "нумерация параметров должна быть непрерывной"
         );
+    }
+}
+
+#[cfg(test)]
+mod sql_cast_tests {
+    use super::INSERT_OBSERVATION_SQL;
+
+    /// Каст `::text::cidr` / `::text::char(2)` должен стоять именно на колонке
+    /// этого типа. При вставке новой колонки в середину списка номер сдвигается,
+    /// а каст остаётся на старом месте — Postgres тогда отвечает
+    /// `error serializing parameter N` и каждый отчёт получает 500.
+    #[test]
+    fn casts_match_column_types() {
+        let cols_part = INSERT_OBSERVATION_SQL
+            .split("INSERT INTO block_observations (")
+            .nth(1)
+            .expect("колонки")
+            .split(')')
+            .next()
+            .expect("конец колонок");
+        let cols: Vec<&str> = cols_part
+            .split(',')
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
+
+        let values_part = INSERT_OBSERVATION_SQL
+            .split(") VALUES (")
+            .nth(1)
+            .expect("значения");
+
+        // Собираем «номер параметра -> каст», идущий сразу за ним.
+        let mut casts: Vec<(usize, &str)> = Vec::new();
+        let mut rest = values_part;
+        let mut offset = 0usize;
+        while let Some(pos) = rest.find('$') {
+            let abs = offset + pos;
+            rest = &rest[pos + 1..];
+            offset = abs + 1;
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let Ok(num) = digits.parse::<usize>() else {
+                continue;
+            };
+            let after = &rest[digits.len()..];
+            let after = after.trim_start();
+            if let Some(cast) = after.strip_prefix("::text::") {
+                let name: String = cast.chars().take_while(|c| c.is_alphanumeric() || *c == '(' || *c == ')').collect();
+                casts.push((num, Box::leak(name.into_boxed_str())));
+            }
+        }
+
+        for (num, cast) in casts {
+            let col = cols
+                .get(num - 1)
+                .unwrap_or_else(|| panic!("параметр ${num} вне списка колонок"));
+            let ok = match cast {
+                "cidr" => col.ends_with("_prefix") || *col == "address",
+                "char(2)" => col.ends_with("country") || col.ends_with("country_code"),
+                other => panic!("неизвестный каст {other} на колонке {col}"),
+            };
+            assert!(ok, "каст ::{cast} стоит на колонке {col} (параметр ${num})");
+        }
     }
 }
