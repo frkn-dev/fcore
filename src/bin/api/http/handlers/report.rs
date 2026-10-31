@@ -782,6 +782,27 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    // Что реально пришло: без этой строки не видно, какую ветку выбрал
+    // диспетчер и почему «202, а в базе пусто». Пишем только имена ключей
+    // и версию приложения — значения содержат api_key и support_tag.
+    {
+        let keys: Vec<String> = body
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        tracing::info!(
+            event = "report_received",
+            keys = ?keys,
+            has_report = body.get("report").map(|v| v.is_object()).unwrap_or(false),
+            has_scan = body.get("scan").map(|v| v.is_object()).unwrap_or(false),
+            targets = body.get("targets").and_then(|v| v.as_array()).map(|a| a.len()),
+            attempts = body.get("attempts").and_then(|v| v.as_array()).map(|a| a.len()),
+            mode = body.get("mode").and_then(|m| m.as_str()),
+            app = body.get("app").and_then(|a| a.get("version")).and_then(|v| v.as_str()),
+            "отчёт получен"
+        );
+    }
+
     // Старые форматы узнаём по вложенному объекту: `report` — одиночный
     // отчёт, `scan` — срез «Check all servers». Идём прежними путями, чтобы
     // поведение старых клиентов не менялось ни на байт. `report_id` есть в
