@@ -126,6 +126,19 @@ pub struct GatewayConnection {
     /// Absent for single-address nodes so old clients see the old shape.
     #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
     pub node_ips: Option<Vec<String>>,
+    /// Порт конкретного адреса пула: `{"93.89.220.48": 443, "77.221.152.88": 8443}`.
+    ///
+    /// Ключ — адрес из `node_ips`, значение — порт, на котором этот адрес
+    /// слушает **свой** протокол. Внутри одной ноды адреса делят один
+    /// интерфейс, поэтому один порт; между нодами пула порты могут различаться.
+    ///
+    /// `node_ips` остаётся единственным списком адресов — карта только
+    /// дополняет его портами. Клиент (`servers_model.cpp::portForNodeIp`)
+    /// читает `node_ports[ip]`, а при отсутствии ключа берёт порт протокола,
+    /// поэтому старая сборка api (поле не приходит) и нода с обычным портом
+    /// ведут себя одинаково.
+    #[serde(rename = "node_ports", skip_serializing_if = "Option::is_none")]
+    pub node_ports: Option<BTreeMap<String, u16>>,
     /// Pool/group name of the node (config.toml `[node] pool`). Clients
     /// group identically-named nodes and may localize the title via
     /// `pool_translation`. Absent for old nodes.
@@ -269,6 +282,10 @@ pub struct GatewayConfigResponse {
     /// single-address nodes so old clients see the old shape.
     #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
     pub node_ips: Option<Vec<String>>,
+    /// Порт конкретного адреса — та же карта, что в `/v1/services`, чтобы
+    /// клиент не собирал её из двух ответов.
+    #[serde(rename = "node_ports", skip_serializing_if = "Option::is_none")]
+    pub node_ports: Option<BTreeMap<String, u16>>,
     #[serde(rename = "config_rev", skip_serializing_if = "Option::is_none")]
     pub config_rev: Option<String>,
 }
@@ -406,6 +423,37 @@ pub(crate) fn config_rev(node: &fcore::Node, tag: Tag, ips: &[String]) -> Option
     Some(format!("{:x}", hasher.finalize()))
 }
 
+/// Версия конфига карточки пула.
+///
+/// Хеширует **все** точки входа, а не одну ноду-представителя: у членов пула
+/// порты могут быть разными, и смена порта у любого из них обязана поднять
+/// версию, иначе клиент останется на старом адресе и будет дозваниваться не
+/// туда.
+///
+/// Серверный материал входит в хеш наравне с адресами — ровно как в
+/// `config_rev`. Без него смена ключа или obfuscation не поднимала бы версию, и
+/// клиенты продолжали бы работать на старом конфиге, пока их не переустановят.
+fn config_rev_pool(members: &[&fcore::Node], tag: Tag, ports: &BTreeMap<String, u16>) -> String {
+    let servers: Vec<serde_json::Value> = members
+        .iter()
+        .filter_map(|node| {
+            let inbound = node.inbounds.get(&tag)?;
+            Some(serde_json::json!({
+                "uuid": node.uuid,
+                "host": node.connection_host(),
+                "server": server_material(inbound),
+            }))
+        })
+        .collect();
+    let body = serde_json::json!({
+        "ports": ports,
+        "servers": servers,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(body.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 fn server_material(inbound: &fcore::Inbound) -> serde_json::Value {
     let awg = inbound.awg.as_ref().map(|awg| {
         serde_json::json!({
@@ -472,11 +520,44 @@ fn entry_ips(node: &fcore::Node) -> Vec<String> {
         .unwrap_or_else(|| vec![node.address.to_string()])
 }
 
-pub(crate) fn pooled_entry_ips<N: NodeStorageOperations>(
+/// Адреса одной ноды с её портом.
+///
+/// `node_ips` — это адреса одного интерфейса, поэтому порт у них общий.
+/// Пустой список означает одиночный `address`.
+fn node_ports_of_node(node: &fcore::Node, port: u16) -> Vec<(String, u16)> {
+    let ips: Vec<String> = node
+        .node_ips
+        .as_ref()
+        .map(|ips| ips.iter().map(|ip| ip.to_string()).collect())
+        .filter(|ips: &Vec<String>| !ips.is_empty())
+        .unwrap_or_else(|| vec![node.address.to_string()]);
+    ips.into_iter().map(|ip| (ip, port)).collect()
+}
+
+/// Все точки входа пула: по записи на каждый IP каждой онлайн-ноды.
+///
+/// Порядок детерминированный (по uuid ноды, затем по порядку `node_ips`), чтобы
+/// ответ и хеш версии не дрожали между рестартами на HashMap-обходе.
+pub(crate) fn pooled_node_ports<N: NodeStorageOperations>(
     nodes: &N,
     env: &fcore::Env,
     pool: &str,
-) -> Vec<String> {
+    tag: Tag,
+) -> BTreeMap<String, u16> {
+    let members = pool_members(nodes, env, pool);
+    node_ports_of_members(&members, tag)
+}
+
+/// Онлайн-члены пула, в стабильном порядке (по uuid).
+///
+/// Отдельная функция нужна, чтобы `node_ips` и `node_ports` считались по одному
+/// и тому же составу: иначе старый клиент (он видит только `node_ips`) и новый
+/// (видит оба) получали бы разные пулы.
+fn pool_members<'a, N: NodeStorageOperations>(
+    nodes: &'a N,
+    env: &fcore::Env,
+    pool: &str,
+) -> Vec<&'a fcore::Node> {
     let mut members: Vec<&fcore::Node> = nodes
         .iter_nodes()
         .map(|(_, n)| n)
@@ -487,17 +568,27 @@ pub(crate) fn pooled_entry_ips<N: NodeStorageOperations>(
         })
         .collect();
     members.sort_by_key(|n| n.uuid);
-    let mut ips = Vec::new();
-    for n in members {
-        for ip in entry_ips(n) {
-            if !ips.contains(&ip) {
-                ips.push(ip);
-            }
-        }
-    }
-    ips
+    members
 }
 
+/// Чистая часть `pooled_node_ports`: состав уже отфильтрован и отсортирован.
+///
+/// Нода без нужного инбаунда в карту не попадает: она не может обслужить этот
+/// протокол, и её адрес в карточке пула был бы мёртвой точкой входа.
+fn node_ports_of_members(members: &[&fcore::Node], tag: Tag) -> BTreeMap<String, u16> {
+    let mut out: BTreeMap<String, u16> = BTreeMap::new();
+    for node in members {
+        let Some(inbound) = node.inbounds.get(&tag) else {
+            continue;
+        };
+        for (ip, port) in node_ports_of_node(node, inbound.port) {
+            out.insert(ip, port);
+        }
+    }
+    out
+}
+
+/// Обратная совместимость: только адреса, без портов.
 fn connections_for_protocol<N, C>(
     nodes: &N,
     conn_nodes: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
@@ -565,6 +656,7 @@ where
                             env: conn.get_env().to_string(),
                             connection_label: format!("{pool_title} · {}", inbound_label(tag)),
                             node_ips: None,
+                            node_ports: None,
                             pool: Some(pool.clone()),
                             pool_translation: node.pool_translation.clone(),
                             weight: node.weight,
@@ -601,6 +693,10 @@ where
                     } else {
                         Some(ips.clone())
                     },
+                    // Одиночная нода: все её адреса — один интерфейс, порт
+                    // равен порту протокола из конфига. Карта была бы чистым
+                    // дублированием, поэтому её здесь нет.
+                    node_ports: None,
                     pool: node.pool.clone(),
                     pool_translation: node.pool_translation.clone(),
                     weight: node.weight,
@@ -611,17 +707,14 @@ where
     }
     for ((_, tag, pool), idx) in &pool_index {
         let env = fcore::Env::from(result[*idx].env.as_str());
-        let ips = pooled_entry_ips(nodes, &env, pool);
-        let node_id = result[*idx].node_id;
-        let node = nodes
-            .iter_nodes()
-            .find(|(id, _)| **id == node_id)
-            .map(|(_, n)| n);
-        if !ips.is_empty() {
-            result[*idx].node_ips = Some(ips.clone());
-        }
-        if let Some(node) = node {
-            result[*idx].config_rev = config_rev(node, *tag, &ips);
+        // Одна карта на оба поля: `node_ips` — её ключи, `node_ports` — она сама.
+        let ports = pooled_node_ports(nodes, &env, pool, *tag);
+        if !ports.is_empty() {
+            let ips: Vec<String> = ports.keys().cloned().collect();
+            result[*idx].node_ips = Some(ips);
+            result[*idx].node_ports = Some(ports.clone());
+            let members = pool_members(nodes, &env, pool);
+            result[*idx].config_rev = Some(config_rev_pool(&members, *tag, &ports));
         }
     }
     if result.is_empty() {
@@ -634,6 +727,7 @@ where
             env: String::new(),
             connection_label: "All countries".to_string(),
             node_ips: None,
+            node_ports: None,
             pool: None,
             pool_translation: None,
             weight: 0,
@@ -1663,17 +1757,23 @@ where
             mem.conn_labels.get(&conn_id).map(String::as_str),
         )
     };
-    let node_ips = if let Some(pool) = &pool {
-        let ips = pooled_entry_ips(&mem.nodes, &node.env, pool);
-        if ips.is_empty() {
-            None
+    let conn_tag_for_ports = conn.get_proto().proto();
+    // `node_ips` и `node_ports` — из одной карты: адреса и их порты.
+    let (node_ips, node_ports) = if let Some(pool) = &pool {
+        let ports = pooled_node_ports(&mem.nodes, &node.env, pool, conn_tag_for_ports);
+        if ports.is_empty() {
+            (None, None)
         } else {
-            Some(ips)
+            let ips: Vec<String> = ports.keys().cloned().collect();
+            (Some(ips), Some(ports))
         }
     } else {
-        node.node_ips
+        let ips = node
+            .node_ips
             .as_ref()
-            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect())
+            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect());
+        // Одиночная нода: порт один и он уже в конфиге — карта не нужна.
+        (ips, None)
     };
     let config_rev = config_rev(
         &node,
@@ -1801,6 +1901,7 @@ where
         service_protocol: None,
         service_type: None,
         node_ips,
+        node_ports,
         config_rev,
     })
 }
@@ -2048,6 +2149,7 @@ mod tests {
             env: "ru".to_string(),
             connection_label: "Moscow · AmneziaWG".to_string(),
             node_ips: None,
+            node_ports: None,
             pool: None,
             pool_translation: None,
             weight: 0,
@@ -2079,6 +2181,393 @@ mod tests {
             serde_json::json!(["78.17.28.66", "78.17.28.67"])
         );
         assert!(v.get("config_rev").is_none());
+    }
+
+    fn node_with_ips(uuid: u128, address: &str, ips: &[&str], port: u16) -> fcore::Node {
+        let mut inbound = wg_inbound();
+        inbound.port = port;
+        if let Some(wg) = inbound.wg.as_mut() {
+            wg.port = port;
+        }
+        fcore::Node {
+            uuid: uuid::Uuid::from_u128(uuid),
+            env: Env::Ru,
+            hostname: format!("n{uuid}"),
+            address: address.parse().unwrap(),
+            status: fcore::NodeStatus::Online,
+            label: "n".into(),
+            interface: "eth0".into(),
+            created_at: chrono::Utc::now(),
+            modified_at: chrono::Utc::now(),
+            inbounds: [(Tag::Wireguard, inbound)].into(),
+            cores: 1,
+            max_bandwidth_bps: 1,
+            country: "RU".into(),
+            r#type: fcore::NodeType::Node,
+            cluster: None,
+            node_ips: if ips.is_empty() {
+                None
+            } else {
+                Some(ips.iter().map(|ip| ip.parse().unwrap()).collect())
+            },
+            pool: Some("Russia".into()),
+            pool_translation: None,
+            weight: 0,
+        }
+    }
+
+    /// Сэмпл контракта для клиента: ровно те байты, которые уезжают в JSON.
+    ///
+    /// Данные — реальный состав EU-пула (адреса и порты из прод-базы на
+    /// 2026-10-30), протокол для примера WireGuard: форма карточки от протокола
+    /// не зависит. Запуск с печатью:
+    ///
+    /// ```text
+    /// cargo test --bin api contract_sample -- --nocapture
+    /// ```
+    #[test]
+    fn contract_sample_pool_card() {
+        // EU Рилзопровод как есть: 6 нод, 10 адресов, у всех 443.
+        let eu = [
+            node_with_ips(1, "177.177.20.172", &[], 443),                        // at
+            node_with_ips(2, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443), // ee
+            node_with_ips(
+                3,
+                "185.156.108.232",
+                &["185.156.108.232", "45.137.42.16"],
+                443,
+            ),                                                                    // eu01
+            node_with_ips(4, "138.124.113.88", &[], 443),                         // eu02
+            node_with_ips(
+                5,
+                "109.120.178.116",
+                &["109.120.178.116", "77.221.152.88"],
+                443,
+            ),                                                                    // fr
+            node_with_ips(
+                6,
+                "195.133.80.155",
+                &["195.133.80.155", "195.133.80.156"],
+                443,
+            ),                                                                    // pl
+        ];
+        let members: Vec<&fcore::Node> = eu.iter().collect();
+        let ports = node_ports_of_members(&members, Tag::Wireguard);
+
+        let card = GatewayConnection {
+            connection_uuid: uuid::Uuid::from_u128(0xc0ffee),
+            node_id: eu[0].uuid,
+            country_code: "EU".into(),
+            country_name: "EU".into(),
+            service_protocol: "wireguard".into(),
+            env: "production".into(),
+            connection_label: "EU Рилзопровод · WireGuard".into(),
+            node_ips: Some(ports.keys().cloned().collect()),
+            node_ports: Some(ports.clone()),
+            pool: Some("EU Рилзопровод".into()),
+            pool_translation: None,
+            weight: 0,
+            config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
+        };
+        let json = serde_json::to_string_pretty(&card).unwrap();
+        println!("\n--- SAMPLE: EU pool, все порты 443 ---\n{json}\n");
+
+        // Форма, которую читает клиент.
+        assert_eq!(ports.len(), 10, "10 адресов в EU-пуле");
+        assert!(ports.values().all(|port| *port == 443));
+
+        // Второй сэмпл: порты у членов пула разные — то, ради чего поле нужно.
+        let a = node_with_ips(11, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443);
+        let b = node_with_ips(12, "77.221.152.88", &[], 8443);
+        let c = node_with_ips(13, "45.146.91.122", &[], 51820);
+        let mixed_members = [&a, &b, &c];
+        let mixed = node_ports_of_members(&mixed_members, Tag::Wireguard);
+        let mixed_card = GatewayConnection {
+            node_ips: Some(mixed.keys().cloned().collect()),
+            node_ports: Some(mixed.clone()),
+            config_rev: Some(config_rev_pool(&mixed_members, Tag::Wireguard, &mixed)),
+            ..card
+        };
+        let json = serde_json::to_string_pretty(&mixed_card).unwrap();
+        println!("\n--- SAMPLE: пул с разными портами ---\n{json}\n");
+
+        assert_eq!(
+            mixed,
+            BTreeMap::from([
+                ("93.89.220.48".to_string(), 443u16),
+                ("93.89.220.49".to_string(), 443u16),
+                ("77.221.152.88".to_string(), 8443u16),
+                ("45.146.91.122".to_string(), 51820u16),
+            ])
+        );
+    }
+
+    /// Полный ответ `/v1/services` в том виде, в котором он уезжает клиенту:
+    /// обёртка сервиса + карточки коннектов. Печать:
+    ///
+    /// ```text
+    /// cargo test --bin api contract_sample_services_response -- --nocapture
+    /// ```
+    #[test]
+    fn contract_sample_services_response() {
+        let a = node_with_ips(1, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443);
+        let b = node_with_ips(2, "77.221.152.88", &[], 8443);
+        let members = [&a, &b];
+        let ports = node_ports_of_members(&members, Tag::Wireguard);
+
+        let pool_card = GatewayConnection {
+            connection_uuid: uuid::Uuid::from_u128(0xc0ffee),
+            node_id: a.uuid,
+            country_code: "RU".into(),
+            country_name: "Russia".into(),
+            service_protocol: "awg-mobile".into(),
+            env: "production".into(),
+            connection_label: "RU Рилзопровод · AmneziaWG".into(),
+            node_ips: Some(ports.keys().cloned().collect()),
+            node_ports: Some(ports.clone()),
+            pool: Some("RU Рилзопровод".into()),
+            pool_translation: None,
+            weight: 0,
+            config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
+        };
+
+        // Одиночная нода: карты портов нет.
+        let single_card = GatewayConnection {
+            connection_uuid: uuid::Uuid::from_u128(0xbeef),
+            node_id: b.uuid,
+            country_code: "NL".into(),
+            country_name: "Netherlands".into(),
+            service_protocol: "awg-mobile".into(),
+            env: "production".into(),
+            connection_label: "NL777 · AmneziaWG".into(),
+            node_ips: None,
+            node_ports: None,
+            pool: None,
+            pool_translation: None,
+            weight: 0,
+            config_rev: None,
+        };
+
+        let response = GatewayServicesResponse {
+            user_country_code: None,
+            services: vec![GatewayService {
+                service_type: "amnezia-premium".into(),
+                service_protocol: "vless".into(),
+                service_info: GatewayServiceInfo {
+                    name: "Premium".into(),
+                    price: "299".into(),
+                    speed: "unlimited".into(),
+                    timelimit: "30".into(),
+                    region: "worldwide".into(),
+                },
+                service_description: GatewayServiceDescription {
+                    description: "FRKN Premium".into(),
+                    card_description: "Premium access".into(),
+                    features: "all protocols".into(),
+                },
+                available_countries: vec![
+                    GatewayCountry {
+                        country_code: "RU".into(),
+                        country_name: "Russia".into(),
+                        connection_uuid: Some(pool_card.connection_uuid),
+                        connection_label: "RU Рилзопровод · AmneziaWG".into(),
+                        pool: Some("RU Рилзопровод".into()),
+                        pool_translation: None,
+                    },
+                    GatewayCountry {
+                        country_code: "NL".into(),
+                        country_name: "Netherlands".into(),
+                        connection_uuid: Some(single_card.connection_uuid),
+                        connection_label: "NL777 · AmneziaWG".into(),
+                        pool: None,
+                        pool_translation: None,
+                    },
+                ],
+                connections: vec![pool_card, single_card],
+                store_endpoint: "https://frkn.org".into(),
+                is_available: true,
+                subscription: GatewaySubscriptionMeta {
+                    end_date: Some("2026-12-01".into()),
+                },
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&response).unwrap();
+        println!("\n--- RESPONSE /v1/services ---\n{json}\n");
+
+        // Контракт: у пула карта есть, у одиночной ноды нет.
+        let v = serde_json::to_value(&response).unwrap();
+        let conns = &v["services"][0]["connections"];
+        assert_eq!(
+            conns[0]["node_ports"],
+            serde_json::json!({
+                "93.89.220.48": 443,
+                "93.89.220.49": 443,
+                "77.221.152.88": 8443
+            })
+        );
+        assert!(conns[1].get("node_ports").is_none());
+        assert!(conns[1].get("node_ips").is_none());
+    }
+
+    /// Внутри ноды несколько адресов — один интерфейс, значит один порт.
+    #[test]
+    fn one_node_keeps_a_single_port_across_its_ips() {
+        let node = node_with_ips(1, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443);
+        let ports = node_ports_of_members(&[&node], Tag::Wireguard);
+        assert_eq!(
+            ports,
+            BTreeMap::from([
+                ("93.89.220.48".to_string(), 443u16),
+                ("93.89.220.49".to_string(), 443u16),
+            ])
+        );
+    }
+
+    /// Главное требование: в пуле порты у нод разные, и клиент получает карту
+    /// адрес → порт, а не один порт на весь пул.
+    #[test]
+    fn pool_members_may_listen_on_different_ports() {
+        let a = node_with_ips(1, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443);
+        let b = node_with_ips(2, "77.221.152.88", &[], 8443);
+        let ports = node_ports_of_members(&[&a, &b], Tag::Wireguard);
+
+        assert_eq!(
+            ports,
+            BTreeMap::from([
+                ("93.89.220.48".to_string(), 443u16),
+                ("93.89.220.49".to_string(), 443u16),
+                ("77.221.152.88".to_string(), 8443u16),
+            ])
+        );
+        // node_ips — те же ключи карты, один источник правды
+        let ips: Vec<&String> = ports.keys().collect();
+        assert_eq!(ips.len(), 3);
+    }
+
+    /// Нода без инбаунда этого протокола не попадает ни в карту, ни в node_ips:
+    /// адрес, на котором никто не слушает, клиенту бесполезен.
+    #[test]
+    fn member_without_the_inbound_is_skipped() {
+        let a = node_with_ips(1, "93.89.220.48", &[], 443);
+        let mut b = node_with_ips(2, "77.221.152.88", &[], 8443);
+        b.inbounds.clear();
+
+        let ports = node_ports_of_members(&[&a, &b], Tag::Wireguard);
+        assert_eq!(ports.len(), 1);
+        assert!(ports.contains_key("93.89.220.48"));
+
+        // и для протокола, которого нет ни у кого, — пусто, а не мусор
+        assert!(node_ports_of_members(&[&a, &b], Tag::Hysteria2).is_empty());
+    }
+
+    /// Версия карточки пула обязана меняться от смены порта: иначе клиент
+    /// останется на старом адресе.
+    #[test]
+    fn pool_config_rev_tracks_ports() {
+        let a = node_with_ips(1, "93.89.220.48", &[], 443);
+        let b = node_with_ips(2, "77.221.152.88", &[], 8443);
+        let members = [&a, &b];
+        let before = node_ports_of_members(&members, Tag::Wireguard);
+
+        let mut b2 = b.clone();
+        b2.inbounds.get_mut(&Tag::Wireguard).unwrap().port = 51820;
+        let members2 = [&a, &b2];
+        let after = node_ports_of_members(&members2, Tag::Wireguard);
+
+        assert_ne!(
+            config_rev_pool(&members, Tag::Wireguard, &before),
+            config_rev_pool(&members2, Tag::Wireguard, &after)
+        );
+        // стабильность: тот же вход — та же версия
+        assert_eq!(
+            config_rev_pool(&members, Tag::Wireguard, &before),
+            config_rev_pool(&members, Tag::Wireguard, &before.clone())
+        );
+    }
+
+    /// Формат, который читает клиент: `node_ports` — объект «адрес → порт»
+    /// (`servers_model.cpp::portForNodeIp`).
+    #[test]
+    fn node_ports_serialize_as_an_object_next_to_node_ips() {
+        let conn = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "RU".into(),
+            country_name: "RU".into(),
+            service_protocol: "awg-mobile".into(),
+            env: "ru".into(),
+            connection_label: "Russia · AmneziaWG".into(),
+            node_ips: Some(vec!["93.89.220.48".into(), "77.221.152.88".into()]),
+            node_ports: Some(BTreeMap::from([
+                ("93.89.220.48".to_string(), 443u16),
+                ("77.221.152.88".to_string(), 8443u16),
+            ])),
+            pool: Some("Russia".into()),
+            pool_translation: None,
+            weight: 0,
+            config_rev: Some("abc".into()),
+        };
+        let v = serde_json::to_value(&conn).unwrap();
+        assert_eq!(
+            v["node_ports"],
+            serde_json::json!({"77.221.152.88": 8443, "93.89.220.48": 443})
+        );
+        // старый клиент читает node_ips как раньше
+        assert_eq!(
+            v["node_ips"],
+            serde_json::json!(["93.89.220.48", "77.221.152.88"])
+        );
+        // и не видит ключа, которого не знает
+        assert!(v.get("endpoints").is_none(), "лишних полей быть не должно");
+    }
+
+    /// Одиночная нода: порт один и он уже в конфиге, карта была бы дублированием.
+    #[test]
+    fn single_node_omits_node_ports() {
+        let conn = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "RU".into(),
+            country_name: "RU".into(),
+            service_protocol: "awg-mobile".into(),
+            env: "ru".into(),
+            connection_label: "Moscow · AmneziaWG".into(),
+            node_ips: None,
+            node_ports: None,
+            pool: None,
+            pool_translation: None,
+            weight: 0,
+            config_rev: None,
+        };
+        let v = serde_json::to_value(&conn).unwrap();
+        for field in ["node_ips", "node_ports", "pool", "config_rev"] {
+            assert!(v.get(field).is_none(), "{field} must be omitted");
+        }
+    }
+
+    /// `config_rev` пула должен реагировать на смену серверного материала, а не
+    /// только адресов. Иначе смена ключа или obfuscation не заставит клиента
+    /// перечитать конфиг.
+    #[test]
+    fn pool_config_rev_tracks_server_material() {
+        let a = node_with_ips(1, "93.89.220.48", &[], 443);
+        let b = node_with_ips(2, "77.221.152.88", &[], 8443);
+        let members = [&a, &b];
+        let ports = node_ports_of_members(&members, Tag::Wireguard);
+        let before = config_rev_pool(&members, Tag::Wireguard, &ports);
+
+        // тот же состав и адреса, но другой ключ на второй ноде
+        let mut b2 = b.clone();
+        if let Some(wg) = b2.inbounds.get_mut(&Tag::Wireguard).and_then(|i| i.wg.as_mut()) {
+            wg.keys = WgKeys {
+                privkey: WgKeys::default().privkey,
+            };
+        }
+        let ports2 = node_ports_of_members(&[&a, &b2], Tag::Wireguard);
+        assert_eq!(ports, ports2, "адреса не менялись");
+        let after = config_rev_pool(&[&a, &b2], Tag::Wireguard, &ports2);
+        assert_ne!(before, after, "смена ключа обязана поднять версию");
     }
 
     #[test]
@@ -2145,6 +2634,7 @@ mod tests {
             env: "ru".to_string(),
             connection_label: "Finland · AmneziaWG".to_string(),
             node_ips: None,
+            node_ports: None,
             pool: Some("Finland".to_string()),
             pool_translation: Some(
                 [
@@ -2184,6 +2674,10 @@ mod tests {
             service_protocol: Some("awg".to_string()),
             service_type: Some(share::SHARE_SERVICE_TYPE.to_string()),
             node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
+            node_ports: Some(BTreeMap::from([(
+                "78.17.28.66".to_string(),
+                443u16,
+            )])),
             config_rev: Some("abc".to_string()),
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -2211,6 +2705,7 @@ mod tests {
             service_protocol: None,
             service_type: None,
             node_ips: None,
+            node_ports: None,
             config_rev: None,
         };
         let v = serde_json::to_value(&owner).unwrap();
@@ -2221,6 +2716,7 @@ mod tests {
             "service_protocol",
             "service_type",
             "node_ips",
+            "node_ports",
             "config_rev",
         ] {
             assert!(v.get(field).is_none(), "{} must be omitted", field);

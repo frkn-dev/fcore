@@ -3,7 +3,7 @@ use warp::http::StatusCode;
 
 use fcore::{
     http::ResponseMessage, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    NodeStorageOperations, Subscription, SubscriptionOperations,
+    NodeStorageOperations, Subscription, SubscriptionOperations, Tag,
 };
 
 use super::super::super::service::Cache;
@@ -53,7 +53,7 @@ where
     }
 
     // Client feeds collapse a pool into a single row whose node_ips is the union
-    // of every online member's entry addresses (see `pooled_entry_ips`). The loop
+    // of every online member's entry addresses. The loop
     // above only hashes each node's OWN addresses, so a pure membership change —
     // a node joins or leaves a pool, nothing else moves — left the version
     // unchanged: clients kept a stale single-address row and never tried the
@@ -96,8 +96,34 @@ where
         for id in &member_ids {
             hasher.update(id.as_bytes());
         }
-        for ip in super::amnezia::pooled_entry_ips(&mem.nodes, env, pool) {
-            hasher.update(ip.as_bytes());
+        // ip:port, not just ip: members of a pool may listen on different
+        // ports, and a port change alone must bump the feed version — otherwise
+        // clients keep a card pointing at a port nobody listens on.
+        //
+        // Per protocol: the same pool can expose AWG on 51820 and hysteria2 on
+        // 443, so endpoints are collected for every inbound the members have.
+        let mut pool_tags: Vec<Tag> = Vec::new();
+        for (_, node) in mem.nodes.iter_nodes() {
+            if node.status != fcore::NodeStatus::Online
+                || &node.env != env
+                || normalized_pool(node.pool.clone()).as_deref() != Some(pool.as_str())
+            {
+                continue;
+            }
+            for tag in node.inbounds.keys() {
+                if !pool_tags.contains(tag) {
+                    pool_tags.push(*tag);
+                }
+            }
+        }
+        pool_tags.sort_by_key(|tag| tag.to_string());
+        for tag in pool_tags {
+            hasher.update(tag.to_string().as_bytes());
+            for (ip, port) in super::amnezia::pooled_node_ports(&mem.nodes, env, pool, tag) {
+                hasher.update(ip.as_bytes());
+                hasher.update(b":");
+                hasher.update(port.to_string().as_bytes());
+            }
         }
     }
 

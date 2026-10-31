@@ -966,23 +966,26 @@ where
             .and(warp::body::content_length_limit(
                 crate::http::handlers::report::MAX_REPORT_BODY_BYTES,
             ))
-            .and(crypto::with_agw_decryption::<
-                crate::http::handlers::report::BlockReportEnvelope,
-            >(agw_key.clone()))
+            // Тело разбираем как Value: /v1/report/block принимает и старый
+            // формат (report_id + report), и новый (mode + targets/attempts),
+            // а различает их сам хендлер.
+            .and(crypto::with_agw_decryption::<serde_json::Value>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
             .and(with_report_limiter.clone())
             .and(with_report_sub_limiter.clone())
             .and_then(
-                |req: crate::http::handlers::report::BlockReportEnvelope,
+                |req: serde_json::Value,
                  ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
                  remote: Option<std::net::SocketAddr>,
                  x_forwarded_for: Option<String>,
                  rate_limiter: Arc<RateLimiter>,
                  sub_limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
-                    let response = crate::http::handlers::report::gateway_block_report_handler(
+                    let response = crate::http::handlers::report::gateway_report_handler(
                         req,
                         sync,
                         remote,
@@ -1003,23 +1006,26 @@ where
             .and(warp::body::content_length_limit(
                 crate::http::handlers::report::MAX_SCAN_BODY_BYTES,
             ))
-            .and(crypto::with_agw_decryption::<
-                crate::http::handlers::report::BlockScanEnvelope,
-            >(agw_key.clone()))
+            // Как и /report/block: тело — Value, потому что новый формат
+            // приходит и сюда (report_id в обоих режимах), а различает его
+            // диспетчер по вложенному `scan`.
+            .and(crypto::with_agw_decryption::<serde_json::Value>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
             .and(with_report_limiter.clone())
             .and(with_report_sub_limiter.clone())
             .and_then(
-                |req: crate::http::handlers::report::BlockScanEnvelope,
+                |req: serde_json::Value,
                  ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
                  remote: Option<std::net::SocketAddr>,
                  x_forwarded_for: Option<String>,
                  rate_limiter: Arc<RateLimiter>,
                  sub_limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
-                    let response = crate::http::handlers::report::gateway_scan_report_handler(
+                    let response = crate::http::handlers::report::gateway_report_handler(
                         req,
                         sync,
                         remote,
@@ -1090,6 +1096,37 @@ where
                         api_base,
                         bot_token,
                         chat_id,
+                    )
+                    .await
+                },
+            );
+
+        // GET /v1/admin/report/reports — отчёты клиента: кто прислал и что не так.
+        let get_client_reports_route = warp::get()
+            .and(warp::path("v1"))
+            .and(warp::path("admin"))
+            .and(warp::path("report"))
+            .and(warp::path("reports"))
+            .and(warp::path::end())
+            .and(warp::query::<
+                crate::http::handlers::report::ClientReportsQuery,
+            >())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(
+                |query: crate::http::handlers::report::ClientReportsQuery,
+                 sync: MemSync<N, C, S>,
+                 admin_enabled: bool,
+                 admin_token: String,
+                 auth_header: Option<String>| async move {
+                    crate::http::handlers::report::admin_client_reports_handler(
+                        query,
+                        sync,
+                        admin_enabled,
+                        admin_token,
+                        auth_header,
                     )
                     .await
                 },
@@ -1580,6 +1617,7 @@ where
             .or(post_block_report_route)
             .or(post_scan_report_route)
             .or(get_block_report_admin_route)
+            .or(get_client_reports_route)
             .or(get_report_observations_route)
             .or(get_exit_usage_admin_route)
             .or(get_entry_usage_admin_route)
