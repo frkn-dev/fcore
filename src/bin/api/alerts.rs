@@ -57,6 +57,14 @@ pub struct AlertsConfig {
     /// Сколько секунд держится высокая нагрузка, чтобы алертить.
     #[serde(default = "default_cpu_hold")]
     pub cpu_hold_sec: u64,
+    /// Не чаще одного уведомления о смене маршрута на пару (нода, группа).
+    /// 0 — не троттлить. При шторме переключений сообщения схлопываются.
+    #[serde(default = "default_watchcat_switch_throttle")]
+    pub watchcat_switch_throttle_sec: u64,
+    /// То же для «перехват сломан»: на живых данных это самый шумный сигнал
+    /// (~13 событий в час при здоровой ноде), поэтому окно длинное.
+    #[serde(default = "default_watchcat_intercept_throttle")]
+    pub watchcat_intercept_throttle_sec: u64,
     /// Ниже этого значения считаем, что нагрузка спала (гистерезис).
     #[serde(default = "default_cpu_reset")]
     pub cpu_reset_pct: f64,
@@ -72,6 +80,14 @@ pub struct AlertsConfig {
     /// База Telegram Bot API (можно подменить на прокси).
     #[serde(default = "default_api_base")]
     pub telegram_api_base: String,
+}
+
+fn default_watchcat_switch_throttle() -> u64 {
+    120
+}
+
+fn default_watchcat_intercept_throttle() -> u64 {
+    1800
 }
 
 fn default_offline_threshold() -> u64 {
@@ -134,6 +150,8 @@ impl Default for AlertsConfig {
             disk_threshold_pct: default_disk_threshold(),
             disk_hold_sec: default_disk_hold(),
             disk_reset_pct: default_disk_reset(),
+             watchcat_switch_throttle_sec: 120,
+             watchcat_intercept_throttle_sec: 1800,
             cpu_threshold_pct: default_cpu_threshold(),
             cpu_hold_sec: default_cpu_hold(),
             cpu_reset_pct: default_cpu_reset(),
@@ -737,6 +755,8 @@ mod tests {
             disk_threshold_pct: 90.0,
             disk_hold_sec: 900,
             disk_reset_pct: 85.0,
+             watchcat_switch_throttle_sec: 120,
+             watchcat_intercept_throttle_sec: 1800,
             cpu_threshold_pct: 85.0,
             cpu_hold_sec: 600,
             cpu_reset_pct: 70.0,

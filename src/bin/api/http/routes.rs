@@ -5,7 +5,7 @@ use uuid::Uuid;
 use warp::Filter;
 
 use fcore::{
-    http::filters::{with_param_bool, with_param_string},
+    http::filters::{with_param_bool, with_param_string, with_param_u64},
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, NodeStorageOperations,
     Result, Subscription, SubscriptionOperations,
 };
@@ -728,6 +728,31 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(params.traffic_mode_enabled))
             .and_then(mtproto_connections_handler);
+
+        // События watchcat: переключение выхода, «живых нет», сломанный перехват.
+        // Авторизация как у node-сигналов: service token (или admin, или
+        // node_-токен self-hosted ноды). Уведомления отправляет api, а не демон:
+        // токен Telegram на нодах не нужен.
+        let alerts_cfg = self.settings.alerts.clone();
+        let watchcat_throttle = crate::http::handlers::watchcat::NotifyThrottle::new();
+        let post_watchcat_event_route = warp::post()
+            .and(warp::path("v1")).and(warp::path("node")).and(warp::path!("watchcat" / "event"))
+            .and(warp::path::end())
+            .and(node_sync_auth.clone())
+            .and(warp::body::content_length_limit(16 * 1024))
+            .and(warp::body::json::<crate::http::handlers::watchcat::WatchcatReport>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_string(
+                alerts_cfg.telegram_bot_token.clone().unwrap_or_default(),
+            ))
+            .and(with_param_string(
+                alerts_cfg.telegram_chat_id.clone().unwrap_or_default(),
+            ))
+            .and(with_param_string(alerts_cfg.telegram_api_base.clone()))
+            .and(with_param_u64(alerts_cfg.watchcat_switch_throttle_sec))
+            .and(with_param_u64(alerts_cfg.watchcat_intercept_throttle_sec))
+            .and(warp::any().map(move || watchcat_throttle.clone()))
+            .and_then(crate::http::handlers::watchcat::watchcat_event_handler);
 
         let post_connections_sync_route = warp::path("connections")
             .and(warp::path("sync"))
@@ -1591,6 +1616,7 @@ where
             .or(post_connection_route)
             .or(post_connection_feed_route)
             .or(post_connections_sync_route)
+            .or(post_watchcat_event_route)
             .or(delete_connection_route)
             .or(get_mtproto_connections_info_route)
             .or(get_wg_connections_info_route)

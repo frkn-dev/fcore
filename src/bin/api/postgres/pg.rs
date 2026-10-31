@@ -136,6 +136,10 @@ impl PgContext {
         crate::postgres::alerts::PgAlerts::new(self.manager.clone())
     }
 
+    pub fn watchcat(&self) -> crate::postgres::watchcat::PgWatchcat {
+        crate::postgres::watchcat::PgWatchcat::new(self.manager.clone())
+    }
+
     pub fn usage(&self) -> crate::postgres::usage::PgUsage {
         crate::postgres::usage::PgUsage::new(self.manager.clone())
     }

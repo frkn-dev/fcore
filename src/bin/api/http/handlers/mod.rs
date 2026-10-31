@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod node;
 pub mod premium;
 pub mod premium_inventory;
+pub mod watchcat;
 pub mod private;
 pub(crate) mod report;
 pub mod score;

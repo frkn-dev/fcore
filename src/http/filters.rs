@@ -47,3 +47,10 @@ pub fn with_param_bool(
 ) -> impl Filter<Extract = (bool,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || v)
 }
+
+/// Прокидывает в хендлер числовой параметр конфига (пороги, окна).
+pub fn with_param_u64(
+    v: u64,
+) -> impl Filter<Extract = (u64,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || v)
+}
