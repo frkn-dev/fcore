@@ -85,12 +85,10 @@ impl PgNode {
 
         let node_query = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, weight,
-            pool_country_code, pool_country_name
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, weight
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19,
-            $20, $21
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19
         )
         ON CONFLICT (id) DO UPDATE SET
             uuid = EXCLUDED.uuid,
@@ -109,9 +107,7 @@ impl PgNode {
             node_ips = EXCLUDED.node_ips,
             pool = COALESCE(EXCLUDED.pool, nodes.pool),
             pool_translation = COALESCE(EXCLUDED.pool_translation, nodes.pool_translation),
-            weight = EXCLUDED.weight,
-            pool_country_code = COALESCE(EXCLUDED.pool_country_code, nodes.pool_country_code),
-            pool_country_name = COALESCE(EXCLUDED.pool_country_name, nodes.pool_country_name)
+            weight = EXCLUDED.weight
     ";
 
         tx.execute(
@@ -136,8 +132,6 @@ impl PgNode {
                 &node.pool,
                 &pool_translation,
                 &node.weight,
-                &node.pool_country_code,
-                &node.pool_country_name,
             ],
         )
         .await?;
@@ -368,8 +362,6 @@ impl PgNode {
                       n.node_ips,
                       n.pool,
                       n.pool_translation,
-                      n.pool_country_code,
-                      n.pool_country_name,
                       n.weight,
 
                       i.id AS inbound_id,
@@ -421,8 +413,6 @@ impl PgNode {
             let pool_translation: Option<BTreeMap<String, String>> = row
                 .get::<_, Option<serde_json::Value>>("pool_translation")
                 .and_then(|v| serde_json::from_value(v).ok());
-            let pool_country_code: Option<String> = row.get("pool_country_code");
-            let pool_country_name: Option<String> = row.get("pool_country_name");
 
             // Stored as TEXT[]; parse each entry back into Ipv4Addr.
             // Unparseable entries are skipped with a warning rather than
@@ -499,8 +489,6 @@ impl PgNode {
                     pool: pool.clone(),
                     weight,
                     pool_translation: pool_translation.clone(),
-                    pool_country_code: pool_country_code.clone(),
-                    pool_country_name: pool_country_name.clone(),
                 });
 
                 if let Some(_inbound_id) = inbound_id {

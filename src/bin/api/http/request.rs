@@ -188,13 +188,6 @@ pub struct NodeRequest {
     /// accepted as an alias of `uk`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
-    /// Страна пула как целого (ISO-код): подпись под флагом на карточке пула.
-    /// У членов разных стран (EU) страна ноды не годится.
-    #[serde(default)]
-    pub pool_country_code: Option<String>,
-    /// Название страны пула для подписи; пусто = клиент переводит код сам.
-    #[serde(default)]
-    pub pool_country_name: Option<String>,
 }
 
 impl NodeRequest {
@@ -250,8 +243,6 @@ impl NodeRequest {
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty()),
             pool_translation: normalize_pool_translation(self.pool_translation.clone()),
-            pool_country_code: self.pool_country_code.clone(),
-            pool_country_name: self.pool_country_name.clone(),
             weight: self.weight,
         }
     }

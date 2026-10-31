@@ -180,14 +180,6 @@ pub struct Node {
     /// falls back to `pool`; an absent map means there is no translation.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
-    /// Страна пула как целого (ISO-код). Нужна потому, что у членов пула
-    /// страны разные (EU: at/ee/fr/pl) и страна ноды дала бы «флаг ЕС,
-    /// подпись Poland». Absent у старых нод — тогда клиент берёт страну ноды.
-    #[serde(default)]
-    pub pool_country_code: Option<String>,
-    /// Название страны пула для подписи; absent = клиент переводит код сам.
-    #[serde(default)]
-    pub pool_country_name: Option<String>,
     /// Приоритет ноды в пуле: больше — предпочтительнее. Участвует в
     /// derived PartialEq, поэтому смена веса в конфиге регистрируется как
     /// обновление ноды (без перезапуска api).
@@ -315,8 +307,6 @@ impl Node {
             r#type: settings.r#type,
             cluster: settings.cluster,
             node_ips: settings.node_ips,
-            pool_country_code: settings.pool_country_code,
-            pool_country_name: settings.pool_country_name,
             pool: settings.pool,
             pool_translation: settings.pool_translation,
             weight: settings.weight,
@@ -432,8 +422,6 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
-            pool_country_code: None,
-            pool_country_name: None,
             weight: 0,
         };
 

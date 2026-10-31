@@ -190,8 +190,6 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
-            pool_country_code: None,
-            pool_country_name: None,
             weight: 0,
         }
     }
