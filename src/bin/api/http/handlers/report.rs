@@ -320,6 +320,81 @@ fn app_fields(app: &Option<Value>) -> (String, String, Option<String>) {
 }
 
 /// Первое не-`skipped`/не-`answered` состояние из `probe.tcp[]` / `probe.udp[]`.
+/// Разворачивает probe.handshake в строки по адресам.
+///
+/// Первая строка — базовая (она несёт `probe` и `session` целиком), остальные
+/// — только адрес/порт/состояние/задержка. Так отчёт пула из 7 адресов даёт
+/// 7 строк с одним `batch_id`, и дашборд может сказать «доступно 5 из 7».
+fn expand_probe_endpoints(row: &Observation, probe: &Option<Value>, batch_id: uuid::Uuid) -> Vec<Observation> {
+    let mut out = vec![row.clone()];
+    let Some(list) = probe
+        .as_ref()
+        .and_then(|p| p.get("handshake"))
+        .and_then(|h| h.as_array())
+    else {
+        return out;
+    };
+
+    for (idx, entry) in list.iter().enumerate() {
+        let address = entry
+            .get("address")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        let Some(address) = address else { continue };
+        let Ok(ip) = address.parse::<std::net::IpAddr>() else {
+            // Не IP (например, имя хоста) — в observations адрес типа inet,
+            // такую запись без адреса не сохранить.
+            continue;
+        };
+        let port = entry.get("port").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        // Базовая строка уже покрывает цель из report.target — не дублируем.
+        if row.address == Some(ip) && row.port == port {
+            continue;
+        }
+        let state = entry
+            .get("state")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let ms = entry
+            .get("ms")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let mut extra = Vec::new();
+        if entry.get("in_use").and_then(|v| v.as_bool()).unwrap_or(false) {
+            extra.push("в работе");
+        }
+        if entry
+            .get("disabled_by_user")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            extra.push("отключён юзером");
+        }
+
+        let mut item = row.clone();
+        item.id = observation_uuid(batch_id, idx + 1, Some(ip), None);
+        item.address = Some(ip);
+        item.target_host = None;
+        item.port = port;
+        item.state = state;
+        item.rtt_ms = ms;
+        item.icmp_ok = None;
+        // Крупные блобы держим только на первой строке: probe/session одинаковы
+        // для всего отчёта, дублировать их семь раз незачем.
+        item.probe = Value::Null;
+        item.session = Value::Null;
+        item.app = Value::Null;
+        item.device = Value::Null;
+        item.network = Value::Null;
+        if !extra.is_empty() {
+            item.note = Some(extra.join(", "));
+        }
+        out.push(item);
+    }
+    out
+}
+
 fn report_state(probe: &Option<Value>) -> Option<String> {
     let probe = probe.as_ref()?;
     for key in ["udp", "tcp"] {
@@ -1053,10 +1128,16 @@ where
         }
     }
 
+    // Клиент присылает проверку пула ЦЕЛИКОМ: список адресов лежит в
+    // probe.handshake (по записи на адрес: state, ms, in_use). Раньше мы
+    // писали одну строку на отчёт и теряли все адреса кроме target — из-за
+    // этого в дашборде «отчёт» выглядел как одна цель без статуса.
+    let rows = expand_probe_endpoints(&row, &req.report.probe, batch_id);
+
     match memory
         .db
         .report()
-        .insert_batch(batch_id, std::slice::from_ref(&row))
+        .insert_batch(batch_id, &rows)
         .await
     {
         Ok(true) => Ok(accepted(serde_json::json!({
@@ -1522,6 +1603,120 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Отчёт про пул приходит как ОДИН target + probe.handshake с адресами.
+    /// Если не развернуть handshake, в базе остаётся одна цель без статуса —
+    /// именно из-за этого дашборд показывал «примерно ничего».
+    #[test]
+    fn handshake_is_expanded_into_one_row_per_endpoint() {
+        let batch = uuid::Uuid::from_u128(7);
+        let base = Observation {
+            id: uuid::Uuid::from_u128(1),
+            subscription_id: None,
+            source: "report".to_string(),
+            batch_id: batch,
+            support_tag: None,
+            app_version: "4.8.14.79".to_string(),
+            platform: "ios".to_string(),
+            os: None,
+            target_host: Some("185.156.108.232".to_string()),
+            address: Some("185.156.108.232".parse().unwrap()),
+            node_id: None,
+            node_host: None,
+            port: 443,
+            protocol: "awg".to_string(),
+            transport: Some("udp".to_string()),
+            state: None,
+            rtt_ms: None,
+            icmp_ok: None,
+            target_country: None,
+            error: Value::Null,
+            note: None,
+            app: serde_json::json!({"version": "4.8.14.79"}),
+            device: Value::Null,
+            network: Value::Null,
+            probe: serde_json::json!({"handshake": [
+                {"address": "185.156.108.232", "port": 443, "state": "unknown", "in_use": false},
+                {"address": "109.120.178.116", "port": 443, "state": "timeout", "in_use": false},
+                {"address": "138.124.113.88", "port": 443, "state": "ok", "ms": 96, "in_use": true},
+                {"address": "не-ip", "port": 443, "state": "ok"}
+            ]}),
+            session: serde_json::json!({"rtt_ms_avg": 93}),
+            country_code: None,
+            asn: None,
+            client_country: None,
+            client_org: None,
+            client_city: None,
+            ip_prefix: None,
+            ip_hash: None,
+            observed_at: Utc::now(),
+        };
+
+        let rows = expand_probe_endpoints(&base, &base.probe.clone().into(), batch);
+
+        // базовая (185.156.108.232) + два валидных адреса; «не-ip» отброшен,
+        // а совпадающий с target адрес не дублируется
+        assert_eq!(rows.len(), 3, "строк: {}", rows.len());
+        assert_eq!(rows[0].session["rtt_ms_avg"], 93, "первая строка несёт session");
+
+        let by_ip = |ip: &str| rows.iter().find(|r| r.address == Some(ip.parse().unwrap())).unwrap();
+        assert_eq!(by_ip("109.120.178.116").state.as_deref(), Some("timeout"));
+        let ok = by_ip("138.124.113.88");
+        assert_eq!(ok.state.as_deref(), Some("ok"));
+        assert_eq!(ok.rtt_ms, Some(96));
+        assert_eq!(ok.note.as_deref(), Some("в работе"));
+        // крупные блобы не размножаются по строкам
+        assert!(ok.probe.is_null());
+        assert!(ok.session.is_null());
+        // у всех строк один batch — по нему дашборд складывает отчёт
+        assert!(rows.iter().all(|r| r.batch_id == batch));
+    }
+
+    /// Один target без handshake: остаётся ровно одна строка, как раньше.
+    #[test]
+    fn single_target_report_stays_single_row() {
+        let mut base = Observation {
+            id: uuid::Uuid::from_u128(1),
+            subscription_id: None,
+            source: "report".to_string(),
+            batch_id: uuid::Uuid::from_u128(7),
+            support_tag: None,
+            app_version: "4".to_string(),
+            platform: "ios".to_string(),
+            os: None,
+            target_host: None,
+            address: Some("1.1.1.1".parse().unwrap()),
+            node_id: None,
+            node_host: None,
+            port: 443,
+            protocol: "awg".to_string(),
+            transport: None,
+            state: Some("ok".to_string()),
+            rtt_ms: Some(42),
+            icmp_ok: None,
+            target_country: None,
+            error: Value::Null,
+            note: None,
+            app: Value::Null,
+            device: Value::Null,
+            network: Value::Null,
+            probe: serde_json::json!({"tcp": []}),
+            session: Value::Null,
+            country_code: None,
+            asn: None,
+            client_country: None,
+            client_org: None,
+            client_city: None,
+            ip_prefix: None,
+            ip_hash: None,
+            observed_at: Utc::now(),
+        };
+        let batch = base.batch_id;
+        base.probe = serde_json::json!({"tcp": []});
+        let rows = expand_probe_endpoints(&base, &Some(base.probe.clone()), batch);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state.as_deref(), Some("ok"));
+    }
 
     #[test]
     fn batch_uuid_is_stable_and_unique() {
