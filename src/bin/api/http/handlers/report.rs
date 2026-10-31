@@ -735,6 +735,32 @@ where
 }
 
 /// Единая точка входа `/v1/report/block`: различает старый и новый формат.
+/// Отказ клиенту + запись причины в журнал.
+///
+/// Без этого 400 уходил молча: в nginx видно «400, 48 байт», а что именно
+/// не понравилось — только в теле ответа, которого у нас нет. Пишем статус,
+/// причину и набор ключей запроса (без значений: в них api_key и support_tag).
+fn reject_report(status: u16, reason: &str, body: &Value) -> warp::reply::Response {
+    let keys: Vec<String> = body
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    let app = body
+        .get("app")
+        .and_then(|a| a.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("—");
+    tracing::warn!(
+        event = "report_rejected",
+        status,
+        reason,
+        app,
+        keys = ?keys,
+        "отчёт отклонён"
+    );
+    json_status(status, reason)
+}
+
 pub async fn gateway_report_handler<N, C, S>(
     body: Value,
     memory: MemSync<N, C, S>,
@@ -761,9 +787,9 @@ where
     // поведение старых клиентов не менялось ни на байт. `report_id` есть в
     // обоих семействах, поэтому различать по нему нельзя.
     if body.get("report").map(|v| v.is_object()).unwrap_or(false) {
-        let envelope: BlockReportEnvelope = match serde_json::from_value(body) {
+        let envelope: BlockReportEnvelope = match serde_json::from_value(body.clone()) {
             Ok(v) => v,
-            Err(e) => return Ok(json_status(400, &format!("invalid_report: {e}"))),
+            Err(e) => return Ok(reject_report(400, &format!("invalid_report: {e}"), &body)),
         };
         return gateway_block_report_handler(
             envelope,
@@ -780,9 +806,9 @@ where
     // приходит в обоих режимах), поэтому этот же диспетчер стоит на обоих
     // маршрутах. Старый срез по-прежнему уходит своим путём.
     if body.get("scan").map(|v| v.is_object()).unwrap_or(false) {
-        let envelope: BlockScanEnvelope = match serde_json::from_value(body) {
+        let envelope: BlockScanEnvelope = match serde_json::from_value(body.clone()) {
             Ok(v) => v,
-            Err(e) => return Ok(json_status(400, &format!("invalid_scan: {e}"))),
+            Err(e) => return Ok(reject_report(400, &format!("invalid_scan: {e}"), &body)),
         };
         return gateway_scan_report_handler(
             envelope,
@@ -797,22 +823,49 @@ where
 
     let ip = client_ip(remote, x_forwarded_for.as_deref());
     if !ip_limiter.check(ip) {
-        return Ok(json_status(429, "too_many_requests"));
+        return Ok(reject_report(429, "too_many_requests", &body));
     }
 
     let auth = body.get("auth_data").cloned().unwrap_or(Value::Null);
     let sub_id = extract_subscription_id(&auth);
     if sub_id.is_none() && !auth_data_has_share_token(&auth) {
-        return Ok(json_status(401, "unauthorized"));
+        return Ok(reject_report(401, "unauthorized", &body));
     }
     if let Some(sub) = sub_id {
         if !sub_limiter.check(sub) {
-            return Ok(json_status(429, "too_many_requests_subscription"));
+            return Ok(reject_report(429, "too_many_requests_subscription", &body));
         }
     }
 
     match store_rich_report(&body, sub_id, &memory, ip).await {
-        Ok(result) => Ok(accepted(result)),
+        Ok(result) => {
+            tracing::info!(
+                event = "report_stored",
+                report_id = %result
+                    .get("report_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("—"),
+                created = result.get("created").and_then(|v| v.as_bool()).unwrap_or(false),
+                targets = body
+                    .get("targets")
+                    .and_then(|t| t.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+                attempts = body
+                    .get("attempts")
+                    .and_then(|t| t.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+                mode = body.get("mode").and_then(|m| m.as_str()).unwrap_or("—"),
+                app = body
+                    .get("app")
+                    .and_then(|a| a.get("version"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("—"),
+                "отчёт сохранён"
+            );
+            Ok(accepted(result))
+        }
         // Отдельные 400 с внятным текстом: клиент должен видеть, что именно
         // не так, а не общий «bad request».
         Err(reason)
@@ -821,7 +874,7 @@ where
                 "empty_report" | "missing_report_id" | "invalid_report_id"
             ) =>
         {
-            Ok(json_status(400, &reason))
+            Ok(reject_report(400, &reason, &body))
         }
         Err(reason) => {
             tracing::error!("rich report failed: {reason}");
