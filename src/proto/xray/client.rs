@@ -25,6 +25,7 @@ use super::shadowsocks::ConnInfo as SsConnInfo;
 use super::vless::ConnFlow;
 use super::vless::ConnInfo as VlessConnInfo;
 use super::vmess::ConnInfo as VmessConnInfo;
+use super::trojan::ConnInfo as TrojanConnInfo;
 
 pub trait XrayClient {
     type Client;
@@ -122,6 +123,10 @@ impl HandlerActions for Arc<Mutex<HandlerClient>> {
                 user_info.create(self.clone()).await?;
                 Ok(())
             }
+            Tag::Trojan => {
+                TrojanConnInfo::new(conn_id).create(self.clone()).await?;
+                Ok(())
+            }
             Tag::Shadowsocks => {
                 if let Some(pass) = password.clone() {
                     let user_info = SsConnInfo::new(conn_id, Some(pass));
@@ -167,6 +172,10 @@ impl HandlerActions for Arc<Mutex<HandlerClient>> {
             Tag::Vmess => {
                 let user_info = VmessConnInfo::new(conn_id);
                 let _ = user_info.remove(self.clone()).await;
+                Ok(())
+            }
+            Tag::Trojan => {
+                TrojanConnInfo::new(conn_id).remove(self.clone()).await?;
                 Ok(())
             }
             Tag::Shadowsocks => {

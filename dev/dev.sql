@@ -401,3 +401,6 @@ CREATE TABLE IF NOT EXISTS node_access_tokens (
 -- existing translations.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool TEXT;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_translation JSONB;
+
+-- Trojan support. Keep in sync with migration 0008.
+ALTER TYPE proto ADD VALUE IF NOT EXISTS 'trojan';

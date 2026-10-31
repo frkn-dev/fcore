@@ -1,0 +1,6 @@
+.git
+target
+**/config.toml
+**/.env
+dev/data
+snapshots/*.bin

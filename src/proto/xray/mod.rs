@@ -3,6 +3,7 @@ pub(crate) mod shadowsocks;
 pub(crate) mod stats;
 pub(crate) mod vless;
 pub(crate) mod vmess;
+pub(crate) mod trojan;
 
 pub mod api {
     pub mod common {
@@ -59,6 +60,9 @@ pub mod api {
             pub mod inbound {
                 tonic::include_proto!("xray.proxy.vmess.inbound");
             }
+        }
+        pub mod trojan {
+            tonic::include_proto!("xray.proxy.trojan");
         }
         pub mod shadowsocks {
             tonic::include_proto!("xray.proxy.shadowsocks");

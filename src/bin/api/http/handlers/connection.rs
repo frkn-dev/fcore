@@ -226,7 +226,7 @@ where
         | Tag::VlessGrpcReality
         | Tag::VlessXhttpReality
         | Tag::VlessXhttpCdn
-        | Tag::Vmess => Proto::Xray(proto),
+        | Tag::Vmess | Tag::Trojan => Proto::Xray(proto),
         Tag::Hysteria2 => {
             let token = uuid::Uuid::new_v4();
             Proto::Hysteria2 { token }

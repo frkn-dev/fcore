@@ -1150,6 +1150,7 @@ pub(crate) fn shared_sub_tag(raw: &str) -> Option<fcore::Tag> {
         "vlessxhttpreality" => Some(fcore::Tag::VlessXhttpReality),
         "vlessxhttpcdn" => Some(fcore::Tag::VlessXhttpCdn),
         "vmess" => Some(fcore::Tag::Vmess),
+        "trojan" => Some(fcore::Tag::Trojan),
         "shadowsocks" | "ss" => Some(fcore::Tag::Shadowsocks),
         "mtproto" => Some(fcore::Tag::Mtproto),
         _ => None,
