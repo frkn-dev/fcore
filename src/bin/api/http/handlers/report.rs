@@ -1492,24 +1492,137 @@ where
         .observations(subscription, address, limit)
         .await
     {
-        Ok(rows) => Ok(warp::reply::with_status(
+        Ok(rows) => {
+            // Плоский список не читается: один отчёт — это пачка строк с одним
+            // batch_id. Собираем их в отчёты и подмешиваем пул, чтобы в
+            // дашборде было видно «EU Рилзопровод, доступно 5 из 7».
+            let grouped = group_observations(rows.clone(), &memory).await;
+            Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
                 "status": 200,
                 "response": {
                     "subscription": subscription,
                     "address": address,
                     "count": rows.len(),
+                    "reports": grouped,
                     "observations": rows,
                 }
             })),
             warp::http::StatusCode::OK,
         )
-        .into_response()),
+        .into_response())
+        }
         Err(err) => {
             tracing::error!("report observations failed: {err}");
             Ok(json_status(500, "observations_failed"))
         }
     }
+}
+
+/// Складывает строки наблюдений в отчёты по `batch_id` и подмешивает пул ноды.
+async fn group_observations<N, C, S>(rows: Vec<Value>, memory: &MemSync<N, C, S>) -> Vec<Value>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    use std::collections::BTreeMap;
+
+    // адрес -> (пул, имя ноды): по ним подпись «EU Рилзопровод»
+    let mut by_ip: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    {
+        let mem = memory.memory.read().await;
+        for (_, node) in mem.nodes.iter_nodes() {
+            for list in &node.node_ips {
+                for ip in list {
+                    by_ip.insert(
+                        ip.to_string(),
+                        (node.pool.clone(), Some(node.hostname.clone())),
+                    );
+                }
+            }
+        }
+    }
+
+    let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for row in rows {
+        let key = row
+            .get("batch_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("—")
+            .to_string();
+        groups.entry(key).or_default().push(row);
+    }
+
+    let mut out = Vec::with_capacity(groups.len());
+    for (batch, mut items) in groups {
+        items.sort_by(|a, b| {
+            b.get("at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(a.get("at").and_then(|v| v.as_str()).unwrap_or(""))
+        });
+
+        let (mut ok, mut failed, mut unknown) = (0usize, 0usize, 0usize);
+        let mut pool: Option<String> = None;
+        let mut endpoints = Vec::with_capacity(items.len());
+        for item in &items {
+            let state = item.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            match state {
+                "ok" | "open" | "answered" => ok += 1,
+                "timeout" | "refused" | "err" | "no-host" => failed += 1,
+                _ => unknown += 1,
+            }
+            let addr = item.get("address").and_then(|v| v.as_str()).unwrap_or("");
+            let (row_pool, node_host) = by_ip.get(addr).cloned().unwrap_or((None, None));
+            if pool.is_none() {
+                pool = row_pool.clone();
+            }
+            endpoints.push(serde_json::json!({
+                "address": addr,
+                "port": item.get("port"),
+                "protocol": item.get("protocol"),
+                "transport": item.get("transport"),
+                "state": state,
+                "rtt_ms": item.get("rtt_ms"),
+                "icmp_ok": item.get("icmp_ok"),
+                "node": node_host.or_else(|| {
+                    item.get("node_host").and_then(|v| v.as_str()).map(|s| s.to_string())
+                }),
+                "pool": row_pool,
+                "note": item.get("note"),
+            }));
+        }
+
+        let first = items.first().cloned().unwrap_or(Value::Null);
+        out.push(serde_json::json!({
+            "batch_id": batch,
+            "at": first.get("at"),
+            "app_version": first.get("app_version"),
+            "platform": first.get("platform"),
+            "source": first.get("source"),
+            "support_tag": first.get("support_tag"),
+            "client_country": first.get("client_country"),
+            "client_org": first.get("client_org"),
+            "client_city": first.get("client_city"),
+            "pool": pool,
+            "endpoints_total": endpoints.len(),
+            "endpoints_ok": ok,
+            "endpoints_failed": failed,
+            "endpoints_unknown": unknown,
+            "session": first.get("session").cloned().unwrap_or(Value::Null),
+            "endpoints": endpoints,
+        }));
+    }
+    out
 }
 
 pub async fn admin_block_report_handler<N, C, S>(

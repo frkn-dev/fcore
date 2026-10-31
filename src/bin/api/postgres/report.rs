@@ -457,7 +457,7 @@ impl PgReport {
                        target_host, host(address) AS addr, port, protocol, transport, state,
                        rtt_ms, icmp_ok, node_host, asn, client_country,
                        client_org, client_city, target_country,
-                       note, error
+                       note, error, batch_id::text AS batch_id, session, probe
                 FROM block_observations
                 WHERE ($1::uuid IS NULL OR subscription_id = $1)
                   AND ($2::inet IS NULL OR address = $2)
@@ -492,6 +492,11 @@ impl PgReport {
                     "client_org": r.get::<_, Option<String>>("client_org"),
                     "client_city": r.get::<_, Option<String>>("client_city"),
                     "target_country": r.get::<_, Option<String>>("target_country"),
+                    // Без batch_id строки нельзя сложить в «один отчёт»:
+                    // ровно этого не хватало дашборду.
+                    "batch_id": r.get::<_, Option<String>>("batch_id"),
+                    "session": r.get::<_, Option<serde_json::Value>>("session"),
+                    "probe": r.get::<_, Option<serde_json::Value>>("probe"),
                     "note": r.get::<_, Option<String>>("note"),
                     "error": r.get::<_, Option<serde_json::Value>>("error"),
                 })
