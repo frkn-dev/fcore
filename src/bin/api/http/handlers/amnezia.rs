@@ -294,6 +294,7 @@ fn proto_matches(tag: Tag, protocol: &str) -> bool {
         "awg-mobile" => tag == Tag::AmneziaWgMobile,
         "wireguard" => tag == Tag::Wireguard,
         "hysteria2" => tag == Tag::Hysteria2,
+        "trojan" => tag == Tag::Trojan,
         "vless" => matches!(
             tag,
             Tag::VlessTcpReality
@@ -312,6 +313,7 @@ fn proto_label(tag: Tag) -> &'static str {
         Tag::AmneziaWgMobile => "awg-mobile",
         Tag::Wireguard => "wireguard",
         Tag::Hysteria2 => "hysteria2",
+        Tag::Trojan => "trojan",
         _ => "vless",
     }
 }
@@ -329,6 +331,7 @@ fn inbound_label(tag: Tag) -> &'static str {
         Tag::Hysteria2 => "Hysteria2",
         Tag::Mtproto => "MTProto",
         Tag::Vmess => "VMess",
+        Tag::Trojan => "Trojan",
     }
 }
 

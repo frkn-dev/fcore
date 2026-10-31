@@ -18,7 +18,10 @@ impl ConnInfo {
             in_tag: Tag::Vmess,
             level: 0,
             email: format!("{}@{}", uuid, "pony"),
-            uuid: *uuid,
+            uuid: match std::env::var("FCORE_VMESS_NODE_IDENTITY") {
+                Ok(identity) if !identity.is_empty() => crate::utils::vmess_node_uuid(uuid, &identity),
+                _ => *uuid,
+            },
         }
     }
 }

@@ -4,6 +4,39 @@ use std::time::Instant;
 use tokio::time::{sleep, Duration as TokioDuration};
 use tracing_subscriber::EnvFilter;
 
+/// Derive a stable, node-specific VMess credential while retaining the parent
+/// connection ID for accounting and revocation.
+pub fn vmess_node_uuid(connection_id: &uuid::Uuid, node_hostname: &str) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"fcore-vmess-node-v1\0");
+    hash.update(connection_id.as_bytes());
+    hash.update(node_hostname.as_bytes());
+    let digest = hash.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // Some VMess clients accept only the familiar version-4 UUID shape.
+    // The value remains deterministically derived, not randomly generated.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
+#[cfg(test)]
+mod vmess_node_uuid_tests {
+    use super::vmess_node_uuid;
+
+    #[test]
+    fn stable_and_separate_for_each_node_and_connection() {
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        assert_eq!(vmess_node_uuid(&first, "node-a"), vmess_node_uuid(&first, "node-a"));
+        assert_ne!(vmess_node_uuid(&first, "node-a"), vmess_node_uuid(&first, "node-b"));
+        assert_ne!(vmess_node_uuid(&first, "node-a"), vmess_node_uuid(&second, "node-a"));
+        assert_eq!(vmess_node_uuid(&first, "node-a").get_version_num(), 4);
+    }
+}
+
 pub async fn run_daily<F, Fut>(task: F, target_time: NaiveTime)
 where
     F: Fn() -> Fut + Send + Sync + 'static + Clone,

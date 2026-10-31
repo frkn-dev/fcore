@@ -75,6 +75,9 @@ pub enum TagReq {
 
     #[serde(alias = "mtproto", alias = "Mtproto")]
     Mtproto,
+
+    #[serde(alias = "trojan")]
+    Trojan,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Hash, Eq)]
@@ -99,6 +102,7 @@ impl TagReq {
                 Tag::VlessXhttpCdn,
                 Tag::Vmess,
                 Tag::Shadowsocks,
+                Tag::Trojan,
             ],
             TagReq::Proxy => vec![
                 Tag::VlessTcpReality,
@@ -107,6 +111,7 @@ impl TagReq {
                 Tag::VlessXhttpCdn,
                 Tag::Vmess,
                 Tag::Shadowsocks,
+                Tag::Trojan,
                 Tag::Hysteria2,
             ],
             TagReq::Wireguard => vec![Tag::Wireguard],
@@ -118,6 +123,7 @@ impl TagReq {
             TagReq::VlessXhttpReality => vec![Tag::VlessXhttpReality],
             TagReq::VlessXhttpCdn => vec![Tag::VlessXhttpCdn],
             TagReq::Mtproto => vec![Tag::Mtproto],
+            TagReq::Trojan => vec![Tag::Trojan],
         }
     }
 
@@ -131,6 +137,7 @@ impl TagReq {
             Tag::VlessXhttpCdn => TagReq::VlessXhttpCdn,
             // No dedicated selectors for these — the xray group covers them.
             Tag::Vmess | Tag::Shadowsocks => TagReq::Xray,
+            Tag::Trojan => TagReq::Trojan,
             Tag::Hysteria2 => TagReq::Hysteria2,
             Tag::Wireguard => TagReq::Wireguard,
             Tag::AmneziaWg | Tag::AmneziaWgMobile => TagReq::AmneziaWg,
@@ -411,6 +418,7 @@ impl SubscriptionInfoRequest {
             VlessXhttpReality => [Txt, Base64, Clash].into(),
             VlessXhttpCdn => [Txt, Base64, Clash].into(),
             Mtproto => [].into(),
+            Trojan => [Txt, Base64, Clash].into(),
         }
     }
 
