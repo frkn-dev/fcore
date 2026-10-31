@@ -104,6 +104,13 @@ pub struct GatewayCountry {
     /// Per-language translations of `pool`; absent when there is none.
     #[serde(rename = "pool_translation", skip_serializing_if = "Option::is_none")]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Страна пула (ISO-код). В списке стран тот же дефект, что и на карточке:
+    /// у пула ЕС иначе стояла бы страна ноды-представителя.
+    #[serde(rename = "pool_country_code", skip_serializing_if = "Option::is_none")]
+    pub pool_country_code: Option<String>,
+    /// Название страны пула; absent = клиент переводит код сам.
+    #[serde(rename = "pool_country_name", skip_serializing_if = "Option::is_none")]
+    pub pool_country_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,6 +151,15 @@ pub struct GatewayConnection {
     /// `pool_translation`. Absent for old nodes.
     #[serde(rename = "pool", skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
+    /// Страна пула как целого (ISO-код) — для подписи под флагом на карточке
+    /// пула. Отдельное поле, потому что у членов пула страны разные (EU:
+    /// at/ee/fr/pl) и `country_code` ноды дал бы «флаг ЕС, подпись Poland».
+    /// Absent = страна берётся у ноды, как раньше.
+    #[serde(rename = "pool_country_code", skip_serializing_if = "Option::is_none")]
+    pub pool_country_code: Option<String>,
+    /// Название страны пула (опционально); absent = клиент переводит код сам.
+    #[serde(rename = "pool_country_name", skip_serializing_if = "Option::is_none")]
+    pub pool_country_name: Option<String>,
     /// Per-language translations of `pool`; absent when there is none.
     #[serde(rename = "pool_translation", skip_serializing_if = "Option::is_none")]
     pub pool_translation: Option<BTreeMap<String, String>>,
@@ -658,6 +674,8 @@ where
                             node_ips: None,
                             node_ports: None,
                             pool: Some(pool.clone()),
+                            pool_country_code: node.pool_country_code.clone(),
+                            pool_country_name: node.pool_country_name.clone(),
                             pool_translation: node.pool_translation.clone(),
                             weight: node.weight,
                             config_rev: None,
@@ -698,6 +716,9 @@ where
                     // дублированием, поэтому её здесь нет.
                     node_ports: None,
                     pool: node.pool.clone(),
+                    // у одиночной ноды страна уже есть в country_code
+                    pool_country_code: None,
+                    pool_country_name: None,
                     pool_translation: node.pool_translation.clone(),
                     weight: node.weight,
                     config_rev: config_rev(node, tag, &ips),
@@ -729,6 +750,8 @@ where
             node_ips: None,
             node_ports: None,
             pool: None,
+            pool_country_code: None,
+            pool_country_name: None,
             pool_translation: None,
             weight: 0,
             config_rev: None,
@@ -750,6 +773,8 @@ fn available_countries_from_connections(conns: &[GatewayConnection]) -> Vec<Gate
                 connection_label: conn.connection_label.clone(),
                 pool: conn.pool.clone(),
                 pool_translation: conn.pool_translation.clone(),
+                pool_country_code: conn.pool_country_code.clone(),
+                pool_country_name: conn.pool_country_name.clone(),
             });
         }
     }
@@ -1538,6 +1563,8 @@ where
             connection_label: "All countries".to_string(),
             pool: None,
             pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
         }],
         active_device_count: active_devices,
         max_device_count: 5,
@@ -2151,8 +2178,9 @@ mod tests {
             node_ips: None,
             node_ports: None,
             pool: None,
-            pool_translation: None,
-            weight: 0,
+            pool_country_code: None,
+            pool_country_name: None,
+            pool_translation: None,            weight: 0,
             config_rev: None,
         };
         // Single-address node without a pool: both optional fields are omitted
@@ -2212,6 +2240,8 @@ mod tests {
             },
             pool: Some("Russia".into()),
             pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
             weight: 0,
         }
     }
@@ -2265,6 +2295,8 @@ mod tests {
             node_ips: Some(ports.keys().cloned().collect()),
             node_ports: Some(ports.clone()),
             pool: Some("EU Рилзопровод".into()),
+            pool_country_code: Some("EU".into()),
+            pool_country_name: Some("Europe".into()),
             pool_translation: None,
             weight: 0,
             config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
@@ -2326,6 +2358,8 @@ mod tests {
             node_ips: Some(ports.keys().cloned().collect()),
             node_ports: Some(ports.clone()),
             pool: Some("RU Рилзопровод".into()),
+            pool_country_code: Some("RU".into()),
+            pool_country_name: Some("Russia".into()),
             pool_translation: None,
             weight: 0,
             config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
@@ -2343,8 +2377,9 @@ mod tests {
             node_ips: None,
             node_ports: None,
             pool: None,
-            pool_translation: None,
-            weight: 0,
+            pool_country_code: None,
+            pool_country_name: None,
+            pool_translation: None,            weight: 0,
             config_rev: None,
         };
 
@@ -2373,6 +2408,8 @@ mod tests {
                         connection_label: "RU Рилзопровод · AmneziaWG".into(),
                         pool: Some("RU Рилзопровод".into()),
                         pool_translation: None,
+                        pool_country_code: Some("RU".into()),
+                        pool_country_name: Some("Russia".into()),
                     },
                     GatewayCountry {
                         country_code: "NL".into(),
@@ -2381,6 +2418,8 @@ mod tests {
                         connection_label: "NL777 · AmneziaWG".into(),
                         pool: None,
                         pool_translation: None,
+                        pool_country_code: None,
+                        pool_country_name: None,
                     },
                 ],
                 connections: vec![pool_card, single_card],
@@ -2408,6 +2447,87 @@ mod tests {
         );
         assert!(conns[1].get("node_ports").is_none());
         assert!(conns[1].get("node_ips").is_none());
+    }
+
+    /// Страна пула едет на карточке отдельным полем: у членов пула страны
+    /// разные, и `country_code` ноды дал бы «флаг ЕС, подпись Poland».
+    #[test]
+    fn pool_country_is_serialized_next_to_country() {
+        let conn = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "AT".into(),
+            country_name: "Austria".into(),
+            service_protocol: "awg-mobile".into(),
+            env: "production".into(),
+            connection_label: "EU Рилзопровод · AmneziaWG".into(),
+            node_ips: Some(vec!["177.177.20.172".into()]),
+            node_ports: Some(BTreeMap::from([("177.177.20.172".to_string(), 443u16)])),
+            pool: Some("EU Рилзопровод".into()),
+            pool_country_code: Some("EU".into()),
+            pool_country_name: Some("Europe".into()),
+            pool_translation: None,
+            weight: 0,
+            config_rev: None,
+        };
+        let v = serde_json::to_value(&conn).unwrap();
+        // страна ноды остаётся как была — клиент берёт её для одиночных нод
+        assert_eq!(v["country_code"], "AT");
+        // а страна пула — своя
+        assert_eq!(v["pool_country_code"], "EU");
+        assert_eq!(v["pool_country_name"], "Europe");
+    }
+
+    /// Список стран для выбора тоже не должен врать про пул.
+    #[test]
+    fn available_countries_carry_pool_country() {
+        let pool = GatewayConnection {
+            connection_uuid: uuid::Uuid::from_u128(1),
+            node_id: uuid::Uuid::nil(),
+            country_code: "AT".into(),
+            country_name: "Austria".into(),
+            service_protocol: "awg-mobile".into(),
+            env: "production".into(),
+            connection_label: "EU Рилзопровод · AmneziaWG".into(),
+            node_ips: None,
+            node_ports: None,
+            pool: Some("EU Рилзопровод".into()),
+            pool_country_code: Some("EU".into()),
+            pool_country_name: Some("Europe".into()),
+            pool_translation: None,
+            weight: 0,
+            config_rev: None,
+        };
+        let countries = available_countries_from_connections(&[pool]);
+        assert_eq!(countries.len(), 1);
+        assert_eq!(countries[0].pool_country_code.as_deref(), Some("EU"));
+        assert_eq!(countries[0].pool_country_name.as_deref(), Some("Europe"));
+    }
+
+    /// Пусто = прежнее поведение: поля не отправляются вовсе, клиент берёт
+    /// страну ноды. Старые ноды и старые клиенты не ломаются.
+    #[test]
+    fn pooled_country_absent_keeps_old_shape() {
+        let conn = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "PL".into(),
+            country_name: "Poland".into(),
+            service_protocol: "awg-mobile".into(),
+            env: "production".into(),
+            connection_label: "Poland".into(),
+            node_ips: None,
+            node_ports: None,
+            pool: None,
+            pool_country_code: None,
+            pool_country_name: None,
+            pool_translation: None,
+            weight: 0,
+            config_rev: None,
+        };
+        let v = serde_json::to_value(&conn).unwrap();
+        assert!(v.get("pool_country_code").is_none());
+        assert!(v.get("pool_country_name").is_none());
     }
 
     /// Внутри ноды несколько адресов — один интерфейс, значит один порт.
@@ -2504,6 +2624,8 @@ mod tests {
                 ("77.221.152.88".to_string(), 8443u16),
             ])),
             pool: Some("Russia".into()),
+            pool_country_code: Some("RU".into()),
+            pool_country_name: Some("Russia".into()),
             pool_translation: None,
             weight: 0,
             config_rev: Some("abc".into()),
@@ -2536,12 +2658,20 @@ mod tests {
             node_ips: None,
             node_ports: None,
             pool: None,
-            pool_translation: None,
-            weight: 0,
+            pool_country_code: None,
+            pool_country_name: None,
+            pool_translation: None,            weight: 0,
             config_rev: None,
         };
         let v = serde_json::to_value(&conn).unwrap();
-        for field in ["node_ips", "node_ports", "pool", "config_rev"] {
+        for field in [
+            "node_ips",
+            "node_ports",
+            "pool",
+            "pool_country_code",
+            "pool_country_name",
+            "config_rev",
+        ] {
             assert!(v.get(field).is_none(), "{field} must be omitted");
         }
     }
@@ -2592,6 +2722,8 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
             weight: 0,
         };
         let rev = config_rev(&node, Tag::Wireguard, &[]).unwrap();
@@ -2636,6 +2768,8 @@ mod tests {
             node_ips: None,
             node_ports: None,
             pool: Some("Finland".to_string()),
+            pool_country_code: None,
+            pool_country_name: None,
             pool_translation: Some(
                 [
                     ("en".to_string(), "Finland".to_string()),
@@ -2860,6 +2994,8 @@ mod tests {
                 node_ips: Some(ips),
                 pool: pool.map(|s| s.to_string()),
                 pool_translation: None,
+                pool_country_code: None,
+                pool_country_name: None,
                 weight: 0,
             }
         }

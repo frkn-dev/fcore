@@ -58,6 +58,11 @@ pub struct NodeConfig {
     pub pool: Option<String>,
     /// Per-language translations of `pool` (e.g. en/ru/uk).
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Страна пула как целого (ISO-код): подпись под флагом на карточке пула.
+    /// None = как раньше, страна берётся у ноды.
+    pub pool_country_code: Option<String>,
+    /// Название страны пула для подписи; None = клиент переводит код сам.
+    pub pool_country_name: Option<String>,
     /// Приоритет ноды в пуле: больше — предпочтительнее. Клиент сортирует
     /// пул сначала по весу, потом по задержке/скору. 0 — нейтрально.
     pub weight: i32,
@@ -87,6 +92,16 @@ pub struct NodeConfigRaw {
     /// and `ua` is accepted as an alias of `uk`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Страна пула как единое целое (ISO-код): подпись под флагом на карточке
+    /// пула. У членов разных стран (EU: at/ee/fr/pl) страна ноды не годится —
+    /// иначе получилось бы «флаг ЕС, подпись Poland». Пусто = как раньше,
+    /// страна берётся у ноды.
+    #[serde(default)]
+    pub pool_country_code: Option<String>,
+    /// Название страны пула для подписи (опционально); пусто = клиент берёт
+    /// своё название по коду.
+    #[serde(default)]
+    pub pool_country_name: Option<String>,
     /// Приоритет ноды в пуле (config.toml `[node] weight`). Отсутствует =
     /// 0, то есть нода равноправна с остальными.
     #[serde(default)]
@@ -96,6 +111,24 @@ pub struct NodeConfigRaw {
 /// Trims the configured pool name and treats a blank value as absent.
 fn normalize_pool(pool: Option<String>) -> Option<String> {
     pool.map(|p| p.trim().to_string()).filter(|p| !p.is_empty())
+}
+
+/// ISO-код страны пула: обрезаем и приводим к верхнему регистру.
+///
+/// Пустая строка (то, что реально пишут в конфиге, чтобы «не задано») — это
+/// `None`. Код вне 2–3 латинских букв отбрасываем: такой флаг всё равно не
+/// нарисуется, а мусор в подписи хуже отсутствия подписи.
+fn normalize_pool_country_code(code: Option<String>) -> Option<String> {
+    let code = code?.trim().to_ascii_uppercase();
+    if code.len() < 2 || code.len() > 3 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(code)
+}
+
+/// Название страны пула: обрезка, пустое = не задано.
+fn normalize_pool_country_name(name: Option<String>) -> Option<String> {
+    name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
 }
 
 /// Normalizes a `pool_translation` map: trims keys/values, lowercases the
@@ -156,6 +189,8 @@ impl NodeConfig {
             node_ips: raw.node_ips,
             pool: normalize_pool(raw.pool),
             pool_translation: normalize_pool_translation(raw.pool_translation),
+            pool_country_code: normalize_pool_country_code(raw.pool_country_code),
+            pool_country_name: normalize_pool_country_name(raw.pool_country_name),
             weight: raw.weight,
         })
     }
