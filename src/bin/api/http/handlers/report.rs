@@ -1625,6 +1625,107 @@ where
     out
 }
 
+/// GET /v1/admin/report/connect-stats — сколько подключений было у подписки
+/// за период и по каким адресам. Провалы сюда не входят: они лежат в
+/// отчётах (`block_observations`), потому что клиент шлёт их другим путём.
+#[derive(Debug, serde::Deserialize)]
+pub struct ConnectStatsQuery {
+    #[serde(default)]
+    pub subscription: Option<String>,
+    #[serde(default)]
+    pub support_tag: Option<String>,
+    /// Период в днях, по умолчанию 7.
+    #[serde(default)]
+    pub days: Option<i64>,
+}
+
+pub async fn admin_connect_stats_handler<N, C, S>(
+    query: ConnectStatsQuery,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<warp::reply::Response, Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(json_status(404, "not found"));
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(json_status(401, "unauthorized"));
+    }
+
+    let subscription = match query.subscription.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.parse::<uuid::Uuid>() {
+            Ok(v) => Some(v),
+            Err(_) => return Ok(json_status(400, "invalid_subscription")),
+        },
+        None => None,
+    };
+    let support_tag = match query.support_tag.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.parse::<uuid::Uuid>() {
+            Ok(v) => Some(v),
+            Err(_) => return Ok(json_status(400, "invalid_support_tag")),
+        },
+        None => None,
+    };
+    let days = query.days.unwrap_or(7).clamp(1, 90);
+    let to = chrono::Utc::now();
+    let from = to - chrono::Duration::days(days);
+
+    match memory
+        .db
+        .connect()
+        .stats(subscription, support_tag, from, to)
+        .await
+    {
+        Ok(mut body) => {
+            // Провалы — из отчётов: клиент присылает их через v1/report/block,
+            // и в observations они лежат строками по адресам.
+            let failed = memory
+                .db
+                .report()
+                .observations(subscription, None, 500)
+                .await
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|r| {
+                            matches!(
+                                r.get("state").and_then(|v| v.as_str()),
+                                Some("timeout") | Some("refused") | Some("err") | Some("no-host")
+                            )
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("failed".to_string(), serde_json::json!(failed));
+                obj.insert("days".to_string(), serde_json::json!(days));
+            }
+            Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({"status": 200, "response": body})),
+                warp::http::StatusCode::OK,
+            )
+            .into_response())
+        }
+        Err(err) => {
+            tracing::error!("connect stats failed: {err}");
+            Ok(json_status(500, "connect_stats_failed"))
+        }
+    }
+}
+
 pub async fn admin_block_report_handler<N, C, S>(
     query: BlockReportAggregateQuery,
     memory: MemSync<N, C, S>,

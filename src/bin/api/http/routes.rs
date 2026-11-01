@@ -1157,6 +1157,35 @@ where
                 },
             );
 
+        // GET /v1/admin/report/connect-stats — события подключения по подписке.
+        let get_connect_stats_route = warp::get()
+            .and(warp::path("v1"))
+            .and(warp::path("admin"))
+            .and(warp::path("report"))
+            .and(warp::path("connect-stats"))
+            .and(warp::path::end())
+            .and(warp::query::<crate::http::handlers::report::ConnectStatsQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(
+                |query: crate::http::handlers::report::ConnectStatsQuery,
+                 sync: MemSync<N, C, S>,
+                 admin_enabled: bool,
+                 admin_token: String,
+                 auth_header: Option<String>| async move {
+                    crate::http::handlers::report::admin_connect_stats_handler(
+                        query,
+                        sync,
+                        admin_enabled,
+                        admin_token,
+                        auth_header,
+                    )
+                    .await
+                },
+            );
+
         // GET /v1/admin/report/observations — сырые отчёты для поддержки.
         let get_report_observations_route = warp::get()
             .and(warp::path("v1"))
@@ -1645,6 +1674,7 @@ where
             .or(get_block_report_admin_route)
             .or(get_client_reports_route)
             .or(get_report_observations_route)
+            .or(get_connect_stats_route)
             .or(get_exit_usage_admin_route)
             .or(get_entry_usage_admin_route)
             .or(get_admin_alerts_route)

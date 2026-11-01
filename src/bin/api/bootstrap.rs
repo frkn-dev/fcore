@@ -65,6 +65,7 @@ where
         db.report().ensure_table().await?;
         db.alerts().ensure_table().await?;
         db.watchcat().ensure_table().await?;
+        db.connect().ensure_table().await?;
         db.usage().ensure_tables().await?;
 
         // Оффлайн geo-базы: без них телеметрия блокировок работает, но без

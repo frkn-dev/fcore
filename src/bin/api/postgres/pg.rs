@@ -136,6 +136,10 @@ impl PgContext {
         crate::postgres::alerts::PgAlerts::new(self.manager.clone())
     }
 
+    pub fn connect(&self) -> crate::postgres::connect::PgConnect {
+        crate::postgres::connect::PgConnect::new(self.manager.clone())
+    }
+
     pub fn watchcat(&self) -> crate::postgres::watchcat::PgWatchcat {
         crate::postgres::watchcat::PgWatchcat::new(self.manager.clone())
     }

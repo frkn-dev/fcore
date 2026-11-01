@@ -254,6 +254,21 @@ pub struct GatewayConfigRequest {
     pub connection_id: Option<uuid::Uuid>,
     #[serde(rename = "node_id")]
     pub node_id: Option<uuid::Uuid>,
+    // --- connect-event (frkn-docs/api-connect-event.md) ---
+    // Всё опционально: старый клиент этих полей не шлёт, новый клиент со
+    // старым api просто игнорируется serde (deny_unknown_fields не включён).
+    /// Признак «это событие подключения, а не обычный refresh конфига».
+    #[serde(rename = "is_connect_event", default)]
+    pub is_connect_event: bool,
+    /// IP, который клиент реально набрал (у пула адресов много).
+    #[serde(rename = "endpoint", default)]
+    pub endpoint: Option<String>,
+    /// Порт этого адреса: у пула у каждого свой.
+    #[serde(rename = "endpoint_port", default)]
+    pub endpoint_port: Option<i64>,
+    /// installation uuid — тот же, что в отчётах `v1/report/block`.
+    #[serde(rename = "support_tag", default)]
+    pub support_tag: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1966,6 +1981,12 @@ where
         .into_response());
     };
 
+    // Событие подключения пишем ДО сборки ответа: клиент ждёт обычный
+    // конфиг, и сбой записи не должен его ломать (ошибка только в журнал).
+    if req.is_connect_event {
+        record_connect_event(&req, &sub_id, service_protocol, &memory, remote, x_forwarded_for.as_deref()).await;
+    }
+
     let params = GatewayConfigParams {
         service_protocol,
         service_type,
@@ -1986,6 +2007,71 @@ where
     {
         Ok(response) => Ok(warp::reply::json(&response).into_response()),
         Err(response) => Ok(response),
+    }
+}
+
+/// Пишет событие подключения. Best-effort: любые ошибки — в журнал,
+/// ответ клиенту не меняется.
+async fn record_connect_event<N, C, S>(
+    req: &GatewayConfigRequest,
+    sub_id: &uuid::Uuid,
+    protocol: &str,
+    memory: &MemSync<N, C, S>,
+    remote: Option<std::net::SocketAddr>,
+    x_forwarded_for: Option<&str>,
+) where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+{
+    let endpoint = req
+        .endpoint
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
+    let support_tag = req
+        .support_tag
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok());
+    let platform = match req.service_type.as_deref() {
+        Some(t) if t.contains("ios") => "ios",
+        _ => req.os_version.split(' ').next().unwrap_or("unknown"),
+    };
+    // Страна выхода по адресу: у нас уже есть GeoIP на api.
+    let country = endpoint.and_then(|ip| fcore::geoip::lookup_full(ip).country);
+
+    let event = crate::postgres::connect::ConnectEvent {
+        subscription_id: Some(*sub_id),
+        node_id: req.node_id,
+        connection_id: req.connection_id,
+        protocol: protocol.to_string(),
+        endpoint,
+        endpoint_port: req.endpoint_port.map(|p| p as i32),
+        support_tag,
+        app_version: req.app_version.clone(),
+        platform: platform.to_string(),
+        country,
+    };
+    let _ = (remote, x_forwarded_for);
+
+    if let Err(err) = memory.db.connect().record(&event).await {
+        tracing::warn!(
+            event = "connect_event_failed",
+            error = %err,
+            endpoint = ?endpoint,
+            "не удалось записать событие подключения"
+        );
     }
 }
 
@@ -2040,6 +2126,48 @@ mod tests {
 
     fn wg_connection(param: WgParam) -> Connection {
         Connection::new(&Env::Production, None, Proto::Wireguard { param }, None)
+    }
+
+    /// connect-event: новые поля читаются, старый запрос без них — валиден.
+    /// Это и есть обещание совместимости из frkn-docs/api-connect-event.md.
+    #[test]
+    fn connect_event_fields_are_optional() {
+        let base = serde_json::json!({
+            "os_version": "26.6.2",
+            "app_version": "4.8.14.79",
+            "app_language": "ru",
+            "installation_uuid": "023d804b-e677-446e-aba4-d02742fb0e3a",
+            "service_type": "amnezia-premium",
+            "service_protocol": "awg-mobile",
+            "auth_data": {"api_key": "x"}
+        });
+
+        // обычный refresh конфига — событие не отправлено
+        let plain: GatewayConfigRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(!plain.is_connect_event);
+        assert!(plain.endpoint.is_none());
+        assert!(plain.endpoint_port.is_none());
+        assert!(plain.support_tag.is_none());
+
+        // событие подключения
+        let mut with_event = base;
+        with_event["is_connect_event"] = serde_json::json!(true);
+        with_event["connection_id"] = serde_json::json!("504921fc-7201-4b5d-a40c-808570923bd3");
+        with_event["endpoint"] = serde_json::json!("93.89.220.49");
+        with_event["endpoint_port"] = serde_json::json!(443);
+        with_event["support_tag"] = serde_json::json!("023d804b-e677-446e-aba4-d02742fb0e3a");
+        let ev: GatewayConfigRequest = serde_json::from_value(with_event).unwrap();
+        assert!(ev.is_connect_event);
+        assert_eq!(ev.endpoint.as_deref(), Some("93.89.220.49"));
+        assert_eq!(ev.endpoint_port, Some(443));
+        assert_eq!(
+            ev.connection_id.unwrap().to_string(),
+            "504921fc-7201-4b5d-a40c-808570923bd3"
+        );
+        assert_eq!(
+            ev.support_tag.as_deref(),
+            Some("023d804b-e677-446e-aba4-d02742fb0e3a")
+        );
     }
 
     #[test]
