@@ -7,7 +7,10 @@ fn default_disabled() -> bool {
 }
 
 fn default_log_level() -> String {
-    "debug".to_string()
+    // Не debug: при опечатке в ключе (например `log_velel`) сюда падает
+    // значение по умолчанию, и debug печатает приватные ключи в journalctl.
+    // Debug включается только явно.
+    "info".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]

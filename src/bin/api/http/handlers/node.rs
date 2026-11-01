@@ -18,8 +18,38 @@ use super::super::{
 
 // Register node handler
 // POST /node
+/// Правила для `node_`-токена при регистрации ноды.
+///
+/// Токен лежит на машине self-hosted пользователя, поэтому он не даёт прав на
+/// общие пространства: только своя нода, только персональный env и только тот
+/// env, что у ноды уже был. Без этого обычный пользовательский токен
+/// регистрировал ноду в `dev` и получал чужих пиров.
+pub(crate) fn node_token_allows(
+    bound_uuid: Option<uuid::Uuid>,
+    request_uuid: uuid::Uuid,
+    request_env_personal: bool,
+    existing_env: Option<&fcore::Env>,
+    request_env: &fcore::Env,
+) -> Result<(), &'static str> {
+    if let Some(bound) = bound_uuid {
+        if bound != request_uuid {
+            return Err("node token bound to another node");
+        }
+    }
+    if !request_env_personal {
+        return Err("node token cannot register a shared env");
+    }
+    if let Some(existing) = existing_env {
+        if existing != request_env {
+            return Err("env mismatch for node token");
+        }
+    }
+    Ok(())
+}
+
 pub async fn post_node_handler<N, C, S>(
     node_req: NodeRequest,
+    auth_header: String,
     memory: MemSync<N, C, S>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -35,7 +65,15 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    tracing::debug!("Received node request: {:?}", node_req);
+    // Сводка вместо `{:?}`: в запросе инбаунды с секретами (mtproto_secret),
+    // а на debug-уровне это утечка в journalctl.
+    tracing::debug!(
+        node = %node_req.uuid,
+        env = %node_req.env,
+        hostname = %node_req.hostname,
+        inbounds = node_req.inbounds.len(),
+        "node registration"
+    );
 
     if let Err(e) = node_req.validate() {
         return Ok(warp::reply::with_status(
@@ -46,6 +84,42 @@ where
             }),
             StatusCode::BAD_REQUEST,
         ));
+    }
+
+    // `node_`-токен живёт на машине self-hosted пользователя, поэтому он не
+    // должен давать права на чужие пространства: только своя нода, только
+    // персональный env и только тот env, который у ноды уже был. До этой
+    // проверки обычный пользовательский токен регистрировал ноду в dev.
+    if let Some(token) = auth_header.strip_prefix("Bearer ") {
+        if token.starts_with("node_") {
+            let bound = memory
+                .db
+                .node_access_token()
+                .find_by_token(token)
+                .await
+                .ok()
+                .flatten();
+            let existing_env = {
+                let mem = memory.memory.read().await;
+                mem.nodes.get_by_id(&node_req.uuid).map(|n| n.env.clone())
+            };
+            if let Err(reason) = node_token_allows(
+                bound,
+                node_req.uuid,
+                node_req.env.is_personal(),
+                existing_env.as_ref(),
+                &node_req.env,
+            ) {
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+                        status: StatusCode::FORBIDDEN.as_u16(),
+                        message: reason.to_string(),
+                        response: None,
+                    }),
+                    StatusCode::FORBIDDEN,
+                ));
+            }
+        }
     }
 
     if node_req.env.is_personal() {
@@ -402,4 +476,55 @@ where
         warp::reply::json(&status),
         status_code,
     ))
+}
+
+#[cfg(test)]
+mod node_token_tests {
+    use super::node_token_allows;
+    use fcore::Env;
+
+    fn personal(tag: &str) -> Env {
+        // так же, как personal_env() в private.rs
+        Env::Custom(format!("custompersonal{tag}"))
+    }
+
+    #[test]
+    fn node_token_cannot_register_shared_env() {
+        let id = uuid::Uuid::from_u128(1);
+        // именно этот сценарий и случился: обычный self-hosted токен -> dev
+        assert_eq!(
+            node_token_allows(Some(id), id, false, None, &Env::Dev),
+            Err("node token cannot register a shared env")
+        );
+    }
+
+    #[test]
+    fn node_token_cannot_claim_other_node() {
+        let own = uuid::Uuid::from_u128(1);
+        let other = uuid::Uuid::from_u128(2);
+        assert_eq!(
+            node_token_allows(Some(own), other, true, None, &personal("a")),
+            Err("node token bound to another node")
+        );
+    }
+
+    #[test]
+    fn node_token_cannot_move_between_envs() {
+        let id = uuid::Uuid::from_u128(1);
+        let existing = personal("a");
+        let requested = personal("b");
+        assert_eq!(
+            node_token_allows(Some(id), id, true, Some(&existing), &requested),
+            Err("env mismatch for node token")
+        );
+    }
+
+    #[test]
+    fn own_personal_env_is_allowed() {
+        let id = uuid::Uuid::from_u128(1);
+        let env = personal("a");
+        assert!(node_token_allows(Some(id), id, true, Some(&env), &env).is_ok());
+        // первая регистрация: строки ещё нет — разрешаем, env зафиксируется
+        assert!(node_token_allows(Some(id), id, true, None, &env).is_ok());
+    }
 }

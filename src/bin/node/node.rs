@@ -129,7 +129,11 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         let row_config = WireguardServerConfig::from_file(&settings.wg.path)?;
         let mut wg: WireguardSettings = row_config.try_into()?;
         wg.keepalive = settings.wg.keepalive;
-        debug!("{:?}", wg);
+        // Никаких `{:?}`: в WireguardSettings лежит WgKeys с приватным ключом.
+        debug!(
+            "wireguard: iface {}, {}:{}, peers из файла",
+            wg.interface, wg.address, wg.port
+        );
         let client = match WgApi::new(&wg.interface) {
             Ok(c) => c,
             Err(e) => panic!("Cannot create WG client: {}", e),
@@ -148,7 +152,10 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         let mut awg: AmneziaWgSettings = raw_config.try_into()?;
         awg.keepalive = settings.awg.keepalive;
 
-        debug!("{:?}", awg);
+        debug!(
+            "amneziawg: iface {:?}, порт {}",
+            awg.interface.interface, awg.interface.port
+        );
 
         let client = AwgInterface::connect(awg.interface.interface.clone())
             .map_err(|e| Error::Custom(format!("Cannot create AWG client: {}", e)))?;

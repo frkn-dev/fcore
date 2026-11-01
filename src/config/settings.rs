@@ -161,10 +161,77 @@ impl NodeConfig {
     }
 }
 
+/// Предупреждает о ключах, которые похожи на настройку логирования, но ею не
+/// являются: `log_velel`, `log-level`, `loglevel`. Опечатка в таком ключе
+/// молча оставляет уровень по умолчанию — на self-hosted ноде это привело к
+/// debug и печати приватных ключей в journalctl.
+/// Возвращает ключи, похожие на настройку уровня логирования, но ею не
+/// являющиеся. Вынесено отдельно, чтобы это можно было покрыть тестом.
+fn suspicious_level_keys(config_str: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in config_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with('[') {
+            continue;
+        }
+        let Some((key, _value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"');
+        let lowered = key.to_ascii_lowercase();
+        // Именно starts_with("log"): опечатка `log_velel` слова «level» не
+        // содержит, а `contains("level")` её пропускал.
+        if lowered.starts_with("log") && key != "log_level" {
+            out.push(key.to_string());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod log_key_tests {
+    use super::suspicious_level_keys;
+
+    #[test]
+    fn typo_in_log_level_is_detected() {
+        let cfg = "[service]\nlog_velel = \"info\"\n";
+        assert_eq!(suspicious_level_keys(cfg), vec!["log_velel".to_string()]);
+    }
+
+    #[test]
+    fn correct_key_and_comments_are_ignored() {
+        let cfg = "# log_velel = \"debug\"\n[service]\nlog_level = \"info\"\n";
+        assert!(suspicious_level_keys(cfg).is_empty());
+    }
+}
+
+fn warn_suspicious_level_keys(config_str: &str) {
+    for (line_no, line) in config_str.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with('[') {
+            continue;
+        }
+        let Some((key, _value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"');
+        let lowered = key.to_ascii_lowercase();
+        if lowered.contains("level") && key != "log_level" {
+            tracing::warn!(
+                key = %key,
+                line = line_no + 1,
+                hint = "неизвестный ключ уровня логирования: опечатка? рабочий ключ — log_level",
+                "config_unknown_key"
+            );
+        }
+    }
+}
+
 pub trait Settings: Sized {
     fn read_config<T: DeserializeOwned>(config_file: &str) -> Result<T> {
         let config_str = fs::read_to_string(config_file)?;
         let settings: T = toml::from_str(&config_str)?;
+        warn_suspicious_level_keys(&config_str);
         Ok(settings)
     }
 

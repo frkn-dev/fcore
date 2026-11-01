@@ -92,7 +92,15 @@ where
 
         let endpoint_str = endpoint_url.to_string();
 
-        tracing::debug!("POST /connections/sync Body: {:?}", req);
+        // В теле sync лежат приватные ключи клиентов (wg_privkey), поэтому
+        // печатаем только размер и число соединений: при level=debug журнал
+        // иначе становится хранилищем ключей (так и случилось на self-hosted).
+        tracing::debug!(
+            "POST /connections/sync: proto {:?}, env {}, {} байт",
+            req.proto,
+            req.env,
+            serde_json::to_string(&req).map(|s| s.len()).unwrap_or(0)
+        );
 
         let token = load_runtime_token(&token);
         let res = HttpClient::new()
@@ -150,8 +158,19 @@ where
         }
         let endpoint_str = endpoint_url.to_string();
 
-        match serde_json::to_string_pretty(&node) {
-            Ok(json) => tracing::debug!("Serialized node for environment '{}': {}", node.env, json),
+        // Раньше здесь печатался весь JSON ноды, включая инбаунды с
+        // `mtproto_secret`. Оставляем сводку: размер и набор тегов.
+        match serde_json::to_string(&node) {
+            Ok(json) => tracing::debug!(
+                "Serialized node for environment '{}': {} байт, инбаунды [{}]",
+                node.env,
+                json.len(),
+                node.inbounds
+                    .values()
+                    .map(|i| i.tag.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Err(e) => tracing::error!("Error serializing node '{}': {}", node.hostname, e),
         }
 
