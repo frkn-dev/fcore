@@ -153,8 +153,11 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         awg.keepalive = settings.awg.keepalive;
 
         debug!(
-            "amneziawg: iface {:?}, порт {}",
-            awg.interface.interface, awg.interface.port
+            "amneziawg: iface {}, {:?}:{}, mtu {:?}",
+            awg.interface.interface,
+            awg.interface.address,
+            awg.interface.listen_port,
+            awg.interface.mtu
         );
 
         let client = AwgInterface::connect(awg.interface.interface.clone())
