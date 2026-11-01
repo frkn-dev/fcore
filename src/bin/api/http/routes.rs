@@ -143,7 +143,6 @@ where
             .and(warp::path::end())
             .and(mgmt_auth.clone())
             .and(warp::body::json::<NodeRequest>())
-            .and(warp::header::<String>("authorization"))
             .and(with_sync(self.sync.clone()))
             .and_then(post_node_handler);
 

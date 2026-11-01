@@ -321,6 +321,46 @@ fn refresh_env(existing: Option<&Env>, requested: &Env) -> Result<Env, &'static 
     Ok(requested.clone())
 }
 
+#[cfg(test)]
+mod refresh_env_tests {
+    use super::refresh_env;
+    use fcore::Env;
+
+    fn personal(tag: &str) -> Env {
+        // в БД это `custompersonal…`, Display добавляет "custom" к inner-имени
+        Env::Custom(format!("personal{tag}"))
+    }
+
+    /// Инцидент: в конфиге self-hosted ноды остался `env = "dev"` от старого
+    /// установщика, а в базе она в персональном env. Зарегистрированный env
+    /// побеждает, в dev нода не уезжает.
+    #[test]
+    fn registered_personal_env_wins_over_requested_dev() {
+        let registered = personal("a");
+        assert_eq!(refresh_env(Some(&registered), &Env::Dev), Ok(registered));
+    }
+
+    /// Нода, зарегистрированная в общем env, приватной быть не может.
+    #[test]
+    fn shared_registered_env_is_refused() {
+        assert_eq!(
+            refresh_env(Some(&Env::Dev), &Env::Dev),
+            Err("refusing shared env for private node")
+        );
+    }
+
+    /// Новая нода без строки в базе: только персональный env.
+    #[test]
+    fn unknown_node_must_ask_for_personal_env() {
+        assert_eq!(
+            refresh_env(None, &Env::Dev),
+            Err("personal env required")
+        );
+        let env = personal("a");
+        assert_eq!(refresh_env(None, &env), Ok(env));
+    }
+}
+
 /// Отметка «нода только что зарегистрировалась».
 ///
 /// Теги обязаны совпадать с тегами настоящих heartbeat от агента: ключ серии

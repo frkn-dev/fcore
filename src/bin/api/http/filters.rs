@@ -97,14 +97,16 @@ where
                 {
                     return Ok(());
                 }
+                // `node_`-токен живёт на машине self-hosted пользователя. Это
+                // не management-доступ: такие ноды регистрируются только через
+                // POST /v1/private/nodes (inst_ -> node_), где env выводится из
+                // подписки. Иначе токен открывал регистрацию в общих dev/ru/wl
+                // и отдавал чужих пиров.
                 if token.starts_with("node_") {
-                    match mem_sync.db.node_access_token().find_by_token(token).await {
-                        Ok(Some(_)) => return Ok(()),
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::error!("node token lookup failed: {}", e);
-                        }
-                    }
+                    tracing::warn!("node_token_used_as_mgmt: отказ на management-маршруте");
+                    return Err(warp::reject::custom(AuthError(
+                        "node token is not a management token".to_string(),
+                    )));
                 }
                 Err(warp::reject::custom(AuthError("Unauthorized".to_string())))
             }

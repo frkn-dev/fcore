@@ -18,44 +18,8 @@ use super::super::{
 
 // Register node handler
 // POST /node
-/// Что делать с env при регистрации по `node_`-токену.
-pub(crate) enum NodeTokenEnv {
-    /// Использовать этот env (может отличаться от присланного в запросе).
-    Use(fcore::Env),
-    Deny(&'static str),
-}
-
-/// Правила для `node_`-токена при регистрации ноды.
-///
-/// Токен лежит на машине self-hosted пользователя, поэтому он не даёт прав на
-/// общие пространства. Но и ломать старые установки нельзя: установщик
-/// (`frkn.org/install`) годами писал в конфиг `env = "dev"`, а api подменял
-/// env на персональный только при регистрации. Поэтому при известной ноде
-/// env не отвергается, а **перезаписывается** на зарегистрированный.
-pub(crate) fn node_token_env(
-    bound_uuid: Option<uuid::Uuid>,
-    request_uuid: uuid::Uuid,
-    request_env: &fcore::Env,
-    existing_env: Option<&fcore::Env>,
-) -> NodeTokenEnv {
-    if let Some(bound) = bound_uuid {
-        if bound != request_uuid {
-            return NodeTokenEnv::Deny("node token bound to another node");
-        }
-    }
-    match existing_env {
-        // Нода уже известна: её env — единственный допустимый.
-        Some(existing) if existing.is_personal() => NodeTokenEnv::Use(existing.clone()),
-        Some(_) => NodeTokenEnv::Deny("existing node env is not personal"),
-        // Первая регистрация: разрешаем только персональный env.
-        None if request_env.is_personal() => NodeTokenEnv::Use(request_env.clone()),
-        None => NodeTokenEnv::Deny("node token cannot register a shared env"),
-    }
-}
-
 pub async fn post_node_handler<N, C, S>(
-    mut node_req: NodeRequest,
-    auth_header: String,
+    node_req: NodeRequest,
     memory: MemSync<N, C, S>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -96,45 +60,6 @@ where
     // должен давать права на чужие пространства: только своя нода, только
     // персональный env и только тот env, который у ноды уже был. До этой
     // проверки обычный пользовательский токен регистрировал ноду в dev.
-    if let Some(token) = auth_header.strip_prefix("Bearer ") {
-        if token.starts_with("node_") {
-            let bound = memory
-                .db
-                .node_access_token()
-                .find_by_token(token)
-                .await
-                .ok()
-                .flatten();
-            let existing_env = {
-                let mem = memory.memory.read().await;
-                mem.nodes.get_by_id(&node_req.uuid).map(|n| n.env.clone())
-            };
-            match node_token_env(bound, node_req.uuid, &node_req.env, existing_env.as_ref()) {
-                NodeTokenEnv::Use(env) => {
-                    if env != node_req.env {
-                        tracing::warn!(
-                            node = %node_req.uuid,
-                            requested = %node_req.env,
-                            actual = %env,
-                            "node_token_env_rewritten: в конфиге ноды чужой env, используем зарегистрированный"
-                        );
-                        node_req.env = env;
-                    }
-                }
-                NodeTokenEnv::Deny(reason) => {
-                    return Ok(warp::reply::with_status(
-                        warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
-                            status: StatusCode::FORBIDDEN.as_u16(),
-                            message: reason.to_string(),
-                            response: None,
-                        }),
-                        StatusCode::FORBIDDEN,
-                    ));
-                }
-            }
-        }
-    }
-
     if node_req.env.is_personal() {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
@@ -489,71 +414,4 @@ where
         warp::reply::json(&status),
         status_code,
     ))
-}
-
-#[cfg(test)]
-mod node_token_tests {
-    use super::{node_token_env, NodeTokenEnv};
-    use fcore::Env;
-
-    fn personal(tag: &str) -> Env {
-        // В БД это `custompersonal…`, но Display добавляет "custom" к inner-имени,
-        // а is_personal() смотрит как раз на inner-имя.
-        Env::Custom(format!("personal{tag}"))
-    }
-
-    fn allowed(decision: NodeTokenEnv) -> Env {
-        match decision {
-            NodeTokenEnv::Use(env) => env,
-            NodeTokenEnv::Deny(reason) => panic!("ожидали разрешение, получили отказ: {reason}"),
-        }
-    }
-
-    /// Ровно инцидент: в конфиге self-hosted ноды `env = "dev"`, в базе —
-    /// персональный. Регистрация не должна ни падать (нода бы отвалилась),
-    /// ни пускать в dev: env перезаписывается на зарегистрированный.
-    #[test]
-    fn stale_dev_env_is_rewritten_to_registered_personal() {
-        let id = uuid::Uuid::from_u128(1);
-        let registered = personal("a");
-        let got = allowed(node_token_env(Some(id), id, &Env::Dev, Some(&registered)));
-        assert_eq!(got, registered);
-        assert!(got.is_personal());
-    }
-
-    #[test]
-    fn fresh_node_cannot_claim_shared_env() {
-        let id = uuid::Uuid::from_u128(1);
-        assert!(matches!(
-            node_token_env(Some(id), id, &Env::Dev, None),
-            NodeTokenEnv::Deny("node token cannot register a shared env")
-        ));
-    }
-
-    #[test]
-    fn node_token_cannot_claim_other_node() {
-        let own = uuid::Uuid::from_u128(1);
-        let other = uuid::Uuid::from_u128(2);
-        assert!(matches!(
-            node_token_env(Some(own), other, &personal("a"), None),
-            NodeTokenEnv::Deny("node token bound to another node")
-        ));
-    }
-
-    #[test]
-    fn non_personal_registered_env_is_denied() {
-        let id = uuid::Uuid::from_u128(1);
-        assert!(matches!(
-            node_token_env(Some(id), id, &personal("a"), Some(&Env::Dev)),
-            NodeTokenEnv::Deny("existing node env is not personal")
-        ));
-    }
-
-    #[test]
-    fn own_personal_env_is_allowed() {
-        let id = uuid::Uuid::from_u128(1);
-        let env = personal("a");
-        assert_eq!(allowed(node_token_env(Some(id), id, &env, Some(&env))), env);
-        assert_eq!(allowed(node_token_env(Some(id), id, &env, None)), env);
-    }
 }
