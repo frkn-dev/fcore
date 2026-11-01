@@ -69,6 +69,11 @@ where
         );
         let node_sync_auth = with_mgmt_auth(
             Arc::new(self.settings.service.token.clone()),
+            admin_token.clone(),
+            self.sync.clone(),
+        );
+        let connections_sync_auth = with_connections_sync_auth(
+            Arc::new(self.settings.service.token.clone()),
             admin_token,
             self.sync.clone(),
         );
@@ -757,7 +762,7 @@ where
         let post_connections_sync_route = warp::path("connections")
             .and(warp::path("sync"))
             .and(warp::post())
-            .and(node_sync_auth.clone())
+            .and(connections_sync_auth.clone())
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and_then(get_connections_handler);

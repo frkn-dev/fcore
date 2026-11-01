@@ -69,6 +69,66 @@ pub fn with_service_or_admin_auth(
         .untuple_one()
 }
 
+/// Кто зовёт `/connections/sync`: наш сервис/админ-токен (env и топик берутся
+/// из тела запроса) или `node_`-токен self-hosted ноды (только её собственный
+/// env и только её init-топик). Отдельный фильтр, потому что остальные
+/// management-маршруты `node_` по-прежнему не принимают.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionsSyncAuth {
+    /// Наш сервис или админ: любая нода, любой env.
+    Service,
+    /// Токен ноды: uuid, к которому он привязан.
+    Node(uuid::Uuid),
+}
+
+pub fn with_connections_sync_auth<T, C, S>(
+    service_token: Arc<String>,
+    admin_token: String,
+    mem_sync: MemSync<T, C, S>,
+) -> impl Filter<Extract = (ConnectionsSyncAuth,), Error = warp::Rejection> + Clone
+where
+    T: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static,
+{
+    warp::header::<String>("authorization")
+        .and(with_sync(mem_sync))
+        .and_then(move |auth_header: String, mem_sync: MemSync<T, C, S>| {
+            let service_token = service_token.clone();
+            let admin_token = admin_token.clone();
+            async move {
+                let token = auth_header.strip_prefix("Bearer ").unwrap_or("");
+                if token == service_token.as_str()
+                    || (!admin_token.is_empty() && token == admin_token)
+                {
+                    return Ok(ConnectionsSyncAuth::Service);
+                }
+                // `node_`-токен привязан к ноде записью в node_access_tokens:
+                // без этой сверки клиент мог бы прислать чужой uuid в теле
+                // (topic) и вытянуть пиров dev/ru.
+                if token.starts_with("node_") {
+                    return match mem_sync.db.node_access_token().find_by_token(token).await {
+                        Ok(Some(id)) => Ok(ConnectionsSyncAuth::Node(id)),
+                        Ok(None) => Err(warp::reject::custom(AuthError(
+                            "unknown node token".to_string(),
+                        ))),
+                        Err(e) => {
+                            tracing::error!("node token lookup failed: {}", e);
+                            Err(warp::reject::custom(AuthError("Unauthorized".to_string())))
+                        }
+                    };
+                }
+                Err(warp::reject::custom(AuthError("Unauthorized".to_string())))
+            }
+        })
+}
+
 pub fn with_mgmt_auth<T, C, S>(
     service_token: Arc<String>,
     admin_token: String,

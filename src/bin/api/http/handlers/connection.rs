@@ -24,11 +24,34 @@ use super::super::{
     request::{ConnCreateRequest, ConnectionInfoRequest},
 };
 use super::{resolve_serving_access, serving_access, ServingAccess};
+use crate::http::filters::ConnectionsSyncAuth;
+
+/// Env, в котором запросу разрешено синхронизироваться.
+///
+/// `bound` = `Some(uuid)` для `node_`-токена ноды, `None` для нашего
+/// сервис/админ-токена. Нода со своим токеном всегда синхронизируется ровно в
+/// том env, где она зарегистрирована: иначе приватная нода с `env = "dev"` в
+/// конфиге забирает пиров dev/ru (и наоборот — дев-нода получает пиров
+/// клиента). Наши ноды ходят с сервисным токеном и env берут из запроса.
+pub(crate) fn sync_env(
+    bound: Option<uuid::Uuid>,
+    own_env: Option<&fcore::Env>,
+    requested: &fcore::Env,
+) -> Result<fcore::Env, &'static str> {
+    match bound {
+        None => Ok(requested.clone()),
+        Some(_) => match own_env {
+            Some(env) => Ok(env.clone()),
+            None => Err("node is not registered"),
+        },
+    }
+}
 
 /// Handler get connection
 // POST /connections/sync
 pub async fn get_connections_handler<N, C, S>(
-    req: ConnType,
+    auth: ConnectionsSyncAuth,
+    mut req: ConnType,
     memory: MemSync<N, C, S>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -45,12 +68,39 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
     let mem = memory.memory.read().await;
-    tracing::debug!("POST /connections/sync {:?}", req.clone());
+    tracing::debug!("POST /connections/sync {:?}", req);
+
+    let bound = match auth {
+        ConnectionsSyncAuth::Service => None,
+        ConnectionsSyncAuth::Node(id) => Some(id),
+    };
+    let own_env = bound.and_then(|id| mem.nodes.get_by_id(&id).map(|n| n.env.clone()));
+    let env = match sync_env(bound, own_env.as_ref(), &req.env) {
+        Ok(env) => env,
+        Err(msg) => return Ok(http::not_found(msg)),
+    };
+    if env != req.env {
+        tracing::warn!(
+            node = ?bound,
+            requested = %req.env,
+            actual = %env,
+            "connections_sync_env_rewritten: нода просит чужой env, синхронизируем свой"
+        );
+        req.env = env.clone();
+    }
+    // Публикация только в свой init-топик: иначе self-hosted нода могла бы
+    // подсунуть свои коннекты подписчикам чужого топика.
+    let topic = match bound {
+        Some(id) => Topic::Init(id),
+        None => req.topic.clone(),
+    };
 
     let proto = req.proto;
-    let topic = req.topic;
     let last_update = req.last_update;
-    let env = req.env;
+    // Hysteria2 бьётся не по env, а по глобальному auth-сервису, поэтому для
+    // наших нод этот фильтр исторически отключён. Ноде с `node_`-токеном
+    // отдаём только её env — иначе guard выше бессмыслен.
+    let strict_env = bound.is_some();
 
     let connections_to_send: Vec<_> = mem
         .connections
@@ -58,7 +108,7 @@ where
         .filter(|(conn_id, conn)| {
             !conn.get_deleted()
                 && conn.get_proto().proto() == proto
-                && (proto == Tag::Hysteria2 || conn.get_env() == env)
+                && (strict_env || proto == Tag::Hysteria2 || conn.get_env() == env)
                 && last_update.is_none_or(|ts| conn.get_modified_at().timestamp() as u64 >= ts)
                 // A node-pinned conn is catch-up visible only to its node's
                 // Init topic; on every other topic pinned conns are hidden.
@@ -1193,7 +1243,7 @@ where
 mod tests {
     use super::{
         existing_default_pairs, main_feed_connection_visible, pinned_to, sync_conn_visible,
-        validate_env_served, validate_node_pin,
+        sync_env, validate_env_served, validate_node_pin,
     };
     use chrono::Utc;
     use fcore::{Env, Inbound, Node, NodeStatus, NodeType, Tag, Topic};
@@ -1406,5 +1456,51 @@ mod tests {
         // still reference them).
         assert!(validate_env_served(None, &Env::Ru, Tag::Wireguard).is_ok());
         assert!(validate_env_served(None, &Env::Dev, Tag::Hysteria2).is_ok());
+    }
+
+    // /connections/sync guard: a self-hosted node's `node_` token must not
+    // choose the env it syncs. Before the guard a private node whose config
+    // still said `env = "dev"` pulled dev-env peers (private keys included).
+
+    #[test]
+    fn sync_env_service_token_keeps_requested_env() {
+        let requested = Env::Dev;
+        assert_eq!(sync_env(None, None, &requested), Ok(Env::Dev));
+        // Even for a node row we do not know: our own token is trusted.
+        assert_eq!(
+            sync_env(None, Some(&Env::Ru), &requested),
+            Ok(Env::Dev),
+            "service token must keep the env from the request body"
+        );
+    }
+
+    #[test]
+    fn sync_env_node_token_is_pinned_to_personal_env() {
+        let node = uuid::Uuid::new_v4();
+        let personal = Env::personal_for(uuid::Uuid::new_v4());
+        assert_eq!(
+            sync_env(Some(node), Some(&personal), &Env::Dev),
+            Ok(personal.clone()),
+            "a self-hosted node syncs its own personal env, never dev"
+        );
+    }
+
+    #[test]
+    fn sync_env_node_token_of_shared_node_is_pinned_too() {
+        let node = uuid::Uuid::new_v4();
+        assert_eq!(
+            sync_env(Some(node), Some(&Env::Ru), &Env::Dev),
+            Ok(Env::Ru),
+            "any node token is pinned to the env the node is registered in"
+        );
+    }
+
+    #[test]
+    fn sync_env_unknown_node_is_refused() {
+        let node = uuid::Uuid::new_v4();
+        assert_eq!(
+            sync_env(Some(node), None, &Env::Dev),
+            Err("node is not registered")
+        );
     }
 }
