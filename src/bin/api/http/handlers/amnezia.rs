@@ -3633,6 +3633,23 @@ mod load_tests {
         }
         assert_eq!(storage.node_online_peers(&node_id), Some(2.0));
 
+        // A connection that went away keeps its last sample forever; an hour-old
+        // `1.0` must not count as a live peer.
+        let mut dead_tags = BTreeMap::new();
+        dead_tags.insert("conn_id".to_string(), "gone".to_string());
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "user.traffic.online".to_string(),
+            value: 1.0,
+            timestamp: now - 3_600_000,
+            tags: dead_tags,
+        });
+        assert_eq!(
+            storage.node_online_peers(&node_id),
+            Some(2.0),
+            "stale series must not be counted"
+        );
+
         // A node that reports nothing is not "free": it gets the fleet median.
         let silent = uuid::Uuid::parse_str("99999999-8888-7777-6666-555555555555").unwrap();
         assert_eq!(node_active_peers(&storage, &silent), None);

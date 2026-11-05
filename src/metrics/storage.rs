@@ -6,6 +6,10 @@ use crate::memory::node::Node;
 use crate::metrics::EntryEnvelope;
 use crate::zmq::{publisher::Publisher, topic::Topic};
 
+/// How recent the last `user.traffic.online` sample must be to count as a live
+/// connection. Three metric intervals: one missed push must not look offline.
+pub const ONLINE_PEER_FRESH_MS: i64 = 180_000;
+
 pub trait HasMetrics {
     fn metrics(&self) -> &MetricBuffer;
     fn node_settings(&self) -> &Node;
@@ -594,15 +598,47 @@ impl MetricStorage {
     /// Number of connections of the node whose peer handshake is fresh.
     ///
     /// `user.traffic.online` is published per connection (0/1) by the node for
-    /// wg/awg/xray, so the node-side handshake check is already reflected here.
+    /// wg/awg/xray, so the node-side handshake check is already reflected here —
+    /// an AmneziaWG peer counts exactly like a WireGuard one, because the metric
+    /// is per connection and not per interface.
+    ///
+    /// A series that stopped updating keeps its last value forever (a deleted
+    /// connection stays at `1.0`), so only samples newer than
+    /// [`ONLINE_PEER_FRESH_MS`] count. Otherwise the number would only grow as
+    /// devices come and go.
+    ///
     /// `None` means the node reported no such series at all — the caller decides
     /// whether to fall back, and must not read it as "zero connections".
     pub fn node_online_peers(&self, node_id: &uuid::Uuid) -> Option<f64> {
-        let values = self.node_series_values(node_id, |name| name == "user.traffic.online");
-        if values.is_empty() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let since = now - ONLINE_PEER_FRESH_MS;
+        let Some(node_map) = self.inner.get(node_id) else {
+            return None;
+        };
+
+        let mut seen = 0usize;
+        let mut online = 0usize;
+        for entry in node_map.iter() {
+            let hash = *entry.key();
+            let Some(meta) = self.metadata.get(&hash) else {
+                continue;
+            };
+            if meta.value().0 != "user.traffic.online" {
+                continue;
+            }
+            seen += 1;
+            let Some(last) = entry.value().back() else {
+                continue;
+            };
+            if last.timestamp >= since && last.value >= 0.5 {
+                online += 1;
+            }
+        }
+
+        if seen == 0 {
             return None;
         }
-        Some(values.iter().filter(|v| **v >= 0.5).count() as f64)
+        Some(online as f64)
     }
 
     /// Per-series average over the trailing `window_ms`, skipping series whose
