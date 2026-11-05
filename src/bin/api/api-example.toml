@@ -54,6 +54,10 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # Above the threshold the endpoint reports a hard 1.0 (docs/nodes-load.md).
 # node_load_conn_capacity = 300
 # node_load_threshold = 0.85
+# Node registration vs pool inbounds: true (default) answers 409
+# pool_inbounds_conflict with the differing fields, false only logs. Either way
+# the node registers and serves, with status `degraded`.
+# pool_strict_inbounds = true
 # Mesh messenger relay (/v1/mesh/*): rkyv snapshot of the UIN → pubkey
 # registry, written every minute and on shutdown. The inbox never persists.
 # mesh_snapshot_path = "/var/lib/fcore/api/mesh-registry.bin"

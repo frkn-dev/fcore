@@ -258,16 +258,187 @@ pub(crate) fn normalized_pool(pool: Option<String>) -> Option<String> {
     pool.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-pub(crate) fn pool_inbounds_conflict(peers: &[Node], incoming: &Node) -> bool {
-    let Some(pool) = normalized_pool(incoming.pool.clone()) else {
-        return false;
-    };
-    peers.iter().any(|n| {
-        n.uuid != incoming.uuid
-            && n.status == NodeStatus::Online
-            && normalized_pool(n.pool.clone()).as_deref() == Some(pool.as_str())
-            && n.inbounds != incoming.inbounds
-    })
+/// One client-facing field that differs between two nodes of the same pool.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PoolFieldDiff {
+    pub tag: String,
+    pub field: String,
+    pub peer: serde_json::Value,
+    pub incoming: serde_json::Value,
+}
+
+/// Why a node does not fit the pool its config claims.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PoolConflict {
+    pub pool: String,
+    pub peer_hostname: String,
+    pub differences: Vec<PoolFieldDiff>,
+}
+
+/// Short, non-reversible fingerprint of a private key: enough to say "same key"
+/// or "different key" in a 409 body without ever leaking the secret.
+fn key_fingerprint(privkey: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(privkey.as_bytes());
+    format!("sha256:{}", hex::encode(&digest[..4]))
+}
+
+/// Client-facing fingerprint of an inbound.
+///
+/// Only fields that end up in a client config are compared. Local interface
+/// names (`awg0` vs `awg1`), node ids and timestamps legitimately differ
+/// between nodes of one pool, and map order must never matter — comparing whole
+/// `Inbound` values is what produced the endless 409 `pool_key_mismatch`.
+fn client_inbound_fields(inbound: &Inbound) -> BTreeMap<String, serde_json::Value> {
+    let mut out: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    out.insert("port".to_string(), serde_json::json!(inbound.port));
+
+    if let Some(wg) = &inbound.wg {
+        out.insert(
+            "address".to_string(),
+            serde_json::json!(wg.address.to_string()),
+        );
+        out.insert("dns".to_string(), serde_json::json!(wg.dns));
+        out.insert("keepalive".to_string(), serde_json::json!(wg.keepalive));
+        out.insert(
+            "public_key".to_string(),
+            serde_json::json!(key_fingerprint(&wg.keys.privkey)),
+        );
+    }
+
+    if let Some(awg) = &inbound.awg {
+        out.insert(
+            "address".to_string(),
+            serde_json::json!(awg.interface.address.to_string()),
+        );
+        out.insert(
+            "listen_port".to_string(),
+            serde_json::json!(awg.interface.listen_port),
+        );
+        out.insert("mtu".to_string(), serde_json::json!(awg.interface.mtu));
+        out.insert("dns".to_string(), serde_json::json!(awg.interface.dns));
+        out.insert("keepalive".to_string(), serde_json::json!(awg.keepalive));
+        out.insert(
+            "public_key".to_string(),
+            serde_json::json!(key_fingerprint(&awg.interface.private_key.privkey)),
+        );
+
+        match &awg.obfuscation {
+            Some(o) => {
+                // Flatten the whole profile: every parameter is part of the
+                // handshake, and new ones (AWG 3.0) must be covered without
+                // another edit here. `random_trailers`/`disable_cookies` are
+                // `skip_serializing_if = None`, so they appear only when set —
+                // that is fine, absence is compared as absence.
+                if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(o) {
+                    for (key, value) in map {
+                        out.insert(format!("awg_obfuscation.{key}"), value);
+                    }
+                }
+            }
+            None => {
+                out.insert("awg_obfuscation".to_string(), serde_json::json!(null));
+            }
+        }
+    }
+
+    if let Some(h2) = &inbound.h2 {
+        out.insert("sni".to_string(), serde_json::json!(h2.sni));
+    }
+
+    if let Some(stream) = &inbound.stream_settings {
+        out.insert(
+            "stream_settings".to_string(),
+            serde_json::to_value(stream).unwrap_or(serde_json::Value::Null),
+        );
+    }
+
+    out
+}
+
+/// Compares the incoming node's inbounds with its pool peers.
+///
+/// `None` means the node fits — or that it has no pool at all: a standalone node
+/// is never compared with anything. The comparison is over a `BTreeMap<tag, …>`,
+/// so neither the order of inbounds nor local interface names can create a
+/// difference on their own.
+pub(crate) fn pool_inbounds_conflict(peers: &[Node], incoming: &Node) -> Option<PoolConflict> {
+    let pool = normalized_pool(incoming.pool.clone())?;
+
+    let incoming_fields: BTreeMap<String, BTreeMap<String, serde_json::Value>> = incoming
+        .inbounds
+        .iter()
+        .map(|(tag, inbound)| (tag.to_string(), client_inbound_fields(inbound)))
+        .collect();
+
+    let mut peers: Vec<&Node> = peers
+        .iter()
+        .filter(|n| {
+            n.uuid != incoming.uuid
+                && n.status.is_serving()
+                && normalized_pool(n.pool.clone()).as_deref() == Some(pool.as_str())
+        })
+        .collect();
+    // Deterministic diagnostics: the same mismatch must name the same peer.
+    peers.sort_by_key(|n| n.uuid);
+
+    for peer in peers {
+        let peer_fields: BTreeMap<String, BTreeMap<String, serde_json::Value>> = peer
+            .inbounds
+            .iter()
+            .map(|(tag, inbound)| (tag.to_string(), client_inbound_fields(inbound)))
+            .collect();
+
+        let mut differences = Vec::new();
+
+        for (tag, peer_map) in &peer_fields {
+            match incoming_fields.get(tag) {
+                None => differences.push(PoolFieldDiff {
+                    tag: tag.clone(),
+                    field: "inbounds".to_string(),
+                    peer: serde_json::json!("present"),
+                    incoming: serde_json::json!("missing"),
+                }),
+                Some(incoming_map) => {
+                    for (field, peer_value) in peer_map {
+                        let incoming_value = incoming_map
+                            .get(field)
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        if &incoming_value != peer_value {
+                            differences.push(PoolFieldDiff {
+                                tag: tag.clone(),
+                                field: field.clone(),
+                                peer: peer_value.clone(),
+                                incoming: incoming_value,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for tag in incoming_fields.keys() {
+            if !peer_fields.contains_key(tag) {
+                differences.push(PoolFieldDiff {
+                    tag: tag.clone(),
+                    field: "inbounds".to_string(),
+                    peer: serde_json::json!("missing"),
+                    incoming: serde_json::json!("present"),
+                });
+            }
+        }
+
+        if !differences.is_empty() {
+            return Some(PoolConflict {
+                pool,
+                peer_hostname: peer.hostname.clone(),
+                differences,
+            });
+        }
+    }
+
+    None
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -672,6 +843,206 @@ mod tests {
         node
     }
 
+    /// AmneziaWG inbound with the fields a client actually receives.
+    fn awg_inbound(port: u16, privkey: &str, jc: u16, iface: &str) -> Inbound {
+        Inbound {
+            tag: Tag::AmneziaWgMobile,
+            port,
+            stream_settings: None,
+            wg: None,
+            awg: Some(fcore::AmneziaWgSettings {
+                interface: fcore::AwgInterfaceConfig {
+                    interface: iface.to_string(),
+                    address: "10.77.0.1/16".parse().unwrap(),
+                    listen_port: port,
+                    mtu: Some(1280),
+                    private_key: fcore::WgKeys {
+                        privkey: privkey.to_string(),
+                    },
+                    dns: vec!["1.1.1.1".parse().unwrap()],
+                },
+                obfuscation: Some(fcore::AwgObfuscationParams {
+                    jc,
+                    jmin: 10,
+                    jmax: 50,
+                    s1: 1,
+                    s2: 2,
+                    s3: 3,
+                    s4: 4,
+                    h1: "1".into(),
+                    h2: "2".into(),
+                    h3: "3".into(),
+                    h4: "4".into(),
+                    i1: "".into(),
+                    i2: "".into(),
+                    i3: "".into(),
+                    i4: "".into(),
+                    i5: "".into(),
+                    random_trailers: None,
+                    disable_cookies: None,
+                    header_protection_key: None,
+                    content_padding_addition: None,
+                    rekey_after_time: None,
+                    rekey_timeout: None,
+                    reject_after_time: None,
+                    keepalive_timeout: None,
+                    max_handshake_attempts: None,
+                }),
+                keepalive: Some(25),
+            }),
+            h2: None,
+            mtproto_secret: None,
+        }
+    }
+
+    fn pool_node(id: &str, with_awg: Option<Inbound>) -> Node {
+        let mut node = node_with_port(443, Some("RU"), id);
+        if let Some(inbound) = with_awg {
+            node.inbounds.insert(inbound.tag, inbound);
+        }
+        node
+    }
+
+    #[test]
+    fn pool_inbounds_same_set_in_different_order_is_not_a_conflict() {
+        // The 409 was endless because whole structures were compared: two nodes
+        // with the same protocols but a different map order differ as values.
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let mut b = node_with_port(443, Some("RU"), "22222222-2222-2222-2222-222222222222");
+        // Insert the same two inbounds in the opposite order.
+        b.inbounds
+            .insert(Tag::AmneziaWgMobile, awg_inbound(443, "key-a", 5, "awg1"));
+        b.inbounds.insert(
+            Tag::VlessTcpReality,
+            Inbound {
+                tag: Tag::VlessTcpReality,
+                port: 443,
+                stream_settings: None,
+                wg: None,
+                awg: None,
+                h2: None,
+                mtproto_secret: None,
+            },
+        );
+
+        assert_eq!(pool_inbounds_conflict(&[a], &b), None);
+    }
+
+    #[test]
+    fn pool_inbounds_interface_name_alone_is_not_a_conflict() {
+        // Local interface names legitimately differ between hosts.
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let b = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(443, "key-a", 5, "awg1")),
+        );
+        assert_eq!(pool_inbounds_conflict(&[a], &b), None);
+    }
+
+    #[test]
+    fn pool_inbounds_port_mismatch_names_the_field() {
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let b = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(8443, "key-a", 5, "awg0")),
+        );
+        let conflict = pool_inbounds_conflict(&[a], &b).expect("port must conflict");
+        let port = conflict
+            .differences
+            .iter()
+            .find(|d| d.field == "port")
+            .expect("port difference must be reported");
+        assert_eq!(port.tag, "AmneziaWgMobile");
+        assert_eq!(port.peer, serde_json::json!(443));
+        assert_eq!(port.incoming, serde_json::json!(8443));
+    }
+
+    #[test]
+    fn pool_inbounds_key_mismatch_is_reported_without_leaking_the_key() {
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "super-secret-a", 5, "awg0")),
+        );
+        let b = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(443, "super-secret-b", 5, "awg0")),
+        );
+        let conflict = pool_inbounds_conflict(&[a], &b).expect("key must conflict");
+        let key = conflict
+            .differences
+            .iter()
+            .find(|d| d.field == "public_key")
+            .expect("key difference must be reported");
+        let rendered = serde_json::to_string(&conflict).unwrap();
+        assert!(!rendered.contains("super-secret"), "keys must never be echoed");
+        assert!(key.peer.as_str().unwrap().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn pool_inbounds_obfuscation_mismatch_names_the_exact_parameter() {
+        // A different jc means the client cannot complete a handshake.
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let b = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(443, "key-a", 6, "awg0")),
+        );
+        let conflict = pool_inbounds_conflict(&[a], &b).expect("obfuscation must conflict");
+        assert_eq!(conflict.differences.len(), 1);
+        assert_eq!(conflict.differences[0].field, "awg_obfuscation.jc");
+        assert_eq!(conflict.differences[0].peer, serde_json::json!(5));
+        assert_eq!(conflict.differences[0].incoming, serde_json::json!(6));
+    }
+
+    #[test]
+    fn pool_inbounds_missing_tag_is_reported_as_inbounds_difference() {
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let b = node_with_port(443, Some("RU"), "22222222-2222-2222-2222-222222222222");
+        let conflict = pool_inbounds_conflict(&[a], &b).expect("missing tag must conflict");
+        let missing = conflict
+            .differences
+            .iter()
+            .find(|d| d.tag == "AmneziaWgMobile")
+            .expect("missing inbound must be reported");
+        assert_eq!(missing.field, "inbounds");
+        assert_eq!(missing.peer, serde_json::json!("present"));
+        assert_eq!(missing.incoming, serde_json::json!("missing"));
+    }
+
+    #[test]
+    fn pool_check_is_skipped_without_pool_and_across_pools() {
+        // No pool: a standalone node is never compared.
+        let solo = node_with_port(443, None, "11111111-1111-1111-1111-111111111111");
+        let other = node_with_port(8443, None, "22222222-2222-2222-2222-222222222222");
+        assert_eq!(pool_inbounds_conflict(&[solo], &other), None);
+
+        // Same node ids but different pools: also not compared.
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let mut b = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(443, "key-b", 9, "awg0")),
+        );
+        b.pool = Some("EU".to_string());
+        assert_eq!(pool_inbounds_conflict(&[a], &b), None);
+    }
+
     #[test]
     fn test_pool_blank_is_absent_and_keys_must_match() {
         let req: NodeRequest =
@@ -682,8 +1053,8 @@ mod tests {
         let same = node_with_port(443, Some("EU"), "22222222-2222-2222-2222-222222222222");
         let other = node_with_port(8443, Some("EU"), "22222222-2222-2222-2222-222222222222");
         let solo = node_with_port(8443, Some("EU"), "11111111-1111-1111-1111-111111111111");
-        assert!(!pool_inbounds_conflict(&[a.clone()], &same));
-        assert!(pool_inbounds_conflict(&[a.clone()], &other));
-        assert!(!pool_inbounds_conflict(&[a], &solo));
+        assert_eq!(pool_inbounds_conflict(&[a.clone()], &same), None);
+        assert!(pool_inbounds_conflict(&[a.clone()], &other).is_some());
+        assert_eq!(pool_inbounds_conflict(&[a], &solo), None);
     }
 }

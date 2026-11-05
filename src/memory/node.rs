@@ -32,14 +32,27 @@ use crate::config::wireguard::WireguardSettings;
 #[postgres(name = "node_status", rename_all = "snake_case")]
 pub enum Status {
     Online,
+    /// Registered and serving, but its inbounds do not match the rest of its
+    /// pool. Kept in every serving path on purpose: a configuration mismatch
+    /// must not cut clients off from a node that still works.
+    Degraded,
     Offline,
+}
+
+impl Status {
+    /// True for every node that may serve clients (`Online` and `Degraded`).
+    pub fn is_serving(self) -> bool {
+        matches!(self, Status::Online | Status::Degraded)
+    }
 }
 
 impl PartialEq for Status {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (Status::Online, Status::Online) | (Status::Offline, Status::Offline)
+            (Status::Online, Status::Online)
+                | (Status::Degraded, Status::Degraded)
+                | (Status::Offline, Status::Offline)
         )
     }
 }
@@ -48,6 +61,7 @@ impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Status::Online => write!(f, "Online"),
+            Status::Degraded => write!(f, "Degraded"),
             Status::Offline => write!(f, "Offline"),
         }
     }
@@ -59,6 +73,7 @@ impl FromStr for Status {
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input {
             "Online" => Ok(Status::Online),
+            "Degraded" => Ok(Status::Degraded),
             "Offline" => Ok(Status::Offline),
             _ => Ok(Status::Offline),
         }

@@ -21,6 +21,7 @@ use super::super::{
 pub async fn post_node_handler<N, C, S>(
     node_req: NodeRequest,
     memory: MemSync<N, C, S>,
+    strict_inbounds: bool,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -74,28 +75,40 @@ where
     let node = node_req.clone().as_node();
     let node_id = node_req.uuid;
 
-    let key_mismatch = {
+    // A mismatch is a diagnosis, not a door lock: the node still registers and
+    // still gets connections through /connections/sync. Blocking registration
+    // used to leave the pool on a stale snapshot and silently stop handing new
+    // configs to clients.
+    let conflict = {
         let mem = memory.memory.read().await;
         let peers = mem.nodes.get_by_env(&node.env).unwrap_or_default();
         pool_inbounds_conflict(&peers, &node)
     };
-    if key_mismatch {
-        return Ok(warp::reply::with_status(
-            warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
-                status: StatusCode::CONFLICT.as_u16(),
-                message: "pool_key_mismatch".to_string(),
-                response: None,
-            }),
-            StatusCode::CONFLICT,
-        ));
+
+    if let Some(conflict) = &conflict {
+        // Field-level detail in the log: without it the only thing visible was
+        // fnode's "409 Conflict" line, with no clue which tag or field differed.
+        tracing::warn!(
+            node = %node_req.hostname,
+            pool = %conflict.pool,
+            peer = %conflict.peer_hostname,
+            differences = %serde_json::to_string(&conflict.differences)
+                .unwrap_or_else(|_| "unserializable".to_string()),
+            strict = strict_inbounds,
+            "node inbounds do not match its pool"
+        );
     }
 
     let status = SyncOp::add_node(&memory, &node_id, node.clone()).await;
 
     let result_response = match status {
         Ok(Status::Ok(id)) | Ok(Status::AlreadyExist(id)) | Ok(Status::NotModified(id)) => {
-            let _ =
-                SyncOp::update_node_status(&memory, &node_id, &node.env, NodeStatus::Online).await;
+            let node_status = if conflict.is_some() {
+                NodeStatus::Degraded
+            } else {
+                NodeStatus::Online
+            };
+            let _ = SyncOp::update_node_status(&memory, &node_id, &node.env, node_status).await;
 
             ResponseMessage::<Option<IdResponse>> {
                 status: StatusCode::OK.as_u16(),
@@ -126,6 +139,22 @@ where
             ));
         }
     };
+
+    // Strict mode keeps the old, loud behaviour for deliberate rollouts: the
+    // caller sees a 409 *and* knows exactly what differs, while the data plane
+    // stays up because the node was registered above.
+    if let Some(conflict) = conflict {
+        if strict_inbounds && result_response.status == StatusCode::OK.as_u16() {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ResponseMessage {
+                    status: StatusCode::CONFLICT.as_u16(),
+                    message: "pool_inbounds_conflict".to_string(),
+                    response: Some(conflict),
+                }),
+                StatusCode::CONFLICT,
+            ));
+        }
+    }
 
     let status_code =
         StatusCode::from_u16(result_response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

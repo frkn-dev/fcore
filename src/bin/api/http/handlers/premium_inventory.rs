@@ -80,6 +80,8 @@ where
                 "country": res.country,
                 "status": match res.status {
                     NodeStatus::Online => "online",
+                    // Serving, but its inbounds do not match the pool.
+                    NodeStatus::Degraded => "degraded",
                     NodeStatus::Offline => "offline",
                 },
             }));

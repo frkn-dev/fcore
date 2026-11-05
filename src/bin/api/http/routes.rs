@@ -149,6 +149,7 @@ where
             .and(mgmt_auth.clone())
             .and(warp::body::json::<NodeRequest>())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.pool_strict_inbounds))
             .and_then(post_node_handler);
 
         let private_mint_install_token_route = warp::post()

@@ -587,7 +587,7 @@ fn pool_members<'a, N: NodeStorageOperations>(
         .iter_nodes()
         .map(|(_, n)| n)
         .filter(|n| {
-            n.status == NodeStatus::Online
+            n.status.is_serving()
                 && &n.env == env
                 && normalized_pool(n.pool.clone()).as_deref() == Some(pool)
         })
@@ -661,7 +661,9 @@ where
     let mut pool_index: std::collections::HashMap<(uuid::Uuid, fcore::Tag, String), usize> =
         std::collections::HashMap::new();
     for (_, node) in nodes.iter_nodes() {
-        if node.status != NodeStatus::Online {
+        // Degraded nodes keep serving: their mismatch is with a pool peer, not
+        // with the clients that already use them.
+        if !node.status.is_serving() {
             continue;
         }
         let code = node.country.to_uppercase();
@@ -1768,7 +1770,7 @@ where
                         continue;
                     }
                 }
-                if node.status != NodeStatus::Online {
+                if !node.status.is_serving() {
                     continue;
                 }
 

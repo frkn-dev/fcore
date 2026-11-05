@@ -130,6 +130,10 @@ fn default_node_load_threshold() -> f64 {
     0.85
 }
 
+fn default_pool_strict_inbounds() -> bool {
+    true
+}
+
 fn default_listen_address() -> Ipv4Addr {
     "127.0.0.1".parse().unwrap()
 }
@@ -240,6 +244,13 @@ pub struct ServiceConfig {
     /// number the client would happily ignore.
     #[serde(default = "default_node_load_threshold")]
     pub node_load_threshold: f64,
+    /// Registration of a node whose inbounds differ from its pool peers.
+    /// `true` (default) answers 409 `pool_inbounds_conflict` with the exact
+    /// fields, `false` only logs a warning. Either way the node is registered
+    /// and its status becomes `Degraded` — a mismatch must not cut the data
+    /// plane for clients that already work.
+    #[serde(default = "default_pool_strict_inbounds")]
+    pub pool_strict_inbounds: bool,
     /// Path of the mesh registry rkyv snapshot (UIN → device pubkeys). The
     /// mesh inbox itself is memory-only by design.
     #[serde(default = "default_mesh_snapshot_path")]

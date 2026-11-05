@@ -1021,7 +1021,7 @@ where
                             *id,
                             node.hostname.clone(),
                             node.env.to_string(),
-                            node.status == NodeStatus::Online,
+                            node.status.is_serving(),
                         )
                     })
                     .collect()
