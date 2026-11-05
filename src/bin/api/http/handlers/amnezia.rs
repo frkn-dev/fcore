@@ -3335,28 +3335,52 @@ fn load_rate_limited() -> warp::reply::Response {
 }
 
 /// Share of the node's declared bandwidth used in the window (rx + tx).
+///
+/// Only the node's default (uplink) interface counts: `awg0`/`wg0`/`lo` carry
+/// the same bytes again, so summing every interface would report double load.
+/// If the configured name matches nothing (kernel rename), the busiest
+/// interface per direction is used instead of the sum.
 fn node_bandwidth_util(
     metrics: &MetricStorage,
     node_id: &uuid::Uuid,
+    default_interface: &str,
     max_bandwidth_bps: i64,
 ) -> Option<f64> {
     if max_bandwidth_bps <= 0 {
         return None;
     }
 
-    let series = metrics.node_series_avg_window(
-        node_id,
-        |name| {
-            let parts: Vec<&str> = name.split('.').collect();
-            parts.len() == 3 && parts[0] == "net" && (parts[2] == "rx_bps" || parts[2] == "tx_bps")
-        },
-        LOAD_WINDOW_MS,
-    );
-    if series.is_empty() {
-        return None;
-    }
+    let rx_name = format!("net.{default_interface}.rx_bps");
+    let tx_name = format!("net.{default_interface}.tx_bps");
 
-    let bps: f64 = series.iter().sum();
+    let rx = metrics.node_series_avg_window(node_id, |name| name == rx_name, LOAD_WINDOW_MS);
+    let tx = metrics.node_series_avg_window(node_id, |name| name == tx_name, LOAD_WINDOW_MS);
+
+    let (rx, tx) = if rx.is_empty() && tx.is_empty() {
+        let peak = |values: Vec<f64>| values.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        (
+            peak(metrics.node_series_avg_window(
+                node_id,
+                |name| name.starts_with("net.") && name.ends_with(".rx_bps"),
+                LOAD_WINDOW_MS,
+            )),
+            peak(metrics.node_series_avg_window(
+                node_id,
+                |name| name.starts_with("net.") && name.ends_with(".tx_bps"),
+                LOAD_WINDOW_MS,
+            )),
+        )
+    } else {
+        (rx.iter().sum::<f64>(), tx.iter().sum::<f64>())
+    };
+
+    let bps = match (rx.is_finite(), tx.is_finite()) {
+        (true, true) => rx + tx,
+        (true, false) => rx,
+        (false, true) => tx,
+        (false, false) => return None,
+    };
+
     Some((bps / max_bandwidth_bps as f64).clamp(0.0, 1.0))
 }
 
@@ -3437,7 +3461,8 @@ where
                 continue;
             };
 
-            let bandwidth = node_bandwidth_util(&metrics, &id, node.max_bandwidth_bps);
+            let bandwidth =
+                node_bandwidth_util(&metrics, &id, &node.interface, node.max_bandwidth_bps);
             let conns = node_conn_util(&metrics, &id, conn_capacity);
             let cpu = node_cpu_util(&metrics, &id);
 
@@ -3531,8 +3556,20 @@ mod load_tests {
             tags: tags.clone(),
         });
 
-        let util = node_bandwidth_util(&storage, &node_id, 100_000_000).unwrap();
+        let util = node_bandwidth_util(&storage, &node_id, "eth0", 100_000_000).unwrap();
         assert!((util - 0.4).abs() < 1e-9, "only the fresh series counts, got {util}");
+
+        // Tunnel traffic must not be counted twice: awg0 carries the same bytes
+        // as eth0, so only the default interface is read.
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "net.awg0.tx_bps".to_string(),
+            value: 40_000_000.0,
+            timestamp: now - 1_000,
+            tags: BTreeMap::new(),
+        });
+        let util = node_bandwidth_util(&storage, &node_id, "eth0", 100_000_000).unwrap();
+        assert!((util - 0.4).abs() < 1e-9, "awg0 must not be added, got {util}");
 
         storage.insert_envelope(MetricEnvelope {
             node_id,
