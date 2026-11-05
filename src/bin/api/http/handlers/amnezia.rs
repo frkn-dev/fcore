@@ -307,6 +307,10 @@ pub struct GatewayConfigResponse {
     /// клиент не собирал её из двух ответов.
     #[serde(rename = "node_ports", skip_serializing_if = "Option::is_none")]
     pub node_ports: Option<BTreeMap<String, u16>>,
+    /// Вес каждого адреса — та же карта, что в `/v1/services`. Без неё клиент
+    /// не видит веса пула вообще: адреса он берёт именно отсюда.
+    #[serde(rename = "node_weights", skip_serializing_if = "Option::is_none")]
+    pub node_weights: Option<BTreeMap<String, i32>>,
     #[serde(rename = "config_rev", skip_serializing_if = "Option::is_none")]
     pub config_rev: Option<String>,
 }
@@ -1822,13 +1826,17 @@ where
     };
     let conn_tag_for_ports = conn.get_proto().proto();
     // `node_ips` и `node_ports` — из одной карты: адреса и их порты.
-    let (node_ips, node_ports) = if let Some(pool) = &pool {
+    let (node_ips, node_ports, node_weights) = if let Some(pool) = &pool {
         let ports = pooled_node_ports(&mem.nodes, &node.env, pool, conn_tag_for_ports);
         if ports.is_empty() {
-            (None, None)
+            (None, None, None)
         } else {
             let ips: Vec<String> = ports.keys().cloned().collect();
-            (Some(ips), Some(ports))
+            // Weights over the same address set as the ports, so the two maps
+            // can never describe different pools.
+            let members = pool_members(&mem.nodes, &node.env, pool);
+            let weights = node_weights_of_ips(&members, &ports);
+            (Some(ips), Some(ports), Some(weights))
         }
     } else {
         let ips = node
@@ -1836,7 +1844,7 @@ where
             .as_ref()
             .map(|ips| ips.iter().map(|ip| ip.to_string()).collect());
         // Одиночная нода: порт один и он уже в конфиге — карта не нужна.
-        (ips, None)
+        (ips, None, gateway_node_weights(&node))
     };
     let config_rev = config_rev(
         &node,
@@ -1965,6 +1973,7 @@ where
         service_type: None,
         node_ips,
         node_ports,
+        node_weights,
         config_rev,
     })
 }
@@ -2921,10 +2930,8 @@ mod tests {
             service_protocol: Some("awg".to_string()),
             service_type: Some(share::SHARE_SERVICE_TYPE.to_string()),
             node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
-            node_ports: Some(BTreeMap::from([(
-                "78.17.28.66".to_string(),
-                443u16,
-            )])),
+            node_ports: Some(BTreeMap::from([("78.17.28.66".to_string(), 443u16)])),
+            node_weights: None,
             config_rev: Some("abc".to_string()),
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -2953,6 +2960,7 @@ mod tests {
             service_type: None,
             node_ips: None,
             node_ports: None,
+            node_weights: None,
             config_rev: None,
         };
         let v = serde_json::to_value(&owner).unwrap();
@@ -3262,8 +3270,14 @@ pub const LOAD_WINDOW_MS: i64 = 60_000;
 pub struct GatewayNodesLoadRequest {
     #[serde(rename = "auth_data")]
     pub auth_data: serde_json::Value,
+    /// Node uuids. A client that has only addresses (a pool of several nodes
+    /// collapses into one card) can use `node_ips` instead.
     #[serde(rename = "node_ids", default)]
     pub node_ids: Vec<String>,
+    /// Entry addresses (`node_ips` of the card). Resolved to their node on the
+    /// server: occupancy is per node, and one node may own several addresses.
+    #[serde(rename = "node_ips", default)]
+    pub node_ips: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3303,21 +3317,70 @@ pub fn node_load_score(
     Some(if score >= threshold { 1.0 } else { score })
 }
 
-/// Parses, deduplicates and caps `node_ids`. Unparsable ids are dropped
-/// instead of failing the whole request: one broken id must not cost the
-/// client the load data of the whole pool.
-pub fn parse_node_ids(raw: &[String]) -> Vec<uuid::Uuid> {
-    let mut out: Vec<uuid::Uuid> = Vec::with_capacity(raw.len().min(MAX_LOAD_NODES));
-    for id in raw {
+/// One requested item: a node uuid or an entry address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadKey {
+    Id(uuid::Uuid),
+    Ip(String),
+}
+
+impl LoadKey {
+    /// The string echoed back in the response, exactly as the client asked.
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Id(id) => id.to_string(),
+            Self::Ip(ip) => ip.clone(),
+        }
+    }
+}
+
+/// Parses `node_ids` and `node_ips` into one deduplicated, capped list.
+/// Unparsable values are dropped instead of failing the whole request: one
+/// broken entry must not cost the client the load of the whole pool.
+pub fn parse_load_keys(ids: &[String], ips: &[String]) -> Vec<LoadKey> {
+    let mut out: Vec<LoadKey> = Vec::with_capacity((ids.len() + ips.len()).min(MAX_LOAD_NODES));
+    for id in ids {
         let Ok(id) = uuid::Uuid::parse_str(id.trim()) else {
             continue;
         };
-        if out.contains(&id) {
+        let key = LoadKey::Id(id);
+        if out.contains(&key) {
             continue;
         }
-        out.push(id);
+        out.push(key);
         if out.len() == MAX_LOAD_NODES {
-            break;
+            return out;
+        }
+    }
+    for ip in ips {
+        let Ok(ip) = ip.trim().parse::<std::net::IpAddr>() else {
+            continue;
+        };
+        let key = LoadKey::Ip(ip.to_string());
+        if out.contains(&key) {
+            continue;
+        }
+        out.push(key);
+        if out.len() == MAX_LOAD_NODES {
+            return out;
+        }
+    }
+    out
+}
+
+/// address -> node uuid, over the same address set the pool cards advertise
+/// (`node_ips`, falling back to the primary address).
+fn node_by_ip<N: NodeStorageOperations>(nodes: &N) -> HashMap<String, uuid::Uuid> {
+    let mut out = HashMap::new();
+    for (_, node) in nodes.iter_nodes() {
+        for ip in node
+            .node_ips
+            .as_ref()
+            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>())
+            .filter(|ips| !ips.is_empty())
+            .unwrap_or_else(|| vec![node.address.to_string()])
+        {
+            out.insert(ip, node.uuid);
         }
     }
     out
@@ -3476,26 +3539,46 @@ where
         return Ok(load_rate_limited());
     }
 
-    let ids = parse_node_ids(&req.node_ids);
+    let keys = parse_load_keys(&req.node_ids, &req.node_ips);
     let mut load = BTreeMap::new();
+    if keys.is_empty() {
+        return Ok(http::bad_request("node_ids or node_ips is required").into_response());
+    }
 
     // First pass: what each node reports. Nodes without counters (old fnode)
     // must not be read as "zero" — they get the fleet median below.
-    let mut nodes: Vec<(uuid::Uuid, String, i64, Option<f64>)> = Vec::new();
+    let mut nodes: Vec<(LoadKey, uuid::Uuid, String, i64, Option<f64>)> = Vec::new();
     {
         let mem = memory.memory.read().await;
-        for id in ids {
-            let Some(node) = mem.nodes.get_by_id(&id) else {
+        let by_ip = node_by_ip(&mem.nodes);
+        for key in keys {
+            let node = match &key {
+                LoadKey::Id(id) => mem.nodes.get_by_id(id),
+                LoadKey::Ip(ip) => by_ip.get(ip).and_then(|id| mem.nodes.get_by_id(id)),
+            };
+            let Some(node) = node else {
                 continue;
             };
-            let peers = node_active_peers(&metrics, &id);
-            nodes.push((id, node.interface.clone(), node.max_bandwidth_bps, peers));
+            let peers = node_active_peers(&metrics, &node.uuid);
+            nodes.push((
+                key,
+                node.uuid,
+                node.interface.clone(),
+                node.max_bandwidth_bps,
+                peers,
+            ));
         }
     }
 
-    let median_peers = median(nodes.iter().filter_map(|(_, _, _, p)| *p).collect());
+    // One value per node, not per requested address: a node with two addresses
+    // would otherwise be counted twice in the fleet figure.
+    let mut per_node: BTreeMap<uuid::Uuid, Option<f64>> = BTreeMap::new();
+    for (_, id, _, _, peers) in &nodes {
+        per_node.insert(*id, *peers);
+    }
+    let median_peers = median(per_node.values().flatten().copied().collect());
 
-    for (id, interface, max_bandwidth_bps, peers) in nodes {
+    for (key, id, interface, max_bandwidth_bps, peers) in nodes {
         let bandwidth = node_bandwidth_util(&metrics, &id, &interface, max_bandwidth_bps);
         let conns = peers
             .or(median_peers)
@@ -3503,7 +3586,7 @@ where
         let cpu = node_cpu_util(&metrics, &id);
 
         if let Some(score) = node_load_score(bandwidth, conns, cpu, threshold) {
-            load.insert(id.to_string(), (score * 100.0).round() / 100.0);
+            load.insert(key.as_str(), (score * 100.0).round() / 100.0);
         }
     }
 
@@ -3558,10 +3641,29 @@ mod load_tests {
         }
         raw.push("00000000-0000-0000-0000-000000000005".to_string());
 
-        let ids = parse_node_ids(&raw);
-        assert_eq!(ids.len(), MAX_LOAD_NODES);
-        assert_eq!(ids[5].to_string(), "00000000-0000-0000-0000-000000000005");
-        assert!(!ids.is_empty());
+        let keys = parse_load_keys(&raw, &[]);
+        assert_eq!(keys.len(), MAX_LOAD_NODES);
+        assert_eq!(keys[5].as_str(), "00000000-0000-0000-0000-000000000005");
+        assert!(!keys.is_empty());
+    }
+
+    #[test]
+    fn keys_accept_addresses_because_a_pool_hides_its_nodes() {
+        // A pool of several nodes collapses into one card: the client has the
+        // addresses (`node_ips`) but only one node uuid, so it must be able to
+        // ask by address.
+        let keys = parse_load_keys(&[], &["1.2.3.4".to_string(), "1.2.3.4".into(), "nope".into()]);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].as_str(), "1.2.3.4");
+
+        // Both lists in one request, ids first, total capped.
+        let ids: Vec<String> = (0..49u32)
+            .map(|i| format!("00000000-0000-0000-0000-{:012}", i))
+            .collect();
+        let ips: Vec<String> = (0..10).map(|i| format!("10.0.0.{}", i)).collect();
+        let keys = parse_load_keys(&ids, &ips);
+        assert_eq!(keys.len(), MAX_LOAD_NODES);
+        assert!(matches!(keys.last(), Some(LoadKey::Ip(_))));
     }
 
     #[test]
