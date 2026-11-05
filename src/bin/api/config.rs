@@ -122,6 +122,14 @@ fn default_wg_network() -> IpAddrMask {
     "10.0.0.0/8".parse().unwrap()
 }
 
+fn default_node_load_conn_capacity() -> u32 {
+    300
+}
+
+fn default_node_load_threshold() -> f64 {
+    0.85
+}
+
 fn default_listen_address() -> Ipv4Addr {
     "127.0.0.1".parse().unwrap()
 }
@@ -222,6 +230,16 @@ pub struct ServiceConfig {
     /// Protocol tags allowed while a subscription is in traffic mode.
     #[serde(default = "default_metered_conns")]
     pub metered_conns: Vec<String>,
+    /// Capacity used to turn a node's live connection count into `conn_util`
+    /// for `POST /v1/nodes/load`. Nodes do not report their own limit yet, so
+    /// one fleet-wide number keeps the formula honest instead of inventing
+    /// per-node values.
+    #[serde(default = "default_node_load_conn_capacity")]
+    pub node_load_conn_capacity: u32,
+    /// Above this load the endpoint reports a hard `1.0` instead of a milder
+    /// number the client would happily ignore.
+    #[serde(default = "default_node_load_threshold")]
+    pub node_load_threshold: f64,
     /// Path of the mesh registry rkyv snapshot (UIN → device pubkeys). The
     /// mesh inbox itself is memory-only by design.
     #[serde(default = "default_mesh_snapshot_path")]

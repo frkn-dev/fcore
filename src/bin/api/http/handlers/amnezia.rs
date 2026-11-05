@@ -3,8 +3,9 @@ use crate::sync::MemSync;
 use base64::Engine;
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, InboundConnLink, NodeStatus, NodeStorageOperations,
-    SubscriptionOperations, SubscriptionStorageOperations, Tag, DEFAULT_NODE_WEIGHT,
+    ConnectionStorageApiOperations, InboundConnLink, MetricStorage, NodeStatus,
+    NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations, Tag,
+    DEFAULT_NODE_WEIGHT,
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -3244,5 +3245,313 @@ mod mobile_proto_tests {
         assert!(!proto_matches(Tag::AmneziaWg, "awg-mobile"));
         assert_eq!(proto_label(Tag::AmneziaWgMobile), "awg-mobile");
         assert_eq!(proto_label(Tag::AmneziaWg), "awg");
+    }
+}
+
+
+// ============================================================================
+// NODE LOAD (`POST /v1/nodes/load`)
+// ============================================================================
+
+/// Upper bound of `node_ids` accepted in a single request.
+pub const MAX_LOAD_NODES: usize = 50;
+/// Rolling window the reported load is averaged over.
+pub const LOAD_WINDOW_MS: i64 = 60_000;
+
+#[derive(Debug, Deserialize)]
+pub struct GatewayNodesLoadRequest {
+    #[serde(rename = "auth_data")]
+    pub auth_data: serde_json::Value,
+    #[serde(rename = "node_ids", default)]
+    pub node_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GatewayNodesLoadResponse {
+    /// Moment the figures were computed (RFC3339) so the client can age them out.
+    pub at: String,
+    /// node_id -> 0..1. A node without fresh metrics is absent on purpose.
+    pub load: BTreeMap<String, f64>,
+}
+
+/// Collapses the raw utilizations into the 0..1 score the client multiplies
+/// its weight by. Missing terms are skipped: a node that reports no CPU still
+/// gets a bandwidth-based score. `None` means "no data at all" and the caller
+/// must omit the node — a `0.0` would read as "free" and pull every connection
+/// onto it.
+pub fn node_load_score(
+    bandwidth_util: Option<f64>,
+    conn_util: Option<f64>,
+    cpu_util: Option<f64>,
+    threshold: f64,
+) -> Option<f64> {
+    let mixed = match (conn_util, cpu_util) {
+        (Some(c), Some(u)) => Some(0.6 * c + 0.4 * u),
+        (Some(c), None) => Some(c),
+        (None, Some(u)) => Some(u),
+        (None, None) => None,
+    };
+
+    let score = match (bandwidth_util, mixed) {
+        (Some(b), Some(m)) => b.max(m),
+        (Some(b), None) => b,
+        (None, Some(m)) => m,
+        (None, None) => return None,
+    }
+    .clamp(0.0, 1.0);
+
+    Some(if score >= threshold { 1.0 } else { score })
+}
+
+/// Parses, deduplicates and caps `node_ids`. Unparsable ids are dropped
+/// instead of failing the whole request: one broken id must not cost the
+/// client the load data of the whole pool.
+pub fn parse_node_ids(raw: &[String]) -> Vec<uuid::Uuid> {
+    let mut out: Vec<uuid::Uuid> = Vec::with_capacity(raw.len().min(MAX_LOAD_NODES));
+    for id in raw {
+        let Ok(id) = uuid::Uuid::parse_str(id.trim()) else {
+            continue;
+        };
+        if out.contains(&id) {
+            continue;
+        }
+        out.push(id);
+        if out.len() == MAX_LOAD_NODES {
+            break;
+        }
+    }
+    out
+}
+
+fn load_rate_limited() -> warp::reply::Response {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "status": 429,
+            "message": "node load polled too often",
+        })),
+        warp::http::StatusCode::TOO_MANY_REQUESTS,
+    )
+    .into_response()
+}
+
+/// Share of the node's declared bandwidth used in the window (rx + tx).
+fn node_bandwidth_util(
+    metrics: &MetricStorage,
+    node_id: &uuid::Uuid,
+    max_bandwidth_bps: i64,
+) -> Option<f64> {
+    if max_bandwidth_bps <= 0 {
+        return None;
+    }
+
+    let series = metrics.node_series_avg_window(
+        node_id,
+        |name| {
+            let parts: Vec<&str> = name.split('.').collect();
+            parts.len() == 3 && parts[0] == "net" && (parts[2] == "rx_bps" || parts[2] == "tx_bps")
+        },
+        LOAD_WINDOW_MS,
+    );
+    if series.is_empty() {
+        return None;
+    }
+
+    let bps: f64 = series.iter().sum();
+    Some((bps / max_bandwidth_bps as f64).clamp(0.0, 1.0))
+}
+
+/// Share of the fleet-wide connection capacity taken by this node.
+fn node_conn_util(metrics: &MetricStorage, node_id: &uuid::Uuid, capacity: u32) -> Option<f64> {
+    if capacity == 0 {
+        return None;
+    }
+
+    let series = metrics.node_series_avg_window(
+        node_id,
+        |name| name.starts_with("net.inbound.") && name.ends_with(".connections"),
+        LOAD_WINDOW_MS,
+    );
+    if series.is_empty() {
+        return None;
+    }
+
+    let active: f64 = series.iter().sum();
+    Some((active / capacity as f64).clamp(0.0, 1.0))
+}
+
+/// Average CPU utilization of the node, 0..1.
+fn node_cpu_util(metrics: &MetricStorage, node_id: &uuid::Uuid) -> Option<f64> {
+    let series = metrics.node_series_avg_window(
+        node_id,
+        |name| name.starts_with("sys.cpu."),
+        LOAD_WINDOW_MS,
+    );
+    if series.is_empty() {
+        return None;
+    }
+
+    let avg = series.iter().sum::<f64>() / series.len() as f64;
+    Some((avg / 100.0).clamp(0.0, 1.0))
+}
+
+/// `POST /v1/nodes/load` — current load of the requested nodes.
+///
+/// Separate from `/v1/config` on purpose: a config is cached for hours, while
+/// the load has to be current at the moment the client picks an address. The
+/// answer is intentionally sparse — a missing node id means "unknown", never
+/// "free".
+pub async fn gateway_nodes_load_handler<N, C, S>(
+    req: GatewayNodesLoadRequest,
+    memory: MemSync<N, C, S>,
+    metrics: std::sync::Arc<MetricStorage>,
+    limiter: std::sync::Arc<crate::http::handlers::report::SubRateLimiter>,
+    conn_capacity: u32,
+    threshold: f64,
+) -> Result<warp::reply::Response, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+{
+    let Some(sub_id) = extract_subscription_id(&req.auth_data) else {
+        return Ok(http::bad_request("auth_data.id is required").into_response());
+    };
+    if !limiter.check(sub_id) {
+        return Ok(load_rate_limited());
+    }
+
+    let ids = parse_node_ids(&req.node_ids);
+    let mut load = BTreeMap::new();
+
+    {
+        let mem = memory.memory.read().await;
+        for id in ids {
+            let Some(node) = mem.nodes.get_by_id(&id) else {
+                continue;
+            };
+
+            let bandwidth = node_bandwidth_util(&metrics, &id, node.max_bandwidth_bps);
+            let conns = node_conn_util(&metrics, &id, conn_capacity);
+            let cpu = node_cpu_util(&metrics, &id);
+
+            if let Some(score) = node_load_score(bandwidth, conns, cpu, threshold) {
+                load.insert(id.to_string(), (score * 100.0).round() / 100.0);
+            }
+        }
+    }
+
+    Ok(warp::reply::json(&GatewayNodesLoadResponse {
+        at: chrono::Utc::now().to_rfc3339(),
+        load,
+    })
+    .into_response())
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    #[test]
+    fn score_takes_the_worst_term() {
+        // Bandwidth is the binding constraint: the mix must not water it down.
+        let score = node_load_score(Some(0.9), Some(0.1), Some(0.1), 0.85).unwrap();
+        assert_eq!(score, 1.0, "0.9 is above the threshold and must read as 1.0");
+
+        let score = node_load_score(Some(0.5), Some(0.1), Some(0.1), 0.85).unwrap();
+        assert!((score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn score_mixes_connections_and_cpu() {
+        let score = node_load_score(None, Some(0.5), Some(0.5), 0.85).unwrap();
+        assert!((score - 0.5).abs() < 1e-9, "0.6*0.5 + 0.4*0.5 = 0.5, got {score}");
+
+        // Without one of the terms the other is used as is, not diluted by zero.
+        let score = node_load_score(None, Some(0.4), None, 0.85).unwrap();
+        assert!((score - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn score_without_data_is_none_not_zero() {
+        // A zero would mean "free" to the client and pull all traffic here.
+        assert_eq!(node_load_score(None, None, None, 0.85), None);
+    }
+
+    #[test]
+    fn score_is_clamped() {
+        assert_eq!(node_load_score(Some(4.0), None, None, 0.85), Some(1.0));
+        assert_eq!(node_load_score(Some(-1.0), None, None, 0.85), Some(0.0));
+    }
+
+    #[test]
+    fn ids_are_deduplicated_capped_and_skipped_when_broken() {
+        let mut raw: Vec<String> = vec!["not-a-uuid".to_string(), "   ".to_string()];
+        for i in 0..60u32 {
+            raw.push(format!("00000000-0000-0000-0000-{:012}", i));
+        }
+        raw.push("00000000-0000-0000-0000-000000000005".to_string());
+
+        let ids = parse_node_ids(&raw);
+        assert_eq!(ids.len(), MAX_LOAD_NODES);
+        assert_eq!(ids[5].to_string(), "00000000-0000-0000-0000-000000000005");
+        assert!(!ids.is_empty());
+    }
+
+    #[test]
+    fn metrics_helpers_ignore_stale_series() {
+        use fcore::metrics::MetricEnvelope;
+
+        let storage = MetricStorage::new(100, 3600);
+        let node_id = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut tags = BTreeMap::new();
+        tags.insert("hostname".to_string(), "test-node".to_string());
+
+        // Fresh sample: 40% of the declared 100 Mbps.
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "net.eth0.tx_bps".to_string(),
+            value: 40_000_000.0,
+            timestamp: now - 1_000,
+            tags: tags.clone(),
+        });
+        // Stale sample from an hour ago must not be averaged in.
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "net.eth0.rx_bps".to_string(),
+            value: 900_000_000.0,
+            timestamp: now - 3_600_000,
+            tags: tags.clone(),
+        });
+
+        let util = node_bandwidth_util(&storage, &node_id, 100_000_000).unwrap();
+        assert!((util - 0.4).abs() < 1e-9, "only the fresh series counts, got {util}");
+
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "net.inbound.amnezia-wg.connections".to_string(),
+            value: 150.0,
+            timestamp: now - 500,
+            tags: BTreeMap::new(),
+        });
+        let util = node_conn_util(&storage, &node_id, 300).unwrap();
+        assert!((util - 0.5).abs() < 1e-9, "got {util}");
+
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "sys.cpu.0".to_string(),
+            value: 25.0,
+            timestamp: now - 500,
+            tags: BTreeMap::new(),
+        });
+        let util = node_cpu_util(&storage, &node_id).unwrap();
+        assert!((util - 0.25).abs() < 1e-9, "got {util}");
     }
 }

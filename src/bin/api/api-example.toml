@@ -49,6 +49,11 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # standard subscriptions. Only metered protocols work in traffic mode.
 # traffic_mode_enabled = false
 # metered_conns = ["Wireguard", "AmneziaWg", "AmneziaWgMobile", "VlessTcpReality", "VlessGrpcReality", "VlessXhttpCdn"]
+# POST /v1/nodes/load: nodes do not report their own connection limit yet, so
+# one fleet-wide capacity turns their live connection count into conn_util.
+# Above the threshold the endpoint reports a hard 1.0 (docs/nodes-load.md).
+# node_load_conn_capacity = 300
+# node_load_threshold = 0.85
 # Mesh messenger relay (/v1/mesh/*): rkyv snapshot of the UIN → pubkey
 # registry, written every minute and on shutdown. The inbox never persists.
 # mesh_snapshot_path = "/var/lib/fcore/api/mesh-registry.bin"

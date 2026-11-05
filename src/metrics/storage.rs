@@ -591,6 +591,61 @@ impl MetricStorage {
         (rx, tx)
     }
 
+    /// Per-series average over the trailing `window_ms`, skipping series whose
+    /// freshest sample is older than the window (a stale value would read as a
+    /// live measurement). Series of the same name exist once per tag set — one
+    /// `net.inbound.<tag>.connections` per inbound — so the caller receives the
+    /// values and decides whether to sum or average them.
+    pub fn node_series_avg_window<F>(
+        &self,
+        node_id: &uuid::Uuid,
+        mut predicate: F,
+        window_ms: i64,
+    ) -> Vec<f64>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        let now = chrono::Utc::now().timestamp_millis();
+        let since = now - window_ms;
+        let mut out = Vec::new();
+        let Some(node_map) = self.inner.get(node_id) else {
+            return out;
+        };
+
+        for entry in node_map.iter() {
+            let hash = *entry.key();
+            let Some(meta) = self.metadata.get(&hash) else {
+                continue;
+            };
+            if !predicate(&meta.value().0) {
+                continue;
+            }
+
+            let samples = entry.value();
+            let Some(freshest) = samples.back() else {
+                continue;
+            };
+            if freshest.timestamp < since {
+                continue;
+            }
+
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for point in samples.iter().rev() {
+                if point.timestamp < since {
+                    break;
+                }
+                sum += point.value;
+                count += 1;
+            }
+            if count > 0 {
+                out.push(sum / count as f64);
+            }
+        }
+
+        out
+    }
+
     fn sum_metric(&self, metric: &str, tags: &BTreeMap<String, String>) -> u64 {
         let hashes = self.series_for(Some(metric), tags);
 

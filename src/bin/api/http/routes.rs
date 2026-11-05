@@ -6,8 +6,8 @@ use warp::Filter;
 
 use fcore::{
     http::filters::{with_param_bool, with_param_string, with_param_u64},
-    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, NodeStorageOperations,
-    Result, Subscription, SubscriptionOperations,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricStorage,
+    NodeStorageOperations, Result, Subscription, SubscriptionOperations,
 };
 
 use super::{
@@ -1068,6 +1068,51 @@ where
                 },
             );
 
+        // POST /v1/nodes/load — текущая загрузка нод (доля занятости 0..1),
+        // шифрованный конверт как у /v1/services. Не чаще раза в 15 с на подписку:
+        // клиенту хватает кэша 30 с, а частые опросы бьют по api на каждом подключении.
+        let nodes_load_limiter = Arc::new(crate::http::handlers::report::SubRateLimiter::new(
+            1,
+            std::time::Duration::from_secs(15),
+        ));
+        let with_nodes_load_limiter = {
+            let limiter = nodes_load_limiter.clone();
+            warp::any().map(move || limiter.clone())
+        };
+        let node_load_conn_capacity = params.node_load_conn_capacity;
+        let node_load_threshold = params.node_load_threshold;
+
+        let post_nodes_load_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("nodes"))
+            .and(warp::path("load"))
+            .and(warp::path::end())
+            .and(warp::body::content_length_limit(8 * 1024))
+            .and(crypto::with_agw_decryption::<
+                crate::http::handlers::amnezia::GatewayNodesLoadRequest,
+            >(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(with_metrics(self.metrics.clone()))
+            .and(with_nodes_load_limiter)
+            .and_then(
+                move |req: crate::http::handlers::amnezia::GatewayNodesLoadRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 metrics: Arc<MetricStorage>,
+                 limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
+                    let response = crate::http::handlers::amnezia::gateway_nodes_load_handler(
+                        req,
+                        sync,
+                        metrics,
+                        limiter,
+                        node_load_conn_capacity,
+                        node_load_threshold,
+                    )
+                    .await?;
+                    crypto::encrypt_gateway_reply(response, ctx).await
+                },
+            );
+
         // Админ-ручки оповещений: история и тест канала.
         let get_admin_alerts_route = warp::get()
             .and(warp::path!("v1" / "admin" / "alerts"))
@@ -1676,6 +1721,7 @@ where
             // Block telemetry
             .or(post_block_report_route)
             .or(post_scan_report_route)
+            .or(post_nodes_load_route)
             .or(get_block_report_admin_route)
             .or(get_client_reports_route)
             .or(get_report_observations_route)
