@@ -591,6 +591,20 @@ impl MetricStorage {
         (rx, tx)
     }
 
+    /// Number of connections of the node whose peer handshake is fresh.
+    ///
+    /// `user.traffic.online` is published per connection (0/1) by the node for
+    /// wg/awg/xray, so the node-side handshake check is already reflected here.
+    /// `None` means the node reported no such series at all — the caller decides
+    /// whether to fall back, and must not read it as "zero connections".
+    pub fn node_online_peers(&self, node_id: &uuid::Uuid) -> Option<f64> {
+        let values = self.node_series_values(node_id, |name| name == "user.traffic.online");
+        if values.is_empty() {
+            return None;
+        }
+        Some(values.iter().filter(|v| **v >= 0.5).count() as f64)
+    }
+
     /// Per-series average over the trailing `window_ms`, skipping series whose
     /// freshest sample is older than the window (a stale value would read as a
     /// live measurement). Series of the same name exist once per tag set — one

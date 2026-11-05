@@ -3384,12 +3384,15 @@ fn node_bandwidth_util(
     Some((bps / max_bandwidth_bps as f64).clamp(0.0, 1.0))
 }
 
-/// Share of the fleet-wide connection capacity taken by this node.
-fn node_conn_util(metrics: &MetricStorage, node_id: &uuid::Uuid, capacity: u32) -> Option<f64> {
-    if capacity == 0 {
-        return None;
+/// Active peers of the node, or `None` when it publishes no connection
+/// counters at all (old fnode, or a protocol without per-peer accounting).
+fn node_active_peers(metrics: &MetricStorage, node_id: &uuid::Uuid) -> Option<f64> {
+    if let Some(peers) = metrics.node_online_peers(node_id) {
+        return Some(peers);
     }
 
+    // xray inbounds count their own connections; used when a node serves no
+    // wg/awg at all.
     let series = metrics.node_series_avg_window(
         node_id,
         |name| name.starts_with("net.inbound.") && name.ends_with(".connections"),
@@ -3399,8 +3402,30 @@ fn node_conn_util(metrics: &MetricStorage, node_id: &uuid::Uuid, capacity: u32) 
         return None;
     }
 
-    let active: f64 = series.iter().sum();
-    Some((active / capacity as f64).clamp(0.0, 1.0))
+    Some(series.iter().sum())
+}
+
+/// Median, used as the stand-in value for nodes that report no counters.
+/// Robust against one huge node skewing the fleet-wide figure.
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[mid - 1] + values[mid]) / 2.0
+    } else {
+        values[mid]
+    })
+}
+
+/// Share of the fleet-wide connection capacity taken by this node.
+fn node_conn_util(peers: f64, capacity: u32) -> Option<f64> {
+    if capacity == 0 {
+        return None;
+    }
+    Some((peers / capacity as f64).clamp(0.0, 1.0))
 }
 
 /// Average CPU utilization of the node, 0..1.
@@ -3454,21 +3479,31 @@ where
     let ids = parse_node_ids(&req.node_ids);
     let mut load = BTreeMap::new();
 
+    // First pass: what each node reports. Nodes without counters (old fnode)
+    // must not be read as "zero" — they get the fleet median below.
+    let mut nodes: Vec<(uuid::Uuid, String, i64, Option<f64>)> = Vec::new();
     {
         let mem = memory.memory.read().await;
         for id in ids {
             let Some(node) = mem.nodes.get_by_id(&id) else {
                 continue;
             };
+            let peers = node_active_peers(&metrics, &id);
+            nodes.push((id, node.interface.clone(), node.max_bandwidth_bps, peers));
+        }
+    }
 
-            let bandwidth =
-                node_bandwidth_util(&metrics, &id, &node.interface, node.max_bandwidth_bps);
-            let conns = node_conn_util(&metrics, &id, conn_capacity);
-            let cpu = node_cpu_util(&metrics, &id);
+    let median_peers = median(nodes.iter().filter_map(|(_, _, _, p)| *p).collect());
 
-            if let Some(score) = node_load_score(bandwidth, conns, cpu, threshold) {
-                load.insert(id.to_string(), (score * 100.0).round() / 100.0);
-            }
+    for (id, interface, max_bandwidth_bps, peers) in nodes {
+        let bandwidth = node_bandwidth_util(&metrics, &id, &interface, max_bandwidth_bps);
+        let conns = peers
+            .or(median_peers)
+            .and_then(|peers| node_conn_util(peers, conn_capacity));
+        let cpu = node_cpu_util(&metrics, &id);
+
+        if let Some(score) = node_load_score(bandwidth, conns, cpu, threshold) {
+            load.insert(id.to_string(), (score * 100.0).round() / 100.0);
         }
     }
 
@@ -3578,8 +3613,32 @@ mod load_tests {
             timestamp: now - 500,
             tags: BTreeMap::new(),
         });
-        let util = node_conn_util(&storage, &node_id, 300).unwrap();
+        let peers = node_active_peers(&storage, &node_id).unwrap();
+        assert!((peers - 150.0).abs() < 1e-9, "got {peers}");
+        let util = node_conn_util(peers, 300).unwrap();
         assert!((util - 0.5).abs() < 1e-9, "got {util}");
+
+        // Per-connection handshake state wins over the inbound counters: two of
+        // four peers are online, so the node has 2 active connections.
+        for (conn, online) in [("a", 1.0), ("b", 1.0), ("c", 0.0), ("d", 0.0)] {
+            let mut conn_tags = BTreeMap::new();
+            conn_tags.insert("conn_id".to_string(), conn.to_string());
+            storage.insert_envelope(MetricEnvelope {
+                node_id,
+                name: "user.traffic.online".to_string(),
+                value: online,
+                timestamp: now - 400,
+                tags: conn_tags,
+            });
+        }
+        assert_eq!(storage.node_online_peers(&node_id), Some(2.0));
+
+        // A node that reports nothing is not "free": it gets the fleet median.
+        let silent = uuid::Uuid::parse_str("99999999-8888-7777-6666-555555555555").unwrap();
+        assert_eq!(node_active_peers(&storage, &silent), None);
+        assert_eq!(median(vec![2.0, 40.0, 8.0]), Some(8.0));
+        assert_eq!(median(vec![10.0, 20.0]), Some(15.0));
+        assert_eq!(median(Vec::new()), None);
 
         storage.insert_envelope(MetricEnvelope {
             node_id,
