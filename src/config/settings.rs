@@ -58,9 +58,9 @@ pub struct NodeConfig {
     pub pool: Option<String>,
     /// Per-language translations of `pool` (e.g. en/ru/uk).
     pub pool_translation: Option<BTreeMap<String, String>>,
-    /// Приоритет ноды в пуле: больше — предпочтительнее. Клиент сортирует
-    /// пул сначала по весу, потом по задержке/скору. 0 — нейтрально.
-    pub weight: i32,
+    /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
+    /// address from `node_ips`; an unlisted address weighs 100.
+    pub node_weights: Option<BTreeMap<String, i32>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -87,10 +87,35 @@ pub struct NodeConfigRaw {
     /// and `ua` is accepted as an alias of `uk`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
-    /// Приоритет ноды в пуле (config.toml `[node] weight`). Отсутствует =
-    /// 0, то есть нода равноправна с остальными.
+    /// Per-entry weights (config.toml `[node] node_weights`), keyed by address.
+    /// An empty map means every address uses the default (100). An unparsable
+    /// key or a non-positive weight is dropped.
     #[serde(default)]
-    pub weight: i32,
+    pub node_weights: Option<BTreeMap<String, i32>>,
+}
+
+/// Keeps only usable per-IP weights: the key must parse as IPv4 (the same
+/// addresses fnode lists in `node_ips`) and the weight must be positive;
+/// anything else falls back to the default weight.
+fn normalize_node_weights(raw: Option<BTreeMap<String, i32>>) -> Option<BTreeMap<String, i32>> {
+    let map: BTreeMap<String, i32> = raw
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(ip, weight)| {
+            if weight <= 0 {
+                return None;
+            }
+            match ip.trim().parse::<Ipv4Addr>() {
+                Ok(parsed) => Some((parsed.to_string(), weight)),
+                Err(_) => None,
+            }
+        })
+        .collect();
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 /// Trims the configured pool name and treats a blank value as absent.
@@ -156,7 +181,7 @@ impl NodeConfig {
             node_ips: raw.node_ips,
             pool: normalize_pool(raw.pool),
             pool_translation: normalize_pool_translation(raw.pool_translation),
-            weight: raw.weight,
+            node_weights: normalize_node_weights(raw.node_weights),
         })
     }
 }

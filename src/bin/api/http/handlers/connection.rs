@@ -26,13 +26,14 @@ use super::super::{
 use super::{resolve_serving_access, serving_access, ServingAccess};
 use crate::http::filters::ConnectionsSyncAuth;
 
-/// Env, в котором запросу разрешено синхронизироваться.
+/// Env this request is allowed to sync.
 ///
-/// `bound` = `Some(uuid)` для `node_`-токена ноды, `None` для нашего
-/// сервис/админ-токена. Нода со своим токеном всегда синхронизируется ровно в
-/// том env, где она зарегистрирована: иначе приватная нода с `env = "dev"` в
-/// конфиге забирает пиров dev/ru (и наоборот — дев-нода получает пиров
-/// клиента). Наши ноды ходят с сервисным токеном и env берут из запроса.
+/// `bound` = `Some(uuid)` for a node's `node_` token, `None` for our
+/// service/admin token. A node with its own token always syncs exactly the env
+/// it is registered in: otherwise a private node whose config still says
+/// `env = "dev"` pulls dev/ru peers (and the other way round — a dev node gets
+/// a customer's peers). Our nodes use the service token and take the env from
+/// the request.
 pub(crate) fn sync_env(
     bound: Option<uuid::Uuid>,
     own_env: Option<&fcore::Env>,
@@ -88,8 +89,8 @@ where
         );
         req.env = env.clone();
     }
-    // Публикация только в свой init-топик: иначе self-hosted нода могла бы
-    // подсунуть свои коннекты подписчикам чужого топика.
+    // Publish into the node's own init topic only: otherwise a self-hosted node
+    // could push its connections to the subscribers of someone else's topic.
     let topic = match bound {
         Some(id) => Topic::Init(id),
         None => req.topic.clone(),
@@ -97,9 +98,9 @@ where
 
     let proto = req.proto;
     let last_update = req.last_update;
-    // Hysteria2 бьётся не по env, а по глобальному auth-сервису, поэтому для
-    // наших нод этот фильтр исторически отключён. Ноде с `node_`-токеном
-    // отдаём только её env — иначе guard выше бессмыслен.
+    // Hysteria2 is authorised by the global auth service rather than by env, so
+    // for our nodes this filter is historically off. A node with a `node_` token
+    // gets only its own env — otherwise the guard above is pointless.
     let strict_env = bound.is_some();
 
     let connections_to_send: Vec<_> = mem
@@ -1377,7 +1378,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            node_weights: std::collections::BTreeMap::new(),
         }
     }
 

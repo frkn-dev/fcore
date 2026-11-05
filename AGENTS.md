@@ -81,6 +81,7 @@ cargo test --lib
 
 ## Style
 
+- Code comments and commit messages are written in **English**; Russian comments in the code you touch get translated as part of that change (user-facing docs/HUMANS.md stay Russian).
 - Minimal diffs, idiomatic Rust matching the surrounding module, no speculative abstraction.
 - Public API changes: update `docs/API.md` and the endpoint list in the sibling repo that consumes it.
 - If behaviour described here changes, update this file.

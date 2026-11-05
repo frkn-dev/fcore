@@ -59,6 +59,11 @@ type = "common"
 # alias of `uk`. Blank values are ignored and never overwrite stored ones.
 # pool = "Finland"
 # pool_translation = { en = "Finland", ru = "Финляндия", uk = "Фінляндія" }
+# Optional per-address weights for the pool: address -> weight (default 100).
+# Addresses of one node and of neighbour nodes may share the same weight; the
+# api hands the client `node_weights{ip: weight}` and the client splits traffic
+# by these numbers. Missing address = 100. Zero/negative = "not set" (100).
+# node_weights = { "192.168.1.100" = 75, "192.168.1.101" = 25 }
 
 [api]
 endpoint = "http://127.0.0.1:3000"

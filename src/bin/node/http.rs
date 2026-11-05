@@ -39,10 +39,10 @@ pub struct NodeRequest {
     /// Optional per-language translations of `pool`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
-    /// Приоритет ноды в пуле (config.toml `[node] weight`). Старые api
-    /// игнорируют неизвестное поле.
+    /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
+    /// address from `node_ips`. Old api builds ignore the unknown field.
     #[serde(default)]
-    pub weight: i32,
+    pub node_weights: BTreeMap<String, i32>,
 }
 
 #[async_trait]
@@ -190,7 +190,7 @@ where
             node_ips: node.node_ips.clone(),
             pool: node.pool.clone(),
             pool_translation: node.pool_translation.clone(),
-            weight: node.weight,
+            node_weights: node.node_weights.clone(),
         };
 
         let res = HttpClient::new()

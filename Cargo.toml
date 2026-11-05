@@ -1,6 +1,6 @@
 [package]
 name = "fcore"
-version = "0.6.116"
+version = "0.6.117"
 edition = "2021"
 build = "build.rs"
 

@@ -129,9 +129,10 @@ pub struct NodeResponse {
     pub node_ips: Option<Vec<Ipv4Addr>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
-    /// Приоритет ноды в пуле (config.toml `[node] weight`). 0 — нейтрально.
-    #[serde(default)]
-    pub weight: i32,
+    /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
+    /// address from `node_ips`. Absent when every address uses the default (100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_weights: Option<BTreeMap<String, i32>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -180,14 +181,60 @@ pub struct Node {
     /// falls back to `pool`; an absent map means there is no translation.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
-    /// Приоритет ноды в пуле: больше — предпочтительнее. Участвует в
-    /// derived PartialEq, поэтому смена веса в конфиге регистрируется как
-    /// обновление ноды (без перезапуска api).
+    /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
+    /// address from `node_ips`. An unlisted address weighs `DEFAULT_NODE_WEIGHT`;
+    /// neighbour addresses may share the same weight. Part of the derived
+    /// PartialEq, so a weight change in the config registers as a node update.
     #[serde(default)]
-    pub weight: i32,
+    pub node_weights: BTreeMap<String, i32>,
 }
 
+/// Default weight of an entry address: a regular node. Lower = smaller share of
+/// the traffic.
+pub const DEFAULT_NODE_WEIGHT: i32 = 100;
+
 impl Node {
+    /// Entry addresses in `node_ips` order, else `address` alone.
+    pub fn entry_ips(&self) -> Vec<String> {
+        self.node_ips
+            .as_ref()
+            .map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>())
+            .filter(|ips: &Vec<String>| !ips.is_empty())
+            .unwrap_or_else(|| vec![self.address.to_string()])
+    }
+
+    /// Weight of one address: explicit, else `DEFAULT_NODE_WEIGHT`.
+    ///
+    /// A non-positive weight counts as "not set": a node running an old build
+    /// sends 0 instead of omitting the field, and a zero share of traffic is a
+    /// worse default than the regular one.
+    pub fn weight_for(&self, ip: &str) -> i32 {
+        match self.node_weights.get(ip) {
+            Some(w) if *w > 0 => *w,
+            _ => DEFAULT_NODE_WEIGHT,
+        }
+    }
+
+    /// Weights of every entry address — what the client receives (`node_weights`).
+    pub fn weights_by_ip(&self) -> BTreeMap<String, i32> {
+        self.entry_ips()
+            .into_iter()
+            .map(|ip| {
+                let weight = self.weight_for(&ip);
+                (ip, weight)
+            })
+            .collect()
+    }
+
+    /// Highest address weight — the value of the legacy `weight` field.
+    pub fn max_weight(&self) -> i32 {
+        self.weights_by_ip()
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(DEFAULT_NODE_WEIGHT)
+    }
+
     pub fn new(
         settings: NodeConfig,
         #[cfg(feature = "xray")] xray_config: Option<XraySettings>,
@@ -309,7 +356,7 @@ impl Node {
             node_ips: settings.node_ips,
             pool: settings.pool,
             pool_translation: settings.pool_translation,
-            weight: settings.weight,
+            node_weights: settings.node_weights.unwrap_or_default(),
         }
     }
 
@@ -357,7 +404,11 @@ impl Node {
             cluster: self.cluster.clone(),
             node_ips: self.node_ips.clone(),
             pool: self.pool.clone(),
-            weight: self.weight,
+            node_weights: if self.node_weights.is_empty() {
+                None
+            } else {
+                Some(self.node_weights.clone())
+            },
         }
     }
 
@@ -422,7 +473,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            node_weights: BTreeMap::new(),
         };
 
         let response = node.as_node_response();

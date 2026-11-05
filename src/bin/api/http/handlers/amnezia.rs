@@ -4,7 +4,7 @@ use base64::Engine;
 use fcore::{
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
     ConnectionStorageApiOperations, InboundConnLink, NodeStatus, NodeStorageOperations,
-    SubscriptionOperations, SubscriptionStorageOperations, Tag,
+    SubscriptionOperations, SubscriptionStorageOperations, Tag, DEFAULT_NODE_WEIGHT,
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -126,17 +126,17 @@ pub struct GatewayConnection {
     /// Absent for single-address nodes so old clients see the old shape.
     #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
     pub node_ips: Option<Vec<String>>,
-    /// Порт конкретного адреса пула: `{"93.89.220.48": 443, "77.221.152.88": 8443}`.
+    /// Port of each pool address: `{"93.89.220.48": 443, "77.221.152.88": 8443}`.
     ///
-    /// Ключ — адрес из `node_ips`, значение — порт, на котором этот адрес
-    /// слушает **свой** протокол. Внутри одной ноды адреса делят один
-    /// интерфейс, поэтому один порт; между нодами пула порты могут различаться.
+    /// Key — an address from `node_ips`, value — the port this address listens
+    /// on for **its** protocol. Addresses of one node share one interface and
+    /// therefore one port; ports may differ between nodes of a pool.
     ///
-    /// `node_ips` остаётся единственным списком адресов — карта только
-    /// дополняет его портами. Клиент (`servers_model.cpp::portForNodeIp`)
-    /// читает `node_ports[ip]`, а при отсутствии ключа берёт порт протокола,
-    /// поэтому старая сборка api (поле не приходит) и нода с обычным портом
-    /// ведут себя одинаково.
+    /// `node_ips` stays the single list of addresses — the map only adds ports
+    /// to it. The client (`servers_model.cpp::portForNodeIp`) reads
+    /// `node_ports[ip]` and falls back to the protocol port when the key is
+    /// missing, so an old api build (no field) and a node with a regular port
+    /// behave the same.
     #[serde(rename = "node_ports", skip_serializing_if = "Option::is_none")]
     pub node_ports: Option<BTreeMap<String, u16>>,
     /// Pool/group name of the node (config.toml `[node] pool`). Clients
@@ -147,11 +147,16 @@ pub struct GatewayConnection {
     /// Per-language translations of `pool`; absent when there is none.
     #[serde(rename = "pool_translation", skip_serializing_if = "Option::is_none")]
     pub pool_translation: Option<BTreeMap<String, String>>,
-    /// Приоритет ноды внутри пула: больше — предпочтительнее. Клиент
-    /// сортирует пул по весу (убывание), затем по задержке. 0 — нейтрально,
-    /// отрицательный вес = нода нежелательна, но остаётся рабочей.
+    /// Legacy field for old clients: they require a numeric `weight` and drop
+    /// the whole server without it. Value — the highest address weight
+    /// (100 by default).
     #[serde(rename = "weight")]
     pub weight: i32,
+    /// Weight of every entry address: key — an address from `node_ips`/
+    /// `node_ports`, value — its weight (100 when not set). Different addresses
+    /// may share the same weight.
+    #[serde(rename = "node_weights", skip_serializing_if = "Option::is_none")]
+    pub node_weights: Option<BTreeMap<String, i32>>,
     #[serde(rename = "config_rev", skip_serializing_if = "Option::is_none")]
     pub config_rev: Option<String>,
 }
@@ -535,10 +540,10 @@ fn entry_ips(node: &fcore::Node) -> Vec<String> {
         .unwrap_or_else(|| vec![node.address.to_string()])
 }
 
-/// Адреса одной ноды с её портом.
+/// Addresses of one node with their port.
 ///
-/// `node_ips` — это адреса одного интерфейса, поэтому порт у них общий.
-/// Пустой список означает одиночный `address`.
+/// `node_ips` are addresses of one interface, so they share the port. An empty
+/// list means the single `address`.
 fn node_ports_of_node(node: &fcore::Node, port: u16) -> Vec<(String, u16)> {
     let ips: Vec<String> = node
         .node_ips
@@ -549,10 +554,10 @@ fn node_ports_of_node(node: &fcore::Node, port: u16) -> Vec<(String, u16)> {
     ips.into_iter().map(|ip| (ip, port)).collect()
 }
 
-/// Все точки входа пула: по записи на каждый IP каждой онлайн-ноды.
+/// Every entry of the pool: one record per IP of each online node.
 ///
-/// Порядок детерминированный (по uuid ноды, затем по порядку `node_ips`), чтобы
-/// ответ и хеш версии не дрожали между рестартами на HashMap-обходе.
+/// The order is deterministic (node uuid, then `node_ips` order) so the response
+/// and the version hash do not jitter between restarts on a HashMap walk.
 pub(crate) fn pooled_node_ports<N: NodeStorageOperations>(
     nodes: &N,
     env: &fcore::Env,
@@ -563,11 +568,11 @@ pub(crate) fn pooled_node_ports<N: NodeStorageOperations>(
     node_ports_of_members(&members, tag)
 }
 
-/// Онлайн-члены пула, в стабильном порядке (по uuid).
+/// Online members of the pool, in a stable order (by uuid).
 ///
-/// Отдельная функция нужна, чтобы `node_ips` и `node_ports` считались по одному
-/// и тому же составу: иначе старый клиент (он видит только `node_ips`) и новый
-/// (видит оба) получали бы разные пулы.
+/// A separate function keeps `node_ips`, `node_ports` and `node_weights` over
+/// the same member set: otherwise an old client (it sees only `node_ips`) and a
+/// new one (sees both) would get different pools.
 fn pool_members<'a, N: NodeStorageOperations>(
     nodes: &'a N,
     env: &fcore::Env,
@@ -586,10 +591,11 @@ fn pool_members<'a, N: NodeStorageOperations>(
     members
 }
 
-/// Чистая часть `pooled_node_ports`: состав уже отфильтрован и отсортирован.
+/// The pure part of `pooled_node_ports`: the member set is already filtered and
+/// sorted.
 ///
-/// Нода без нужного инбаунда в карту не попадает: она не может обслужить этот
-/// протокол, и её адрес в карточке пула был бы мёртвой точкой входа.
+/// A node without the required inbound is not added: it cannot serve that
+/// protocol, and its address in the pool card would be a dead entry point.
 fn node_ports_of_members(members: &[&fcore::Node], tag: Tag) -> BTreeMap<String, u16> {
     let mut out: BTreeMap<String, u16> = BTreeMap::new();
     for node in members {
@@ -603,7 +609,37 @@ fn node_ports_of_members(members: &[&fcore::Node], tag: Tag) -> BTreeMap<String,
     out
 }
 
-/// Обратная совместимость: только адреса, без портов.
+/// Weights for an already collected set of entry addresses.
+///
+/// Computed over the same IP list as `node_ports`: otherwise the client would
+/// get a weight for an address that is not in the pool, or lose an address
+/// without one. An address with no weight weighs `DEFAULT_NODE_WEIGHT`.
+fn node_weights_of_ips(
+    members: &[&fcore::Node],
+    ips: &BTreeMap<String, u16>,
+) -> BTreeMap<String, i32> {
+    ips.keys()
+        .map(|ip| {
+            let weight = members
+                .iter()
+                .find(|node| node.entry_ips().iter().any(|own| own == ip))
+                .map(|node| node.weight_for(ip))
+                .unwrap_or(DEFAULT_NODE_WEIGHT);
+            (ip.clone(), weight)
+        })
+        .collect()
+}
+
+/// Weights of a single-node entry: sent only when the node has several
+/// addresses or explicit weights — otherwise it is noise in the response.
+fn gateway_node_weights(node: &fcore::Node) -> Option<BTreeMap<String, i32>> {
+    if node.entry_ips().len() < 2 && node.node_weights.is_empty() {
+        return None;
+    }
+    Some(node.weights_by_ip())
+}
+
+/// Backwards compatibility: addresses only, no ports.
 fn connections_for_protocol<N, C>(
     nodes: &N,
     conn_nodes: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
@@ -674,7 +710,8 @@ where
                             node_ports: None,
                             pool: Some(pool.clone()),
                             pool_translation: node.pool_translation.clone(),
-                            weight: node.weight,
+                            weight: node.max_weight(),
+                            node_weights: None,
                             config_rev: None,
                         });
                         continue;
@@ -714,7 +751,8 @@ where
                     node_ports: None,
                     pool: node.pool.clone(),
                     pool_translation: node.pool_translation.clone(),
-                    weight: node.weight,
+                    weight: node.max_weight(),
+                    node_weights: gateway_node_weights(node),
                     config_rev: config_rev(node, tag, &ips),
                 });
             }
@@ -729,6 +767,14 @@ where
             result[*idx].node_ips = Some(ips);
             result[*idx].node_ports = Some(ports.clone());
             let members = pool_members(nodes, &env, pool);
+            // Weights are computed over the same address set as the ports.
+            let weights = node_weights_of_ips(&members, &ports);
+            result[*idx].weight = weights
+                .values()
+                .copied()
+                .max()
+                .unwrap_or(DEFAULT_NODE_WEIGHT);
+            result[*idx].node_weights = Some(weights);
             result[*idx].config_rev = Some(config_rev_pool(&members, *tag, &ports));
         }
     }
@@ -745,7 +791,8 @@ where
             node_ports: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: None,
         }];
     }
@@ -2280,7 +2327,8 @@ mod tests {
             node_ports: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: None,
         };
         // Single-address node without a pool: both optional fields are omitted
@@ -2289,15 +2337,24 @@ mod tests {
         assert!(v.get("node_ips").is_none());
         assert!(v.get("pool").is_none());
         assert!(v.get("pool_translation").is_none());
-        // Вес отдаётся всегда (0 = нейтрально): клиент по нему сортирует пул.
-        assert_eq!(v["weight"], serde_json::json!(0));
+        // The legacy field is always present: without a numeric `weight` old
+        // clients drop the server. Default is 100, and `node_weights` is not
+        // needed for a single address.
+        assert_eq!(v["weight"], serde_json::json!(100));
+        assert!(v.get("node_weights").is_none());
 
+        let mut weights = std::collections::BTreeMap::new();
+        weights.insert("78.17.28.66".to_string(), 75);
+        weights.insert("78.17.28.67".to_string(), 25);
         let weighted = GatewayConnection {
-            weight: 50,
+            weight: 75,
+            node_weights: Some(weights),
             ..base.clone()
         };
         let v = serde_json::to_value(&weighted).unwrap();
-        assert_eq!(v["weight"], serde_json::json!(50));
+        assert_eq!(v["weight"], serde_json::json!(75));
+        assert_eq!(v["node_weights"]["78.17.28.66"], serde_json::json!(75));
+        assert_eq!(v["node_weights"]["78.17.28.67"], serde_json::json!(25));
 
         let multi = GatewayConnection {
             node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
@@ -2340,7 +2397,7 @@ mod tests {
             },
             pool: Some("Russia".into()),
             pool_translation: None,
-            weight: 0,
+            node_weights: BTreeMap::new(),
         }
     }
 
@@ -2394,7 +2451,8 @@ mod tests {
             node_ports: Some(ports.clone()),
             pool: Some("EU Рилзопровод".into()),
             pool_translation: None,
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
         };
         let json = serde_json::to_string_pretty(&card).unwrap();
@@ -2430,6 +2488,61 @@ mod tests {
         );
     }
 
+    /// Pool weights: one entry per address (not per node), default 100, equal
+    /// values are fine.
+    #[test]
+    fn pool_node_weights_are_per_address_with_default_100() {
+        let mut a = node_with_ips(21, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443);
+        a.node_weights = BTreeMap::from([
+            ("93.89.220.48".to_string(), 75),
+            ("93.89.220.49".to_string(), 25),
+        ]);
+        // The second node sets no weight at all — its address weighs 100.
+        let b = node_with_ips(22, "77.221.152.88", &[], 443);
+        let members = [&a, &b];
+
+        let ports = node_ports_of_members(&members, Tag::Wireguard);
+        let weights = node_weights_of_ips(&members, &ports);
+
+        assert_eq!(
+            weights,
+            BTreeMap::from([
+                ("93.89.220.48".to_string(), 75),
+                ("93.89.220.49".to_string(), 25),
+                ("77.221.152.88".to_string(), 100),
+            ]),
+            "each address has its own weight; unset means 100"
+        );
+        assert_eq!(
+            weights.keys().collect::<Vec<_>>(),
+            ports.keys().collect::<Vec<_>>(),
+            "weight keys and port keys must match"
+        );
+        // Legacy field for old clients = the highest address weight.
+        assert_eq!(weights.values().copied().max(), Some(100));
+    }
+
+    /// Default 100, repeated weights, and zero treated as "not set".
+    #[test]
+    fn node_weight_defaults_duplicates_and_zero() {
+        let mut node = node_with_ips(31, "1.2.3.4", &["1.2.3.4", "5.6.7.8"], 443);
+        assert_eq!(node.weight_for("1.2.3.4"), 100);
+        assert_eq!(node.weight_for("5.6.7.8"), 100);
+        assert_eq!(node.max_weight(), 100);
+
+        // Equal weights on neighbour addresses are not an error.
+        node.node_weights =
+            BTreeMap::from([("1.2.3.4".to_string(), 50), ("5.6.7.8".to_string(), 50)]);
+        assert_eq!(node.weights_by_ip().len(), 2);
+        assert!(node.weights_by_ip().values().all(|w| *w == 50));
+        assert_eq!(node.max_weight(), 50);
+
+        // A node running an old build sends 0 instead of omitting the field.
+        node.node_weights = BTreeMap::from([("1.2.3.4".to_string(), 0)]);
+        assert_eq!(node.weight_for("1.2.3.4"), 100);
+        assert_eq!(node.weight_for("5.6.7.8"), 100);
+    }
+
     /// Полный ответ `/v1/services` в том виде, в котором он уезжает клиенту:
     /// обёртка сервиса + карточки коннектов. Печать:
     ///
@@ -2455,7 +2568,8 @@ mod tests {
             node_ports: Some(ports.clone()),
             pool: Some("RU Рилзопровод".into()),
             pool_translation: None,
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
         };
 
@@ -2472,7 +2586,8 @@ mod tests {
             node_ports: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: None,
         };
 
@@ -2633,7 +2748,8 @@ mod tests {
             ])),
             pool: Some("Russia".into()),
             pool_translation: None,
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: Some("abc".into()),
         };
         let v = serde_json::to_value(&conn).unwrap();
@@ -2665,7 +2781,8 @@ mod tests {
             node_ports: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: None,
         };
         let v = serde_json::to_value(&conn).unwrap();
@@ -2720,7 +2837,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            node_weights: BTreeMap::new(),
         };
         let rev = config_rev(&node, Tag::Wireguard, &[]).unwrap();
         assert_eq!(
@@ -2773,7 +2890,8 @@ mod tests {
                 .into_iter()
                 .collect(),
             ),
-            weight: 0,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
             config_rev: None,
         };
         let v = serde_json::to_value(&base).unwrap();
@@ -2988,7 +3106,7 @@ mod tests {
                 node_ips: Some(ips),
                 pool: pool.map(|s| s.to_string()),
                 pool_translation: None,
-                weight: 0,
+                node_weights: BTreeMap::new(),
             }
         }
 

@@ -180,10 +180,11 @@ pub struct NodeRequest {
     /// binaries omit it, so old clients keep the previous behavior.
     #[serde(default)]
     pub pool: Option<String>,
-    /// Приоритет ноды в пуле (config.toml `[node] weight`). Старые бинари
-    /// ноды поле не шлют — тогда вес 0 (нода равноправна).
+    /// Per-entry weights (config.toml `[node] node_weights`), keyed by address.
+    /// Old node binaries omit the field (and send the legacy `weight`, which the
+    /// api ignores), so every address falls back to the default (100).
     #[serde(default)]
-    pub weight: i32,
+    pub node_weights: BTreeMap<String, i32>,
     /// Optional per-language translations of `pool` (en/ru/uk/...); `ua` is
     /// accepted as an alias of `uk`.
     #[serde(default)]
@@ -243,7 +244,12 @@ impl NodeRequest {
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty()),
             pool_translation: normalize_pool_translation(self.pool_translation.clone()),
-            weight: self.weight,
+            node_weights: self
+                .node_weights
+                .iter()
+                .filter(|(ip, w)| **w > 0 && ip.parse::<Ipv4Addr>().is_ok())
+                .map(|(ip, w)| (ip.trim().to_string(), *w))
+                .collect(),
         }
     }
 }

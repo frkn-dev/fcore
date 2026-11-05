@@ -190,7 +190,7 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
-            weight: 0,
+            node_weights: std::collections::BTreeMap::new(),
         }
     }
 

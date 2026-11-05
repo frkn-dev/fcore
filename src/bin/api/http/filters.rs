@@ -69,15 +69,15 @@ pub fn with_service_or_admin_auth(
         .untuple_one()
 }
 
-/// Кто зовёт `/connections/sync`: наш сервис/админ-токен (env и топик берутся
-/// из тела запроса) или `node_`-токен self-hosted ноды (только её собственный
-/// env и только её init-топик). Отдельный фильтр, потому что остальные
-/// management-маршруты `node_` по-прежнему не принимают.
+/// Who is calling `/connections/sync`: our service/admin token (env and topic
+/// come from the request body) or a self-hosted node's `node_` token (only its
+/// own env and only its own init topic). A separate filter, because the other
+/// management routes still reject `node_`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionsSyncAuth {
-    /// Наш сервис или админ: любая нода, любой env.
+    /// Our service or admin token: any node, any env.
     Service,
-    /// Токен ноды: uuid, к которому он привязан.
+    /// Node token: the uuid it is bound to.
     Node(uuid::Uuid),
 }
 
@@ -109,9 +109,9 @@ where
                 {
                     return Ok(ConnectionsSyncAuth::Service);
                 }
-                // `node_`-токен привязан к ноде записью в node_access_tokens:
-                // без этой сверки клиент мог бы прислать чужой uuid в теле
-                // (topic) и вытянуть пиров dev/ru.
+                // A `node_` token is bound to its node by a node_access_tokens
+                // row: without this check a client could put someone else's
+                // uuid in the body (topic) and pull dev/ru peers.
                 if token.starts_with("node_") {
                     return match mem_sync.db.node_access_token().find_by_token(token).await {
                         Ok(Some(id)) => Ok(ConnectionsSyncAuth::Node(id)),
@@ -157,11 +157,12 @@ where
                 {
                     return Ok(());
                 }
-                // `node_`-токен живёт на машине self-hosted пользователя. Это
-                // не management-доступ: такие ноды регистрируются только через
-                // POST /v1/private/nodes (inst_ -> node_), где env выводится из
-                // подписки. Иначе токен открывал регистрацию в общих dev/ru/wl
-                // и отдавал чужих пиров.
+                // A `node_` token lives on a self-hosted node's machine. It is
+                // not management access: those nodes register only through
+                // POST /v1/private/nodes (inst_ -> node_), where the env comes
+                // from the subscription. Before this check the token opened
+                // registration into the shared dev/ru/wl and handed out other
+                // people's peers.
                 if token.starts_with("node_") {
                     tracing::warn!("node_token_used_as_mgmt: отказ на management-маршруте");
                     return Err(warp::reject::custom(AuthError(

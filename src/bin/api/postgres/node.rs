@@ -37,11 +37,16 @@ impl PgNode {
         Self { manager }
     }
 
+    /// Self-healing DDL for the optional `nodes` columns that older databases
+    /// do not have yet: pool metadata and per-address weights.
     pub async fn ensure_pool_column(&self) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
         client
-            .batch_execute("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool TEXT;")
+            .batch_execute(
+                "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool TEXT;
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS node_weights JSONB;",
+            )
             .await?;
         Ok(())
     }
@@ -83,9 +88,16 @@ impl PgNode {
             .map(serde_json::to_value)
             .transpose()?;
 
+        // JSONB map IP -> weight. An empty map becomes NULL (all defaults).
+        let node_weights: Option<serde_json::Value> = if node.node_weights.is_empty() {
+            None
+        } else {
+            serde_json::to_value(&node.node_weights).ok()
+        };
+
         let node_query = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, weight
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, node_weights
         )
         VALUES (
             $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19
@@ -107,7 +119,7 @@ impl PgNode {
             node_ips = EXCLUDED.node_ips,
             pool = COALESCE(EXCLUDED.pool, nodes.pool),
             pool_translation = COALESCE(EXCLUDED.pool_translation, nodes.pool_translation),
-            weight = EXCLUDED.weight
+            node_weights = EXCLUDED.node_weights
     ";
 
         tx.execute(
@@ -131,7 +143,7 @@ impl PgNode {
                 &node_ips,
                 &node.pool,
                 &pool_translation,
-                &node.weight,
+                &node_weights,
             ],
         )
         .await?;
@@ -362,7 +374,7 @@ impl PgNode {
                       n.node_ips,
                       n.pool,
                       n.pool_translation,
-                      n.weight,
+                      n.node_weights,
 
                       i.id AS inbound_id,
                       i.tag,
@@ -409,7 +421,10 @@ impl PgNode {
             let r#type: NodeType = row.get("node_type");
             let cluster: Option<String> = row.get("cluster");
             let pool: Option<String> = row.get("pool");
-            let weight: i32 = row.get("weight");
+            let node_weights: BTreeMap<String, i32> = row
+                .get::<_, Option<serde_json::Value>>("node_weights")
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
             let pool_translation: Option<BTreeMap<String, String>> = row
                 .get::<_, Option<serde_json::Value>>("pool_translation")
                 .and_then(|v| serde_json::from_value(v).ok());
@@ -487,7 +502,7 @@ impl PgNode {
                     cluster: cluster.clone(),
                     node_ips: node_ips.clone(),
                     pool: pool.clone(),
-                    weight,
+                    node_weights: node_weights.clone(),
                     pool_translation: pool_translation.clone(),
                 });
 

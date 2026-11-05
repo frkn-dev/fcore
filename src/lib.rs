@@ -62,6 +62,7 @@ pub use memory::{
     key::{Code, Distributor, Key, KeyKind},
     node::{
         InboundStat, Node, NodeMetricInfo, NodeResponse, Status as NodeStatus, Type as NodeType,
+        DEFAULT_NODE_WEIGHT,
     },
     product::Product,
     snapshot::SnapshotManager,
