@@ -261,7 +261,7 @@ where
                     | Tag::VlessGrpcReality
                     | Tag::VlessXhttpReality
                     | Tag::VlessXhttpCdn
-                    | Tag::Vmess => {
+                    | Tag::Vmess | Tag::Trojan => {
                         let proto = Proto::new_xray(&msg.tag);
                         let conn = Connection::new(
                             proto,
@@ -391,6 +391,7 @@ where
                     | Tag::VlessXhttpReality
                     | Tag::VlessXhttpCdn
                     | Tag::Vmess
+                    | Tag::Trojan
                     | Tag::Shadowsocks => {
                         let client = self.handler_client.as_ref().ok_or_else(|| {
                             Error::Grpc(Box::new(Status::unavailable("Xray handler unavailable")))

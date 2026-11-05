@@ -1,0 +1,5 @@
+syntax = "proto3";
+package xray.proxy.trojan;
+message Account {
+  string password = 1;
+}

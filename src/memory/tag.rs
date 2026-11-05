@@ -49,6 +49,8 @@ pub enum ProtoTag {
     // for all pre-existing protocols.
     #[serde(rename = "AmneziaWgMobile")]
     AmneziaWgMobile,
+    #[serde(rename = "Trojan")]
+    Trojan,
 }
 
 impl fmt::Display for ProtoTag {
@@ -65,6 +67,7 @@ impl fmt::Display for ProtoTag {
             ProtoTag::Hysteria2 => write!(f, "Hysteria2"),
             ProtoTag::Mtproto => write!(f, "Mtproto"),
             ProtoTag::AmneziaWgMobile => write!(f, "AmneziaWgMobile"),
+            ProtoTag::Trojan => write!(f, "Trojan"),
         }
     }
 }
@@ -111,6 +114,7 @@ impl std::str::FromStr for ProtoTag {
             "VlessXhttpReality" => Ok(ProtoTag::VlessXhttpReality),
             "VlessXhttpCdn" => Ok(ProtoTag::VlessXhttpCdn),
             "Vmess" => Ok(ProtoTag::Vmess),
+            "Trojan" => Ok(ProtoTag::Trojan),
             "Shadowsocks" => Ok(ProtoTag::Shadowsocks),
             "Wireguard" => Ok(ProtoTag::Wireguard),
             "AmneziaWg" => Ok(ProtoTag::AmneziaWg),

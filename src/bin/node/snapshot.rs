@@ -186,6 +186,7 @@ where
                         | Tag::VlessXhttpReality
                         | Tag::VlessXhttpCdn
                         | Tag::Vmess
+                        | Tag::Trojan
                         | Tag::Shadowsocks
                 )
             })

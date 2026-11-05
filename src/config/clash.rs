@@ -21,6 +21,13 @@ pub struct ClashConfig {
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 pub enum ClashProxy {
+    Trojan {
+        name: String,
+        server: String,
+        port: u16,
+        password: String,
+        udp: bool,
+    },
     Vmess {
         name: String,
         server: String,
@@ -142,6 +149,7 @@ impl InboundClashConfig for Inbound {
                 ClashProxy::Vmess { name, .. } => name.clone(),
                 ClashProxy::Vless { name, .. } => name.clone(),
                 ClashProxy::Hysteria2 { name, .. } => name.clone(),
+                ClashProxy::Trojan { name, .. } => name.clone(),
             })
             .collect();
 
@@ -198,6 +206,16 @@ impl InboundClashConfig for Inbound {
                     .down_mbps
                     .filter(|v| *v > 0)
                     .map(|v| format!("{} Mbps", v)),
+            });
+        }
+
+        if self.tag == Tag::Trojan {
+            return Some(ClashProxy::Trojan {
+                name: format!("{label} · Trojan"),
+                server: host.to_string(),
+                port,
+                password: conn_id.to_string(),
+                udp: true,
             });
         }
 

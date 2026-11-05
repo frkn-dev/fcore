@@ -394,6 +394,7 @@ where
                 Tag::VlessXhttpReality,
                 Tag::VlessXhttpCdn,
                 Tag::Vmess,
+                Tag::Trojan,
             ];
 
             let xray_nodes = nodes.clone();
@@ -1130,11 +1131,12 @@ where
     let limit = sub.limit_bytes();
     // A share feed gets the share label as profile title; a device-scoped
     // feed (conn=...) gets the device label; otherwise the configured one.
+    let display = fcore::config::display::DisplayConfig::load();
     let title = match &share {
         Some(scope) => scope.title.clone(),
         None => match req.conn.and_then(|cid| mem.conn_labels.get(&cid).cloned()) {
             Some(label) => label,
-            None => title,
+            None => display.title.clone().unwrap_or(title),
         },
     };
     drop(mem);
@@ -1191,20 +1193,24 @@ where
         }
     };
 
-    let meta = format!(
+    let mut meta = format!(
         "#profile-title: {}\n\
          #profile-update-interval: 1\n\
-         #subscription-userinfo: upload={}; download={}; total={}; expire={}\n\
-         #profile-web-page-url: {}\n\
-         #support-url: {}\n",
+         #subscription-userinfo: upload={}; download={}; total={}; expire={}\n",
         title,
         upload,
         download,
         limit.unwrap_or(0),
-        expires_at,
-        sub_url,
-        support_contact
+        expires_at
     );
+    let website = display.website.as_deref().unwrap_or(&sub_url);
+    let support = display.support.as_deref().unwrap_or(&support_contact);
+    if !website.trim().is_empty() {
+        meta.push_str(&format!("#profile-web-page-url: {}\n", website));
+    }
+    if !support.trim().is_empty() {
+        meta.push_str(&format!("#support-url: {}\n", support));
+    }
 
     // -------------------------
     // Response generation
