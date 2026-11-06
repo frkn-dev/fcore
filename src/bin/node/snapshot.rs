@@ -1,4 +1,6 @@
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
+use futures::future::join_all;
+#[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use rkyv::Archive;
 #[cfg(feature = "xray")]
 use std::sync::Arc;
@@ -62,10 +64,9 @@ where
 
         drop(mem);
 
-        for (conn_id, conn) in conns {
+        let tasks = conns.into_iter().map(|(conn_id, conn)| {
             let wg_client = wg_client.clone();
-
-            tokio::spawn(async move {
+            async move {
                 if let Some(wg) = conn.get_wireguard() {
                     if let Some(api) = wg_client.as_ref() {
                         if let Ok(pubkey) = &wg.keys.pubkey() {
@@ -79,8 +80,10 @@ where
                         }
                     }
                 }
-            });
-        }
+            }
+        });
+        join_all(tasks).await;
+
         Ok(())
     }
 
@@ -109,7 +112,7 @@ where
 
         drop(mem);
 
-        for (conn_id, conn) in conns {
+        let tasks = conns.into_iter().map(|(conn_id, conn)| {
             // Each tag is served by its own interface: AmneziaWg -> awg0,
             // AmneziaWgMobile -> the awg_mobile interface.
             let awg_client = if conn.get_proto().proto() == Tag::AmneziaWgMobile {
@@ -118,7 +121,7 @@ where
                 awg_client.clone()
             };
 
-            tokio::spawn(async move {
+            async move {
                 if let Some(awg) = conn.get_amneziawg() {
                     if let Some(api) = awg_client.as_ref() {
                         let pubkey = match awg.keys.pubkey() {
@@ -159,8 +162,10 @@ where
                         }
                     }
                 }
-            });
-        }
+            }
+        });
+        join_all(tasks).await;
+
         Ok(())
     }
 
@@ -194,9 +199,9 @@ where
 
         drop(mem);
 
-        for (conn_id, conn) in conns {
+        let tasks = conns.into_iter().map(|(conn_id, conn)| {
             let xray_clone = xray_client.clone();
-            tokio::spawn(async move {
+            async move {
                 if let Some(client) = xray_clone {
                     let proto = conn.get_proto().proto();
 
@@ -212,8 +217,9 @@ where
                         tracing::debug!("Restored connection {}", conn_id);
                     }
                 }
-            });
-        }
+            }
+        });
+        join_all(tasks).await;
 
         Ok(())
     }

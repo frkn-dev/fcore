@@ -4,6 +4,7 @@ mod metrics;
 mod metrics_http;
 mod node;
 mod snapshot;
+mod snapshot_sync;
 #[cfg(feature = "xray")]
 mod stats;
 mod tasks;

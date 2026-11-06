@@ -28,9 +28,10 @@ use fcore::{
 use fcore::{H2Settings, Hysteria2Settings, MtprotoSettings, NodeConfig, Settings};
 
 use super::config::ServiceSettings;
-use super::http::ApiRequests;
+use super::http::{ApiRequests, SyncOutcome};
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use super::snapshot::SnapshotRestore;
+use super::snapshot_sync::FullSyncTracker;
 use super::tasks::Tasks;
 
 pub struct Node<C>
@@ -54,10 +55,9 @@ where
     /// Wakes the write-through snapshot task after an applied message.
     pub snapshot_wake: Arc<tokio::sync::Notify>,
     /// Tags whose authoritative full list is expected right now, with the ids
-    /// seen so far. The api publishes the whole set on a full sync, so anything
-    /// missing from it is stale — that is what removes deleted connections.
-    pub full_sync:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<Tag, std::collections::HashSet<uuid::Uuid>>>>,
+    /// seen so far and the count the api promised. Prune is released only when
+    /// both agree; a partial batch or a failed request must never remove peers.
+    pub full_sync: Arc<tokio::sync::Mutex<FullSyncTracker>>,
 }
 
 impl<C> Node<C>
@@ -91,7 +91,7 @@ where
             #[cfg(feature = "amnezia-wg")]
             awg_mobile_client,
             snapshot_wake: Arc::new(tokio::sync::Notify::new()),
-            full_sync: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            full_sync: Arc::new(tokio::sync::Mutex::new(FullSyncTracker::default())),
         }
     }
 }
@@ -623,19 +623,57 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
 
                             for tag in tags {
                                 // The first sync of this process is always a
-                                // full one: prune_tag() needs the authoritative
-                                // list to know which connections are stale.
-                                node.full_sync
-                                    .lock()
+                                // full one: the tracker releases prune only
+                                // after the api's promised count arrives.
+                                node.full_sync.lock().await.arm(*tag);
+                                match node
+                                    .sync_connections(
+                                        settings.api.endpoint.clone(),
+                                        settings.api.token.clone(),
+                                        *tag,
+                                        None,
+                                    )
                                     .await
-                                    .insert(*tag, Default::default());
-                                node.sync_connections(
-                                    settings.api.endpoint.clone(),
-                                    settings.api.token.clone(),
-                                    *tag,
-                                    None,
-                                )
-                                .await?
+                                {
+                                    Ok(SyncOutcome::Applied { count }) => {
+                                        let keep = node
+                                            .full_sync
+                                            .lock()
+                                            .await
+                                            .finish(*tag, count);
+                                        match keep {
+                                            Some(keep) => {
+                                                if let Err(e) = node.prune_tag(*tag, &keep).await {
+                                                    warn!(
+                                                        "full sync prune failed for {:?}: {}",
+                                                        tag, e
+                                                    );
+                                                }
+                                            }
+                                            None => debug!(
+                                                "full sync waiting for {:?}: expected {} ids",
+                                                tag, count
+                                            ),
+                                        }
+                                    }
+                                    Ok(SyncOutcome::EmptyFull) => {
+                                        let keep = node.full_sync.lock().await.finish(*tag, 0);
+                                        if let Some(keep) = keep {
+                                            let _ = node.prune_tag(*tag, &keep).await;
+                                        }
+                                    }
+                                    Ok(SyncOutcome::NotModified) => {
+                                        node.full_sync.lock().await.cancel(*tag);
+                                        warn!(
+                                            "full sync for {:?} returned 304; keeping local state",
+                                            tag
+                                        );
+                                    }
+                                    Err(e) => {
+                                        node.full_sync.lock().await.cancel(*tag);
+                                        return Err(e);
+                                    }
+                                }
                             }
                             break;
                         }

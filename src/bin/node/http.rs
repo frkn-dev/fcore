@@ -45,6 +45,16 @@ pub struct NodeRequest {
     pub node_weights: BTreeMap<String, i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// The api published a list and reported this many connections.
+    Applied { count: usize },
+    /// A full sync returned 304 because the api has no connections for the tag.
+    EmptyFull,
+    /// A delta sync returned 304; it is not a full list and must never prune.
+    NotModified,
+}
+
 #[async_trait]
 pub trait ApiRequests {
     async fn register_node(&self, _endpoint: String, _token: String) -> Result<()>;
@@ -54,7 +64,7 @@ pub trait ApiRequests {
         token: String,
         proto: Tag,
         last_update: Option<u64>,
-    ) -> Result<()>;
+    ) -> Result<SyncOutcome>;
 
     /// How many connections of `env` + each tag the api holds.
     ///
@@ -91,7 +101,7 @@ where
         token: String,
         proto: Tag,
         last_update: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<SyncOutcome> {
         let topic = Topic::Init(self.node.uuid);
         let env = self.node.env.clone();
 
@@ -153,10 +163,14 @@ where
                 env,
                 proto
             );
-            Ok(())
+            Ok(SyncOutcome::Applied { count })
         } else if status == StatusCode::NOT_MODIFIED {
             tracing::debug!("No updates (304) for {} {} {}", topic.clone(), env, proto);
-            Ok(())
+            if last_update.is_none() {
+                Ok(SyncOutcome::EmptyFull)
+            } else {
+                Ok(SyncOutcome::NotModified)
+            }
         } else {
             tracing::error!("Request failed: {} - {}", status, body);
             Err(Error::Custom(format!("Status {}: {}", status, body)))

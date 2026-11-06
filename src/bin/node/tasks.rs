@@ -118,44 +118,61 @@ where
     async fn handle_messages_batch(&self, messages: Vec<Message>) -> Result<()> {
         tracing::debug!("Got {} messages", messages.len());
 
-        // Which tags this batch touches, and — if a full list is expected for a
-        // tag — which ids arrived in it.
-        let mut batch_tags: Vec<Tag> = Vec::new();
-        {
-            let mut pending = self.full_sync.lock().await;
-            for msg in &messages {
-                if !matches!(msg.action, Action::Create | Action::Update) {
+        // A full sync starts from a snapshot whose peers are already on the
+        // interfaces. Re-sending Create for those ids fails with "already
+        // exists" and aborts the whole batch, so skip the ones already in
+        // memory while still counting them as seen.
+        let full_tags = self.full_sync.lock().await.pending_tags();
+        let existing: std::collections::HashSet<(Tag, uuid::Uuid)> = {
+            let mem = self.memory.read().await;
+            mem.iter()
+                .map(|(id, conn)| (conn.get_proto().proto(), *id))
+                .collect()
+        };
+
+        let mut to_apply = Vec::with_capacity(messages.len());
+        let mut tracked: Vec<(Tag, uuid::Uuid)> = Vec::new();
+        for msg in messages {
+            if matches!(msg.action, Action::Create | Action::Update) {
+                let full = full_tags.contains(&msg.tag);
+                if matches!(msg.action, Action::Create)
+                    && full
+                    && existing.contains(&(msg.tag, msg.conn_id))
+                {
+                    tracing::debug!("full sync: keeping existing {} {}", msg.tag, msg.conn_id);
+                    tracked.push((msg.tag, msg.conn_id));
                     continue;
                 }
-                if let Some(seen) = pending.get_mut(&msg.tag) {
-                    seen.insert(msg.conn_id);
-                }
-                if !batch_tags.contains(&msg.tag) {
-                    batch_tags.push(msg.tag);
-                }
+                tracked.push((msg.tag, msg.conn_id));
             }
+            to_apply.push(msg);
         }
 
-        let handles: Vec<_> = messages
+        let handles: Vec<_> = to_apply
             .into_iter()
             .map(|msg| self.handle_message(msg))
             .collect();
 
-        let _results = try_join_all(handles).await?;
+        if let Err(err) = try_join_all(handles).await {
+            // A partial application must not leave a full sync armed: a later
+            // delta would then be mistaken for the authoritative list.
+            let mut pending = self.full_sync.lock().await;
+            for (tag, _) in &tracked {
+                pending.cancel(*tag);
+            }
+            return Err(err);
+        }
 
-        // The first full list per tag is authoritative: drop everything the api
-        // did not list. Without this a connection deleted while the node was
-        // offline stayed in memory and came back from the snapshot on every
-        // restart.
-        let mut to_prune: Vec<(Tag, std::collections::HashSet<uuid::Uuid>)> = Vec::new();
         {
             let mut pending = self.full_sync.lock().await;
-            for tag in batch_tags {
-                if let Some(seen) = pending.remove(&tag) {
-                    to_prune.push((tag, seen));
-                }
+            for (tag, conn_id) in tracked {
+                pending.record(tag, conn_id);
             }
         }
+
+        // The expected count is supplied by sync_connections(); this releases a
+        // full sync only when every promised id arrived and was applied.
+        let to_prune = self.full_sync.lock().await.take_ready();
         for (tag, keep) in to_prune {
             match self.prune_tag(tag, &keep).await {
                 Ok(0) => {}
@@ -174,7 +191,6 @@ where
 
         Ok(())
     }
-
 
     /// Remove connections of `tag` that the api did not list, with their peers.
     ///
