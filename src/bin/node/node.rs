@@ -51,6 +51,13 @@ where
     pub awg_client: Option<AwgInterface>,
     #[cfg(feature = "amnezia-wg")]
     pub awg_mobile_client: Option<AwgInterface>,
+    /// Wakes the write-through snapshot task after an applied message.
+    pub snapshot_wake: Arc<tokio::sync::Notify>,
+    /// Tags whose authoritative full list is expected right now, with the ids
+    /// seen so far. The api publishes the whole set on a full sync, so anything
+    /// missing from it is stale — that is what removes deleted connections.
+    pub full_sync:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<Tag, std::collections::HashSet<uuid::Uuid>>>>,
 }
 
 impl<C> Node<C>
@@ -83,6 +90,8 @@ where
             awg_client,
             #[cfg(feature = "amnezia-wg")]
             awg_mobile_client,
+            snapshot_wake: Arc::new(tokio::sync::Notify::new()),
+            full_sync: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -292,7 +301,13 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     let metrics_enabled = settings.metrics.enabled;
 
     let snapshot_path = settings.service.snapshot_path.clone();
-    let snapshot_manager = SnapshotManager::new(snapshot_path, node.memory.clone());
+    let snapshot_manager = SnapshotManager::new(snapshot_path, node.memory.clone())
+        .with_identity(fcore::SnapshotIdentity {
+            hostname: settings.node.hostname.clone().unwrap_or_default(),
+            env: settings.node.env.to_string(),
+            pool: settings.node.pool.clone(),
+        })
+        .with_wake(node.snapshot_wake.clone());
 
     let metrics_server_handle = if metrics_enabled {
         let addr = metrics_endpoint
@@ -319,38 +334,116 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
 
     if Path::new(&snapshot_manager.snapshot_path).exists() {
         match snapshot_manager.load_snapshot().await {
-            Ok(Some(timestamp)) => {
-                #[cfg(feature = "wireguard")]
-                if let Err(e) = snapshot_manager.restore_wg_connections(wg_client).await {
-                    error!("Couldn't restore connections from memory, {}", e);
+            Ok(Some(meta)) => {
+                // The snapshot is only worth applying if its per-tag counts
+                // still match what the api would send: a file that no longer
+                // describes reality used to be applied as-is, and the node then
+                // served a subset of the peers until somebody intervened.
+                let mut accepted = true;
+                if settings.snapshot.validate_on_start {
+                    let tags: Vec<Tag> = node.node.inbounds.keys().copied().collect();
+                    match node
+                        .connection_counts(
+                            settings.api.endpoint.clone(),
+                            settings.api.token.clone(),
+                            node.node.env.clone(),
+                            tags,
+                        )
+                        .await
+                    {
+                        Ok(api_counts) => {
+                            let mut bad = Vec::new();
+                            for (tag, api_n) in &api_counts {
+                                let local = meta.counts.get(tag).copied().unwrap_or(0);
+                                let divergence = divergence_ratio(local, *api_n);
+                                node.metrics.push(
+                                    node.node.uuid,
+                                    "snapshot.divergence_ratio",
+                                    divergence,
+                                    std::collections::BTreeMap::from([(
+                                        "tag".to_string(),
+                                        tag.clone(),
+                                    )]),
+                                );
+                                if settings.snapshot.is_divergent(local, *api_n) {
+                                    bad.push((tag.clone(), local, *api_n));
+                                }
+                            }
+                            if bad.is_empty() {
+                                info!(
+                                    "snapshot ok: {} tag(s), {} connections",
+                                    api_counts.len(),
+                                    meta.counts.values().sum::<u64>()
+                                );
+                            } else {
+                                warn!(
+                                    "snapshot rejected: {:?} -> full resync from api",
+                                    bad
+                                );
+                                accepted = false;
+                            }
+                        }
+                        Err(e) => warn!(
+                            "snapshot check skipped (api unavailable: {}), applying as is",
+                            e
+                        ),
+                    }
                 }
 
-                #[cfg(feature = "amnezia-wg")]
-                if let Err(e) = snapshot_manager
-                    .restore_awg_connections(awg_client.clone(), awg_mobile_client.clone())
-                    .await
-                {
-                    error!("Couldn't restore AmneziaWG connections from memory, {}", e);
-                }
+                if accepted {
+                    #[cfg(feature = "wireguard")]
+                    if let Err(e) = snapshot_manager.restore_wg_connections(wg_client).await {
+                        error!("Couldn't restore connections from memory, {}", e);
+                    }
 
-                #[cfg(feature = "xray")]
-                if let Err(e) = snapshot_manager
-                    .restore_xray_connections(handler_client)
-                    .await
-                {
-                    error!("Couldn't restore connections from memory, {}", e);
-                }
+                    #[cfg(feature = "amnezia-wg")]
+                    if let Err(e) = snapshot_manager
+                        .restore_awg_connections(awg_client.clone(), awg_mobile_client.clone())
+                        .await
+                    {
+                        error!("Couldn't restore AmneziaWG connections from memory, {}", e);
+                    }
 
-                let count = snapshot_manager.len().await;
-                info!(
-                    "Loaded {} connections from snapshot with ts  {}",
-                    count, timestamp,
-                );
+                    #[cfg(feature = "xray")]
+                    if let Err(e) = snapshot_manager
+                        .restore_xray_connections(handler_client)
+                        .await
+                    {
+                        error!("Couldn't restore connections from memory, {}", e);
+                    }
+
+                    let count = snapshot_manager.len().await;
+                    info!(
+                        "Loaded {} connections from snapshot with ts  {}",
+                        count, meta.timestamp,
+                    );
+                } else {
+                    // Move the file aside so the next start does not repeat the
+                    // check, and start from an empty memory: the api list is
+                    // authoritative and arrives with the first full sync.
+                    let stale = format!(
+                        "{}.stale-{}",
+                        snapshot_manager.snapshot_path,
+                        chrono::Utc::now().timestamp()
+                    );
+                    if let Err(e) = std::fs::rename(&snapshot_manager.snapshot_path, &stale) {
+                        error!("cannot move stale snapshot aside: {}", e);
+                    }
+                    node.memory.write().await.0.clear();
+                }
             }
             Ok(None) => {
                 warn!("Snapshot file exists but couldn't be loaded");
             }
             Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("identity mismatch") {
+                    // Deliberate hard stop: a foreign snapshot is an operator
+                    // error, and silently serving it is worse than not starting.
+                    error!("{}", msg);
+                    eprintln!("FATAL: {}", msg);
+                    std::process::exit(1);
+                }
                 error!("Failed to load snapshot: {}", e);
                 info!("Starting fresh due to snapshot load error");
             }
@@ -358,6 +451,111 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     } else {
         warn!("No snapshot found, starting fresh");
     };
+
+    // Write-through: every applied Create/Update/Delete persists immediately,
+    // so a restart in the same second cannot resurrect a deleted connection.
+    {
+        let manager = snapshot_manager.clone();
+        let wake = node.snapshot_wake.clone();
+        tasks.push(tokio::spawn(async move {
+            loop {
+                wake.notified().await;
+                // Debounce a burst: one write captures the whole batch.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let started = std::time::Instant::now();
+                match measure_time(manager.create_snapshot(), "Snapshot (write-through)").await {
+                    Ok(()) => {
+                        debug!("write-through snapshot written in {:?}", started.elapsed());
+                    }
+                    Err(e) => {
+                        error!("write-through snapshot failed: {}", e);
+                    }
+                }
+            }
+        }));
+    }
+
+    // Hourly drift check: compare per-tag counts with the api and tell it when
+    // they diverge. Nothing is reset here on purpose — a short api outage must
+    // not wipe a working node.
+    if settings.snapshot.drift_check_sec > 0 {
+        let node = node.clone();
+        let endpoint = settings.api.endpoint.clone();
+        let token = settings.api.token.clone();
+        let cfg = settings.snapshot.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(
+                cfg.drift_check_sec.max(60),
+            ));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let by_name: std::collections::HashMap<String, Tag> = node
+                    .node
+                    .inbounds
+                    .keys()
+                    .map(|tag| (format!("{tag:?}"), *tag))
+                    .collect();
+                let tags: Vec<Tag> = by_name.values().copied().collect();
+                let api_counts = match node
+                    .connection_counts(endpoint.clone(), token.clone(), node.node.env.clone(), tags)
+                    .await
+                {
+                    Ok(counts) => counts,
+                    Err(e) => {
+                        warn!("drift check skipped: {}", e);
+                        continue;
+                    }
+                };
+                let local_counts = {
+                    let mem = node.memory.read().await;
+                    let mut out: std::collections::BTreeMap<String, u64> =
+                        std::collections::BTreeMap::new();
+                    for (_, conn) in mem.iter() {
+                        *out.entry(format!("{:?}", conn.get_proto().proto())).or_insert(0) += 1;
+                    }
+                    out
+                };
+                for (tag_name, api_n) in api_counts {
+                    let local = local_counts.get(&tag_name).copied().unwrap_or(0);
+                    if !cfg.is_divergent(local, api_n) {
+                        continue;
+                    }
+                    warn!(
+                        "snapshot drift: tag={} local={} api={}",
+                        tag_name, local, api_n
+                    );
+                    node.metrics.push(
+                        node.node.uuid,
+                        "snapshot.divergence_ratio",
+                        divergence_ratio(local, api_n),
+                        std::collections::BTreeMap::from([(
+                            "tag".to_string(),
+                            tag_name.clone(),
+                        )]),
+                    );
+                    match by_name.get(&tag_name) {
+                        Some(tag) => {
+                            if let Err(e) = node
+                                .report_snapshot_drift(
+                                    endpoint.clone(),
+                                    token.clone(),
+                                    *tag,
+                                    local,
+                                    api_n,
+                                )
+                                .await
+                            {
+                                warn!("cannot report snapshot drift: {}", e);
+                            }
+                        }
+                        None => warn!("drift for unknown tag {}", tag_name),
+                    }
+                }
+            }
+        }));
+    }
+
     let snapshot_for_sync = snapshot_manager.clone();
     {
         tokio::spawn(async move {
@@ -425,12 +623,18 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                                 .collect();
 
                             for tag in tags {
-                                let since = snapshot_for_sync.sync_cursor(*tag).await;
+                                // The first sync of this process is always a
+                                // full one: prune_tag() needs the authoritative
+                                // list to know which connections are stale.
+                                node.full_sync
+                                    .lock()
+                                    .await
+                                    .insert(*tag, Default::default());
                                 node.sync_connections(
                                     settings.api.endpoint.clone(),
                                     settings.api.token.clone(),
                                     *tag,
-                                    since,
+                                    None,
                                 )
                                 .await?
                             }
@@ -568,4 +772,12 @@ fn rewrite_node_env(path: &str, env_value: &str) -> std::io::Result<()> {
         ));
     }
     std::fs::write(path, out)
+}
+
+/// `|local - api| / api`, 0.0 when api reports nothing (avoid NaN in metrics).
+fn divergence_ratio(local: u64, api: u64) -> f64 {
+    if api == 0 {
+        return 0.0;
+    }
+    (local.abs_diff(api) as f64) / (api as f64)
 }

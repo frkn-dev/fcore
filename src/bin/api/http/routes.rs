@@ -741,6 +741,29 @@ where
         // токен Telegram на нодах не нужен.
         let alerts_cfg = self.settings.alerts.clone();
         let watchcat_throttle = crate::http::handlers::watchcat::NotifyThrottle::new();
+        // POST /v1/node/snapshot/drift — часовая сверка снапшота ноды с api.
+        let snapshot_drift_throttle = crate::http::handlers::watchcat::NotifyThrottle::new();
+        let post_snapshot_drift_route = warp::post()
+            .and(warp::path("v1"))
+            .and(warp::path("node"))
+            .and(warp::path!("snapshot" / "drift"))
+            .and(warp::path::end())
+            .and(node_sync_auth.clone())
+            .and(warp::body::content_length_limit(4 * 1024))
+            .and(warp::body::json::<
+                crate::http::handlers::watchcat::SnapshotDriftReport,
+            >())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_string(
+                alerts_cfg.telegram_bot_token.clone().unwrap_or_default(),
+            ))
+            .and(with_param_string(
+                alerts_cfg.telegram_chat_id.clone().unwrap_or_default(),
+            ))
+            .and(with_param_string(alerts_cfg.telegram_api_base.clone()))
+            .and(warp::any().map(move || snapshot_drift_throttle.clone()))
+            .and_then(crate::http::handlers::watchcat::snapshot_drift_handler);
+
         let post_watchcat_event_route = warp::post()
             .and(warp::path("v1")).and(warp::path("node")).and(warp::path!("watchcat" / "event"))
             .and(warp::path::end())
@@ -768,6 +791,31 @@ where
             .and(warp::body::json())
             .and(with_sync(self.sync.clone()))
             .and_then(get_connections_handler);
+
+        // POST /connections/count — how many connections of a tag a node would
+        // receive. fnode asks at startup to decide whether its snapshot is
+        // still valid; the answer must come from the same predicate as /sync.
+        let connections_count_limiter = Arc::new(
+            crate::http::handlers::report::SubRateLimiter::new(
+                1,
+                std::time::Duration::from_secs(10),
+            ),
+        );
+        let with_connections_count_limiter = {
+            let limiter = connections_count_limiter.clone();
+            warp::any().map(move || limiter.clone())
+        };
+        let post_connections_count_route = warp::path("connections")
+            .and(warp::path("count"))
+            .and(warp::post())
+            .and(warp::path::end())
+            .and(connections_sync_auth.clone())
+            .and(warp::body::json::<
+                crate::http::handlers::connection::ConnCountRequest,
+            >())
+            .and(with_sync(self.sync.clone()))
+            .and(with_connections_count_limiter)
+            .and_then(crate::http::handlers::connection::connections_count_handler);
 
         let post_connection_route = warp::post()
             .and(warp::path("connection"))
@@ -1697,6 +1745,8 @@ where
             .or(post_connection_route)
             .or(post_connection_feed_route)
             .or(post_connections_sync_route)
+            .or(post_connections_count_route)
+            .or(post_snapshot_drift_route)
             .or(post_watchcat_event_route)
             .or(delete_connection_route)
             .or(get_mtproto_connections_info_route)

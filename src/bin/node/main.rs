@@ -19,15 +19,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "debug")]
     console_subscriber::init();
 
-    let config_path = &std::env::args()
-        .nth(1)
-        .expect("required config path as an argument");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let reset_snapshot = args.iter().any(|a| a == "--reset-snapshot");
+    let config_path = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .expect("required config path as an argument")
+        .clone();
     println!("Config file {}", config_path);
 
-    let settings = ServiceSettings::from_file(config_path);
+    let settings = ServiceSettings::from_file(&config_path);
 
     settings.validate().expect("Wrong settings file");
-    println!(">>> Settings: {:?}", settings.clone());
+    // Never print the whole settings struct: it carries the api token and the
+    // node's private keys, and journalctl used to keep them forever.
+    println!(
+        ">>> Settings: env={:?} hostname={:?} pool={:?} snapshot={}",
+        settings.node.env,
+        settings.node.hostname,
+        settings.node.pool,
+        settings.service.snapshot_path,
+    );
+
+    if reset_snapshot {
+        let path = std::path::Path::new(&settings.service.snapshot_path);
+        if !path.exists() {
+            println!(">>> --reset-snapshot: no snapshot at {}", path.display());
+            return Ok(());
+        }
+        let backup = format!(
+            "{}.bak-{}",
+            path.display(),
+            chrono::Utc::now().timestamp()
+        );
+        std::fs::rename(path, &backup)?;
+        println!(">>> --reset-snapshot: moved {} -> {}", path.display(), backup);
+        println!(">>> next start begins from a clean state");
+        return Ok(());
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(level_from_settings(&settings.service.log_level))

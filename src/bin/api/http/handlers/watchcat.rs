@@ -280,6 +280,112 @@ where
     .into_response())
 }
 
+/// Тело `POST /v1/node/snapshot/drift`: нода сообщает, что её локальный
+/// счётчик по тегу разошёлся с тем, что отдаёт api.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SnapshotDriftReport {
+    pub hostname: String,
+    pub env: String,
+    /// Тег протокола (`Wireguard`, `AmneziaWg`, ...).
+    pub tag: String,
+    /// Сколько коннектов этого тега нода держит у себя.
+    pub local: u64,
+    /// Сколько api отдаёт по этому env + тегу.
+    pub api: u64,
+    #[serde(default)]
+    pub at: Option<DateTime<Utc>>,
+}
+
+/// Раз в час нода сверяет свои счётчики с api и при расхождении присылает
+/// сюда. Здесь — запись события и предупреждение в Telegram, не чаще раза в
+/// час на пару (нода, тег): сверка повторяется каждый час, и без окна
+/// расхождение превратилось бы в поток сообщений.
+pub async fn snapshot_drift_handler<N, C, S>(
+    report: SnapshotDriftReport,
+    memory: MemSync<N, C, S>,
+    telegram_token: String,
+    chat_id: String,
+    api_base: String,
+    throttle: NotifyThrottle,
+) -> Result<warp::reply::Response, Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if report.hostname.trim().is_empty()
+        || report.hostname.len() > 255
+        || report.tag.trim().is_empty()
+        || report.tag.len() > 64
+    {
+        return Ok(json_status(400, "hostname/tag: пусто или слишком длинно"));
+    }
+
+    let event = WatchcatEvent {
+        hostname: report.hostname.trim().to_string(),
+        group_tag: report.tag.trim().to_string(),
+        kind: "snapshot_drift".to_string(),
+        from_tag: None,
+        to_tag: None,
+        reason: Some(format!("local={} api={}", report.local, report.api)),
+        detail: Some(format!("env={}", report.env)),
+        occurred_at: report.at.unwrap_or_else(Utc::now),
+    };
+
+    if !memory.db.watchcat().record(&event).await.unwrap_or(false) {
+        // Уже записано (ретрай) — не дублируем и уведомление.
+        return Ok(json_status(200, "duplicate"));
+    }
+
+    let mut notified = false;
+    if throttle.allow(
+        &event.hostname,
+        &event.group_tag,
+        &event.kind,
+        Duration::from_secs(3600),
+    ) {
+        let text = format!(
+            "⚠️ {}\n{}: снапшот разошёлся с api\n{}: локально {}, в api {}\nнода обслуживает неполный набор — проверь /opt/fnode/snapshots",
+            event.hostname, event.group_tag, event.detail.as_deref().unwrap_or(""), report.local, report.api
+        );
+        if !telegram_token.is_empty() && !chat_id.is_empty() {
+            let client = reqwest::Client::new();
+            match crate::alerts::send_telegram(
+                &client,
+                &api_base,
+                &telegram_token,
+                &chat_id,
+                &text,
+            )
+            .await
+            {
+                Ok(()) => notified = true,
+                Err(err) => tracing::warn!("snapshot_drift: telegram failed: {err}"),
+            }
+        } else {
+            tracing::warn!("snapshot_drift: telegram не настроен, событие только в таблице");
+        }
+    }
+
+    tracing::info!(
+        hostname = event.hostname,
+        tag = event.group_tag,
+        local = report.local,
+        api = report.api,
+        notified,
+        "snapshot_drift"
+    );
+
+    Ok(json_status(200, if notified { "notified" } else { "recorded" }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -65,7 +65,7 @@ pub use memory::{
         DEFAULT_NODE_WEIGHT,
     },
     product::Product,
-    snapshot::SnapshotManager,
+    snapshot::{SnapshotIdentity, SnapshotManager, SnapshotMeta},
     stat::{Kind as StatKind, StatType},
     storage::{
         connection::ApiOp as ConnectionStorageApiOperations,

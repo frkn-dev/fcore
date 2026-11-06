@@ -7,8 +7,8 @@ use tonic::Status;
 
 use fcore::{Action, BaseConnection as Connection, Message, Metrics, Topic};
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
-use fcore::{ConnectionStorageBaseOperations, Proto, Tag};
-use fcore::{Error, Result};
+use fcore::{ConnectionStorageBaseOperations, Proto};
+use fcore::{Error, Result, Tag};
 #[cfg(feature = "xray")]
 use fcore::{StatsOp, XrayHandlerActions};
 
@@ -30,6 +30,12 @@ pub trait Tasks {
     async fn handle_messages_batch(&self, msg: Vec<Message>) -> Result<()>;
     async fn handle_message(&self, msg: Message) -> Result<()>;
     async fn collect_metrics(&self);
+    /// Drop connections of `tag` that the api did not list in its full sync.
+    async fn prune_tag(
+        &self,
+        tag: Tag,
+        keep: &std::collections::HashSet<uuid::Uuid>,
+    ) -> Result<usize>;
 }
 
 #[async_trait]
@@ -112,6 +118,24 @@ where
     async fn handle_messages_batch(&self, messages: Vec<Message>) -> Result<()> {
         tracing::debug!("Got {} messages", messages.len());
 
+        // Which tags this batch touches, and — if a full list is expected for a
+        // tag — which ids arrived in it.
+        let mut batch_tags: Vec<Tag> = Vec::new();
+        {
+            let mut pending = self.full_sync.lock().await;
+            for msg in &messages {
+                if !matches!(msg.action, Action::Create | Action::Update) {
+                    continue;
+                }
+                if let Some(seen) = pending.get_mut(&msg.tag) {
+                    seen.insert(msg.conn_id);
+                }
+                if !batch_tags.contains(&msg.tag) {
+                    batch_tags.push(msg.tag);
+                }
+            }
+        }
+
         let handles: Vec<_> = messages
             .into_iter()
             .map(|msg| self.handle_message(msg))
@@ -119,7 +143,81 @@ where
 
         let _results = try_join_all(handles).await?;
 
+        // The first full list per tag is authoritative: drop everything the api
+        // did not list. Without this a connection deleted while the node was
+        // offline stayed in memory and came back from the snapshot on every
+        // restart.
+        let mut to_prune: Vec<(Tag, std::collections::HashSet<uuid::Uuid>)> = Vec::new();
+        {
+            let mut pending = self.full_sync.lock().await;
+            for tag in batch_tags {
+                if let Some(seen) = pending.remove(&tag) {
+                    to_prune.push((tag, seen));
+                }
+            }
+        }
+        for (tag, keep) in to_prune {
+            match self.prune_tag(tag, &keep).await {
+                Ok(0) => {}
+                Ok(removed) => tracing::warn!(
+                    "prune: tag={:?} removed={} (api listed {})",
+                    tag,
+                    removed,
+                    keep.len()
+                ),
+                Err(e) => tracing::warn!("prune: tag={:?} failed: {}", tag, e),
+            }
+        }
+
+        // Write-through: state changed, so the file on disk must change too.
+        self.snapshot_wake.notify_one();
+
         Ok(())
+    }
+
+
+    /// Remove connections of `tag` that the api did not list, with their peers.
+    ///
+    /// Goes through the regular Delete path so each protocol's cleanup (memory,
+    /// WireGuard peer, AmneziaWG peer, Xray handler) stays in one place.
+    async fn prune_tag(
+        &self,
+        tag: Tag,
+        keep: &std::collections::HashSet<uuid::Uuid>,
+    ) -> Result<usize> {
+        let stale: Vec<Message> = {
+            let mem = self.memory.read().await;
+            mem.iter()
+                .filter(|(id, conn)| conn.get_proto().proto() == tag && !keep.contains(*id))
+                .map(|(id, conn)| {
+                    // Built from the base getters: the `as_*_message` helpers live
+                    // on `Conn`, and the node stores a transport-agnostic wrapper.
+                    let wg = match tag {
+                        Tag::Wireguard => conn.get_wireguard().cloned(),
+                        _ => conn.get_amneziawg().cloned(),
+                    };
+                    Message {
+                        conn_id: *id,
+                        action: Action::Delete,
+                        tag,
+                        wg,
+                        password: conn.get_password(),
+                        token: conn.get_token(),
+                        expires_at: conn.get_expires_at().map(Into::into),
+                        subscription_id: conn.get_subscription_id(),
+                    }
+                })
+                .collect()
+        };
+
+        let mut removed = 0usize;
+        for msg in stale {
+            match self.handle_message(msg).await {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::warn!("prune: cannot remove a stale connection: {}", e),
+            }
+        }
+        Ok(removed)
     }
 
     async fn handle_message(&self, msg: Message) -> Result<()> {

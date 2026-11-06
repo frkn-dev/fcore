@@ -55,6 +55,29 @@ pub trait ApiRequests {
         proto: Tag,
         last_update: Option<u64>,
     ) -> Result<()>;
+
+    /// How many connections of `env` + each tag the api holds.
+    ///
+    /// Asked once at startup to decide whether the snapshot still describes
+    /// reality, and once an hour to notice drift. The api answers from the same
+    /// predicate it uses for `/connections/sync`.
+    async fn connection_counts(
+        &self,
+        endpoint: String,
+        token: String,
+        env: fcore::Env,
+        protos: Vec<Tag>,
+    ) -> Result<std::collections::BTreeMap<String, u64>>;
+
+    /// Tell the api that the local counters diverged from its own.
+    async fn report_snapshot_drift(
+        &self,
+        endpoint: String,
+        token: String,
+        tag: Tag,
+        local: u64,
+        api: u64,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -138,6 +161,97 @@ where
             tracing::error!("Request failed: {} - {}", status, body);
             Err(Error::Custom(format!("Status {}: {}", status, body)))
         }
+    }
+
+    async fn connection_counts(
+        &self,
+        endpoint: String,
+        token: String,
+        env: fcore::Env,
+        protos: Vec<Tag>,
+    ) -> Result<std::collections::BTreeMap<String, u64>> {
+        let token = load_runtime_token(&token);
+        let mut url = Url::parse(&endpoint)?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Custom("Invalid API endpoint".to_string()))?
+            .push("connections")
+            .push("count");
+
+        let body = serde_json::json!({ "env": env, "proto": protos });
+        let res = HttpClient::new()
+            .post(url.to_string())
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Custom(format!("count request failed: {}", e)))?;
+
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(Error::Custom(format!(
+                "count request: {} - {}",
+                status, text
+            )));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct CountResponse {
+            response: Counts,
+        }
+        #[derive(serde::Deserialize)]
+        struct Counts {
+            counts: std::collections::BTreeMap<String, u64>,
+        }
+
+        let parsed: CountResponse = serde_json::from_str(&text)?;
+        Ok(parsed.response.counts)
+    }
+
+    async fn report_snapshot_drift(
+        &self,
+        endpoint: String,
+        token: String,
+        tag: Tag,
+        local: u64,
+        api: u64,
+    ) -> Result<()> {
+        let token = load_runtime_token(&token);
+        let mut url = Url::parse(&endpoint)?;
+        {
+            let mut segs = url
+                .path_segments_mut()
+                .map_err(|_| Error::Custom("Invalid API endpoint".to_string()))?;
+            segs.push("node");
+            segs.push("snapshot");
+            segs.push("drift");
+        }
+
+        let body = serde_json::json!({
+            "hostname": self.node.hostname,
+            "env": self.node.env.to_string(),
+            "tag": format!("{:?}", tag),
+            "local": local,
+            "api": api,
+            "at": chrono::Utc::now().to_rfc3339(),
+        });
+
+        let res = HttpClient::new()
+            .post(url.to_string())
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Custom(format!("drift report failed: {}", e)))?;
+
+        let status = res.status();
+        if !status.is_success() {
+            let text = res.text().await.unwrap_or_default();
+            return Err(Error::Custom(format!("drift report: {} - {}", status, text)));
+        }
+        Ok(())
     }
 
     async fn register_node(&self, endpoint: String, token: String) -> Result<()> {

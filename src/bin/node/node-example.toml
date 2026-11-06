@@ -2,6 +2,17 @@
 log_level = "info"
 snapshot_interval = 60
 snapshot_path = "/var/lib/fcore/node/snapshot-node.bin"
+
+# Startup validation of the snapshot against api, and the hourly drift check.
+# A snapshot whose per-tag counts no longer match what api would send is moved
+# aside (.stale-<ts>) and the node starts from a full sync instead of serving a
+# subset of the peers. A snapshot written by another env/pool is fatal: it is an
+# operator error, and the node refuses to start with a foreign file.
+[snapshot]
+validate_on_start = true
+max_divergence_percent = 5
+max_divergence_records = 20
+drift_check_sec = 3600
 updates_endpoint_zmq = "tcp://localhost:3001"
 
 [xray]

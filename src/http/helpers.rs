@@ -30,6 +30,18 @@ pub fn internal_error(msg: &str) -> warp::reply::WithStatus<Json> {
     warp::reply::with_status(warp::reply::json(&resp), StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+pub fn too_many_requests(msg: &str) -> warp::reply::WithStatus<Json> {
+    let resp = ResponseMessage::<Option<uuid::Uuid>> {
+        status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        message: msg.to_string(),
+        response: None,
+    };
+    warp::reply::with_status(
+        warp::reply::json(&resp),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+}
+
 pub fn not_found(msg: &str) -> warp::reply::WithStatus<Json> {
     let resp = ResponseMessage::<Option<uuid::Uuid>> {
         status: StatusCode::NOT_FOUND.as_u16(),

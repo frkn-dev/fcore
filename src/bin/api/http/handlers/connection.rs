@@ -1,4 +1,6 @@
 use chrono::{DateTime, Utc};
+use warp::Reply;
+
 use rkyv::to_bytes;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -50,6 +52,120 @@ pub(crate) fn sync_env(
 
 /// Handler get connection
 // POST /connections/sync
+/// Does this connection belong to the set `/connections/sync` would send for
+/// `env` + `proto`?
+///
+/// The sync list and the `connections/count` endpoint **must** answer with the
+/// same set: a node compares its snapshot against the count, and if the two
+/// filters drift apart every restart looks like a divergence and triggers a
+/// pointless full resync. Keep the predicate in one place.
+pub(crate) fn sync_conn_matches<C>(
+    conn_id: &uuid::Uuid,
+    conn: &C,
+    proto: Tag,
+    env: &fcore::Env,
+    strict_env: bool,
+    topic: &Topic,
+    last_update: Option<u64>,
+    conn_nodes: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+) -> bool
+where
+    C: ConnectionApiOperations + ConnectionBaseOperations,
+{
+    !conn.get_deleted()
+        && conn.get_proto().proto() == proto
+        // Hysteria2 is authorised by the global auth service rather than by env.
+        && (strict_env || proto == Tag::Hysteria2 || &conn.get_env() == env)
+        && last_update.is_none_or(|ts| conn.get_modified_at().timestamp() as u64 >= ts)
+        && sync_conn_visible(conn_nodes.get(conn_id), topic)
+}
+
+/// Body of `POST /connections/count`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ConnCountRequest {
+    pub env: fcore::Env,
+    /// Tags to count; the node asks about the protocols it actually serves.
+    pub proto: Vec<Tag>,
+}
+
+/// `POST /connections/count` — how many connections of `env` + each tag the
+/// node would receive. Used by fnode at startup to decide whether its snapshot
+/// still describes reality.
+pub async fn connections_count_handler<N, C, S>(
+    auth: ConnectionsSyncAuth,
+    req: ConnCountRequest,
+    memory: MemSync<N, C, S>,
+    limiter: std::sync::Arc<crate::http::handlers::report::SubRateLimiter>,
+) -> Result<warp::reply::Response, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if req.proto.is_empty() || req.proto.len() > 16 {
+        return Ok(http::bad_request("proto: expected 1..16 tags").into_response());
+    }
+
+    let mem = memory.memory.read().await;
+
+    let bound = match auth {
+        ConnectionsSyncAuth::Service => None,
+        ConnectionsSyncAuth::Node(id) => Some(id),
+    };
+    if let Some(id) = bound {
+        // A node may only ask about its own env, and not more often than the
+        // snapshot check needs (a crash loop must not hammer the api either).
+        if !limiter.check(id) {
+            return Ok(http::too_many_requests("count polled too often").into_response());
+        }
+    }
+    let own_env = bound.and_then(|id| mem.nodes.get_by_id(&id).map(|n| n.env.clone()));
+    let env = match sync_env(bound, own_env.as_ref(), &req.env) {
+        Ok(env) => env,
+        Err(msg) => return Ok(http::not_found(msg).into_response()),
+    };
+    let topic = match bound {
+        Some(id) => Topic::Init(id),
+        None => Topic::Init(uuid::Uuid::nil()),
+    };
+    let strict_env = bound.is_some();
+
+    let mut counts = std::collections::BTreeMap::new();
+    for proto in req.proto {
+        let n = mem
+            .connections
+            .iter()
+            .filter(|(conn_id, conn)| {
+                sync_conn_matches(
+                    *conn_id,
+                    *conn,
+                    proto,
+                    &env,
+                    strict_env,
+                    &topic,
+                    None,
+                    &mem.conn_nodes,
+                )
+            })
+            .count();
+        counts.insert(format!("{proto:?}"), n as u64);
+    }
+
+    Ok(warp::reply::json(&serde_json::json!({
+        "status": 200,
+        "message": "Ok",
+        "response": { "counts": counts },
+    }))
+    .into_response())
+}
+
 pub async fn get_connections_handler<N, C, S>(
     auth: ConnectionsSyncAuth,
     mut req: ConnType,
@@ -107,13 +223,16 @@ where
         .connections
         .iter()
         .filter(|(conn_id, conn)| {
-            !conn.get_deleted()
-                && conn.get_proto().proto() == proto
-                && (strict_env || proto == Tag::Hysteria2 || conn.get_env() == env)
-                && last_update.is_none_or(|ts| conn.get_modified_at().timestamp() as u64 >= ts)
-                // A node-pinned conn is catch-up visible only to its node's
-                // Init topic; on every other topic pinned conns are hidden.
-                && sync_conn_visible(mem.conn_nodes.get(conn_id), &topic)
+            sync_conn_matches(
+                *conn_id,
+                *conn,
+                proto,
+                &env,
+                strict_env,
+                &topic,
+                last_update,
+                &mem.conn_nodes,
+            )
         })
         .collect();
 
