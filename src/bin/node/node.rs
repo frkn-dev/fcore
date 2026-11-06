@@ -556,7 +556,6 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         }));
     }
 
-    let snapshot_for_sync = snapshot_manager.clone();
     {
         tokio::spawn(async move {
             info!(
