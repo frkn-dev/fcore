@@ -121,14 +121,14 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
 
     let snapshot_timestamp = if Path::new(&snapshot_manager.snapshot_path).exists() {
         match snapshot_manager.load_snapshot().await {
-            Ok(Some(timestamp)) => {
+            Ok(Some(meta)) => {
                 let count = snapshot_manager.len().await;
                 tracing::info!(
                     "Loaded {} auth connections from snapshot with ts {}",
                     count,
-                    timestamp,
+                    meta.timestamp,
                 );
-                Some(timestamp)
+                Some(meta.timestamp)
             }
             Ok(None) => {
                 tracing::error!("Snapshot file exists but couldn't be loaded");
