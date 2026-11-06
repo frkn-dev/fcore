@@ -1011,7 +1011,7 @@ where
         loop {
             interval.tick().await;
 
-            let nodes: Vec<(uuid::Uuid, String, String, bool)> = {
+            let nodes: Vec<(uuid::Uuid, String, String, Vec<String>, bool)> = {
                 let memory = self.sync.memory.read().await;
                 memory
                     .nodes
@@ -1021,18 +1021,19 @@ where
                             *id,
                             node.hostname.clone(),
                             node.env.to_string(),
+                            node.entry_ips(),
                             node.status.is_serving(),
                         )
                     })
                     .collect()
             };
 
-            let alive: Vec<uuid::Uuid> = nodes.iter().map(|(id, _, _, _)| *id).collect();
+            let alive: Vec<uuid::Uuid> = nodes.iter().map(|(id, _, _, _, _)| *id).collect();
             engine.retain_nodes(&alive);
 
             let now_ms = chrono::Utc::now().timestamp_millis();
 
-            for (node_id, hostname, env, is_online) in nodes {
+            for (node_id, hostname, env, node_ips, is_online) in nodes {
                 // живой heartbeat обновляет карту; иначе берём последний известный
                 if let Some(fresh) = self.metrics.get_last_heartbeat(&node_id) {
                     last_seen.insert(node_id, fresh);
@@ -1082,6 +1083,7 @@ where
                         &kind,
                         &hostname,
                         &env,
+                        &node_ips,
                         duration_sec,
                         detail.as_deref(),
                     );
@@ -1121,6 +1123,7 @@ where
                     let details = serde_json::json!({
                         "hostname": hostname,
                         "env": env,
+                        "ips": node_ips,
                         "detail": detail,
                     });
                     if let Err(e) = self
