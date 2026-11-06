@@ -20,7 +20,7 @@
   больше не возвращаются). Write-through снапшот на каждое применённое сообщение (коалесинг),
   часовой drift check → `/v1/node/snapshot/drift` → Telegram, `--reset-snapshot`, дамп настроек
   больше не печатает api-токен. Тесты: api 181, lib 110 (+4 identity), node 3 (snapshot cfg).
-  **Не выкачено** — ждём разрешения на деплой api и fnode.
+  **api 0.6.121 выкачен на прод** (healthcheck Ok, sha `2b415e20…`, 0 ERROR; `/connections/count` отдаёт dev: Wireguard 1060, AmneziaWg 1320, AmneziaWgMobile 1383). **fnode 0.6.121 ещё не выкачен** — нужен рестарт сервисов на нодах пула.
 
 - 2026-11-06 — **0.6.120: `409 pool_key_mismatch` устранён**. Инбаунды сравниваются как множество
   по `tag` и только по клиентским полям (порт, адрес, dns, keepalive, mtu, публичный ключ по
