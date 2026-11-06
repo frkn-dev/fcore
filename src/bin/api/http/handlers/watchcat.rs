@@ -102,39 +102,50 @@ impl WatchcatReport {
     }
 }
 
-/// Текст уведомления. Без токенов и без внутренних подробностей.
+/// Notification text. No tokens or internal details.
 pub fn format_event(event: &WatchcatEvent) -> String {
+    format_event_with_ips(event, &[])
+}
+
+/// Same, but with the node's entry IPs on the first line. A hostname alone does
+/// not show where the route broke; an empty list keeps the old format.
+pub fn format_event_with_ips(event: &WatchcatEvent, node_ips: &[String]) -> String {
+    let ips = if node_ips.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", node_ips.join(", "))
+    };
     match event.kind.as_str() {
         "switch" => {
             let from = event.from_tag.as_deref().unwrap_or("—");
             let to = event.to_tag.as_deref().unwrap_or("—");
             let reason = event.reason.as_deref().unwrap_or("—");
             format!(
-                "🔀 {}\n{}: {} → {}\nпричина: {}",
+                "{ips}🔀 {}\n{}: {} → {}\nпричина: {}",
                 event.hostname, event.group_tag, from, to, reason
             )
         }
         "no_healthy" => format!(
-            "🛑 {}\n{}: живых выходов не осталось\nпоследний: {}",
+            "{ips}🛑 {}\n{}: живых выходов не осталось\nпоследний: {}",
             event.hostname,
             event.group_tag,
             event.from_tag.as_deref().unwrap_or("—")
         ),
         "intercept_broken" => format!(
-            "⚠️ {}\n{}: перехват не работает, хотя узел отвечает\n{}",
+            "{ips}⚠️ {}\n{}: перехват не работает, хотя узел отвечает\n{}",
             event.hostname,
             event.group_tag,
             event.detail.as_deref().unwrap_or("")
         ),
         "quarantine" => format!(
-            "🚧 {}\n{}: {} в карантине\n{}",
+            "{ips}🚧 {}\n{}: {} в карантине\n{}",
             event.hostname,
             event.group_tag,
             event.to_tag.as_deref().unwrap_or("—"),
             event.reason.as_deref().unwrap_or("")
         ),
         other => format!(
-            "ℹ️ {}\n{}: {}\n{}",
+            "{ips}ℹ️ {}\n{}: {}\n{}",
             event.hostname,
             event.group_tag,
             other,
@@ -228,6 +239,16 @@ where
         .into_response());
     }
 
+    let node_ips = {
+        let memory = memory.memory.read().await;
+        let found = memory
+            .nodes
+            .iter_nodes()
+            .find(|(_, node)| node.hostname == event.hostname)
+            .map(|(_, node)| node.entry_ips());
+        found.unwrap_or_default()
+    };
+
     let window = match event.kind.as_str() {
         "switch" => Duration::from_secs(switch_throttle_sec),
         "intercept_broken" => Duration::from_secs(intercept_throttle_sec),
@@ -245,7 +266,7 @@ where
         match (!token.is_empty(), !chat.is_empty()) {
             (true, true) => {
                 let client = reqwest::Client::new();
-                let text = format_event(&event);
+                let text = format_event_with_ips(&event, &node_ips);
                 match crate::alerts::send_telegram(&client, &api_base, token, chat, &text).await {
                     Ok(()) => {
                         notified = true;
@@ -344,6 +365,21 @@ where
         return Ok(json_status(200, "duplicate"));
     }
 
+    let node_ips = {
+        let memory = memory.memory.read().await;
+        let found = memory
+            .nodes
+            .iter_nodes()
+            .find(|(_, node)| node.hostname == event.hostname)
+            .map(|(_, node)| node.entry_ips());
+        found.unwrap_or_default()
+    };
+    let ip_line = if node_ips.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", node_ips.join(", "))
+    };
+
     let mut notified = false;
     if throttle.allow(
         &event.hostname,
@@ -352,7 +388,7 @@ where
         Duration::from_secs(3600),
     ) {
         let text = format!(
-            "⚠️ {}\n{}: снапшот разошёлся с api\n{}: локально {}, в api {}\nнода обслуживает неполный набор — проверь /opt/fnode/snapshots",
+            "{ip_line}⚠️ {}\n{}: снапшот разошёлся с api\n{}: локально {}, в api {}\nнода обслуживает неполный набор — проверь /opt/fnode/snapshots",
             event.hostname, event.group_tag, event.detail.as_deref().unwrap_or(""), report.local, report.api
         );
         if !telegram_token.is_empty() && !chat_id.is_empty() {
@@ -432,6 +468,17 @@ mod tests {
         let mut r = report("switch");
         r.at = Some(Utc::now() - chrono::Duration::minutes(2));
         assert!(r.validate().is_ok());
+    }
+
+    #[test]
+    fn renders_switch_with_node_ips_first() {
+        let r = report("switch");
+        let ips = vec!["164.215.97.99".to_string()];
+        let text = format_event_with_ips(&r.into_event(), &ips);
+        assert!(
+            text.starts_with("164.215.97.99\n🔀 "),
+            "IP must be the first line: {text}"
+        );
     }
 
     #[test]

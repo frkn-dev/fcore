@@ -694,44 +694,52 @@ pub async fn send_telegram(
     Ok(())
 }
 
-/// Текст сообщения в Telegram.
+/// Telegram message text (no IP list — for legacy callers and tests).
 pub fn format_message(kind: &AlertKind, hostname: &str, env: &str, duration_sec: i64) -> String {
-    format_message_full(kind, hostname, env, duration_sec, None)
+    format_message_full(kind, hostname, env, &[], duration_sec, None)
 }
 
-/// То же, но с уточнением (раздел диска и т.п.).
+/// Message text. The first line is the node's entry IPs: a hostname alone does
+/// not tell the on-call person where the route disappeared, while the IP does.
+/// An empty list keeps the old format.
 pub fn format_message_full(
     kind: &AlertKind,
     hostname: &str,
     env: &str,
+    node_ips: &[String],
     duration_sec: i64,
     detail: Option<&str>,
 ) -> String {
     let extra = detail.map(|d| format!("\n{d}")).unwrap_or_default();
     let human = human_duration(duration_sec);
+    let ips = if node_ips.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", node_ips.join(", "))
+    };
     match kind {
         AlertKind::NodeOffline => format!(
-            "🔴 Нода офлайн\n{hostname} ({env})\nмолчит: {human}\nвремя: {}",
+            "{ips}🔴 Нода офлайн\n{hostname} ({env})\nмолчит: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
         AlertKind::NodeRecovered => format!(
-            "🟢 Нода вернулась\n{hostname} ({env})\nстабильна: {human}\nвремя: {}",
+            "{ips}🟢 Нода вернулась\n{hostname} ({env})\nстабильна: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
         AlertKind::NodeOfflineLong => format!(
-            "🚨 Нода лежит больше часа\n{hostname} ({env})\nмолчит: {human}\nвремя: {}",
+            "{ips}🚨 Нода лежит больше часа\n{hostname} ({env})\nмолчит: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
         AlertKind::NodeDiskHigh => format!(
-            "💾 Диск почти полон\n{hostname} ({env}){extra}\nдержится: {human}\nвремя: {}",
+            "{ips}💾 Диск почти полон\n{hostname} ({env}){extra}\nдержится: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
         AlertKind::NodeCpuHigh => format!(
-            "🔥 Высокая нагрузка CPU\n{hostname} ({env})\nдержится: {human}\nвремя: {}",
+            "{ips}🔥 Высокая нагрузка CPU\n{hostname} ({env})\nдержится: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
         AlertKind::NodeFlapping => format!(
-            "🟠 Нода мигает\n{hostname} ({env})\n{duration_sec} перехода за окно\nвремя: {}",
+            "{ips}🟠 Нода мигает\n{hostname} ({env})\n{duration_sec} перехода за окно\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
     }
@@ -1080,6 +1088,24 @@ mod tests {
             e.observe(node(), "n1", "ru", Some(now), now),
             Decision::Idle
         );
+    }
+
+    #[test]
+    fn messages_start_with_node_ips() {
+        let ips = vec!["164.215.97.99".to_string(), "185.224.208.199".to_string()];
+        let text = format_message_full(
+            &AlertKind::NodeRecovered,
+            "vdska",
+            "personal",
+            &ips,
+            120,
+            None,
+        );
+        assert!(
+            text.starts_with("164.215.97.99, 185.224.208.199\n🟢 Нода вернулась\n"),
+            "IP must be the first line: {text}"
+        );
+        assert!(text.contains("vdska (personal)"));
     }
 
     #[test]
