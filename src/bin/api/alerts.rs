@@ -65,6 +65,12 @@ pub struct AlertsConfig {
     /// (~13 событий в час при здоровой ноде), поэтому окно длинное.
     #[serde(default = "default_watchcat_intercept_throttle")]
     pub watchcat_intercept_throttle_sec: u64,
+    /// То же для «живых выходов не осталось». Само состояние длится минутами,
+    /// и watchcat присылал его каждый тик: 180 сообщений за четыре минуты.
+    /// Демон теперь шлёт один раз на эпизод, а здесь — страховка на случай
+    /// старого демона или нескольких источников.
+    #[serde(default = "default_watchcat_no_healthy_throttle")]
+    pub watchcat_no_healthy_throttle_sec: u64,
     /// Ниже этого значения считаем, что нагрузка спала (гистерезис).
     #[serde(default = "default_cpu_reset")]
     pub cpu_reset_pct: f64,
@@ -88,6 +94,10 @@ fn default_watchcat_switch_throttle() -> u64 {
 
 fn default_watchcat_intercept_throttle() -> u64 {
     1800
+}
+
+fn default_watchcat_no_healthy_throttle() -> u64 {
+    600
 }
 
 fn default_offline_threshold() -> u64 {
@@ -152,6 +162,7 @@ impl Default for AlertsConfig {
             disk_reset_pct: default_disk_reset(),
              watchcat_switch_throttle_sec: 120,
              watchcat_intercept_throttle_sec: 1800,
+             watchcat_no_healthy_throttle_sec: 600,
             cpu_threshold_pct: default_cpu_threshold(),
             cpu_hold_sec: default_cpu_hold(),
             cpu_reset_pct: default_cpu_reset(),
@@ -757,6 +768,7 @@ mod tests {
             disk_reset_pct: 85.0,
              watchcat_switch_throttle_sec: 120,
              watchcat_intercept_throttle_sec: 1800,
+             watchcat_no_healthy_throttle_sec: 600,
             cpu_threshold_pct: 85.0,
             cpu_hold_sec: 600,
             cpu_reset_pct: 70.0,

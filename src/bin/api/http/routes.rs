@@ -757,6 +757,7 @@ where
             .and(with_param_string(alerts_cfg.telegram_api_base.clone()))
             .and(with_param_u64(alerts_cfg.watchcat_switch_throttle_sec))
             .and(with_param_u64(alerts_cfg.watchcat_intercept_throttle_sec))
+            .and(with_param_u64(alerts_cfg.watchcat_no_healthy_throttle_sec))
             .and(warp::any().map(move || watchcat_throttle.clone()))
             .and_then(crate::http::handlers::watchcat::watchcat_event_handler);
 

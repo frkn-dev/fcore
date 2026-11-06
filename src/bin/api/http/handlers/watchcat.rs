@@ -7,7 +7,9 @@
 //! Что уходит в Telegram:
 //! - переключение маршрута (`switch`) — всегда, но не чаще `switch_throttle_sec`
 //!   на пару (нода, группа): при шторме уведомления схлопываются;
-//! - `no_healthy` — всегда и без троттлинга: это «выходов не осталось»;
+//! - `no_healthy` — не чаще `no_healthy_throttle_sec` на пару (нода, группа):
+//!   состояние длится минутами, и без окна это превращалось в поток
+//!   (180 сообщений за 4 минуты при тике раз в секунду);
 //! - `intercept_broken` — не чаще `intercept_throttle_sec`, иначе шум
 //!   (на живых данных ~13 событий в час при штатной работе).
 //!
@@ -186,6 +188,7 @@ pub async fn watchcat_event_handler<N, C, S>(
     api_base: String,
     switch_throttle_sec: u64,
     intercept_throttle_sec: u64,
+    no_healthy_throttle_sec: u64,
     throttle: NotifyThrottle,
 ) -> Result<warp::reply::Response, Rejection>
 where
@@ -228,6 +231,9 @@ where
     let window = match event.kind.as_str() {
         "switch" => Duration::from_secs(switch_throttle_sec),
         "intercept_broken" => Duration::from_secs(intercept_throttle_sec),
+        // Not zero: "no live exits" lasts many ticks, and an unthrottled
+        // forward turns one outage into a Telegram flood.
+        "no_healthy" => Duration::from_secs(no_healthy_throttle_sec),
         _ => Duration::from_secs(0),
     };
     let allowed = throttle.allow(&event.hostname, &event.group_tag, &event.kind, window);
