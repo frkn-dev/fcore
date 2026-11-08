@@ -86,13 +86,18 @@ pub struct AlertsConfig {
     /// База Telegram Bot API (можно подменить на прокси).
     #[serde(default = "default_api_base")]
     pub telegram_api_base: String,
-    /// Envs, которые пишем только в лог и никогда не пушим: это машины
-    /// клиентов, а не наши. Сравнение по префиксу, поэтому `custompersonal`
-    /// накрывает `custompersonal<uuid>`. Пустой список — пушим по всем env.
+    /// Envs, которые пишем только в лог и никогда не пушим в наш чат: это
+    /// машины клиентов, а не наши. Сравнение по префиксу, поэтому
+    /// `custompersonal` накрывает `custompersonal<uuid>`. Пустой список —
+    /// пушим по всем env. Если у владельца привязан свой чат
+    /// (`subscription_alert_chats`), алерт по его ноде уходит ему, а не нам.
     #[serde(default = "default_quiet_env_prefixes")]
     pub quiet_env_prefixes: Vec<String>,
-    /// Почта для оповещений. Отправка не зависит от Telegram: каждый
-    /// настроенный канал получает алерт, оба сразу тоже.
+    /// Тумблеры каналов. Каналы независимы: работают оба, если оба включены
+    /// и настроены.
+    #[serde(default = "default_true")]
+    pub telegram_enabled: bool,
+    /// Почта для оповещений: второй канал, не замена телеграму.
     #[serde(default)]
     pub email: Option<AlertEmailConfig>,
 }
@@ -100,6 +105,9 @@ pub struct AlertsConfig {
 /// SMTP для оповещений по почте (`[alerts.email]`).
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct AlertEmailConfig {
+    /// Тумблер только для почты: позволяет выключить её, не стирая SMTP.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub smtp_host: String,
     /// 587 для STARTTLS, 465 для неявного TLS.
     #[serde(default = "default_smtp_port")]
@@ -172,6 +180,9 @@ fn default_flap_threshold() -> u64 {
 fn default_api_base() -> String {
     "https://api.telegram.org".to_string()
 }
+fn default_true() -> bool {
+    true
+}
 fn default_quiet_env_prefixes() -> Vec<String> {
     vec!["personal".to_string(), "custompersonal".to_string()]
 }
@@ -207,22 +218,25 @@ impl Default for AlertsConfig {
             flap_threshold: default_flap_threshold(),
             telegram_api_base: default_api_base(),
             quiet_env_prefixes: default_quiet_env_prefixes(),
+            telegram_enabled: true,
             email: None,
         }
     }
 }
 
 impl AlertsConfig {
-    /// Telegram настроен (токен и чат).
+    /// Telegram включён и настроен (токен и чат).
     pub fn telegram_ready(&self) -> bool {
-        self.telegram_bot_token.is_some() && self.telegram_chat_id.is_some()
+        self.telegram_enabled
+            && self.telegram_bot_token.is_some()
+            && self.telegram_chat_id.is_some()
     }
 
-    /// Почта настроена (SMTP-блок и хотя бы один получатель).
+    /// Почта включена и настроена (SMTP-блок и хотя бы один получатель).
     pub fn email_ready(&self) -> bool {
         self.email
             .as_ref()
-            .map(|e| !e.to.is_empty())
+            .map(|e| e.enabled && !e.to.is_empty())
             .unwrap_or(false)
     }
 
@@ -777,6 +791,50 @@ impl NotifyReport {
     }
 }
 
+/// Чей это личный env: `custompersonal<uuid>` (как в базе) или
+/// `personal<uuid>` (как ноду видит админка). UUID приходит без дефисов,
+/// поэтому собираем его обратно и только потом парсим.
+pub fn personal_owner(env: &str) -> Option<Uuid> {
+    let raw = env
+        .strip_prefix("custompersonal")
+        .or_else(|| env.strip_prefix("personal"))?;
+    if raw.len() != 32 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let dashed = format!(
+        "{}-{}-{}-{}-{}",
+        &raw[0..8],
+        &raw[8..12],
+        &raw[12..16],
+        &raw[16..20],
+        &raw[20..32]
+    );
+    Uuid::parse_str(&dashed).ok()
+}
+
+/// Отправка в конкретный чат — для алертов по личным нодам: они уходят
+/// владельцу, а не в наш общий чат.
+pub async fn send_to_telegram_chat(
+    cfg: &AlertsConfig,
+    client: &reqwest::Client,
+    chat_id: &str,
+    text: &str,
+) -> bool {
+    if !cfg.telegram_enabled {
+        return false;
+    }
+    let Some(token) = cfg.telegram_bot_token.as_deref() else {
+        return false;
+    };
+    match send_telegram(client, &cfg.telegram_api_base, token, chat_id, text).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!("alerts: telegram delivery to {chat_id} failed: {e}");
+            false
+        }
+    }
+}
+
 /// Отправка во все настроенные каналы сразу: телеграм и почта независимы,
 /// алерт уходит в каждый, который есть в конфиге.
 pub async fn notify(cfg: &AlertsConfig, client: &reqwest::Client, text: &str) -> bool {
@@ -804,7 +862,7 @@ pub async fn notify_report(
         }
     }
 
-    if let Some(email) = cfg.email.as_ref() {
+    if let Some(email) = cfg.email.as_ref().filter(|e| e.enabled) {
         match send_email(email, text).await {
             Ok(()) => report.email = Some(true),
             Err(e) => {
@@ -966,6 +1024,7 @@ mod tests {
             flap_threshold: 3,
             telegram_api_base: default_api_base(),
             quiet_env_prefixes: default_quiet_env_prefixes(),
+            telegram_enabled: true,
             email: None,
         }
     }
@@ -1006,6 +1065,7 @@ mod tests {
         assert!(!cfg.email_ready());
 
         cfg.email = Some(AlertEmailConfig {
+            enabled: true,
             smtp_host: "smtp.yandex.ru".into(),
             smtp_port: 587,
             username: "ops@frkn.org".into(),
@@ -1029,6 +1089,57 @@ mod tests {
         // Neither channel — nothing to deliver.
         cfg.email = None;
         assert!(!cfg.can_deliver());
+    }
+
+    #[test]
+    fn personal_owner_comes_from_the_env_name() {
+        let sub = "72483aa3-a63d-4e92-9e0f-06fb49bbd8bb";
+        assert_eq!(
+            personal_owner("custompersonal72483aa3a63d4e929e0f06fb49bbd8bb"),
+            Some(Uuid::parse_str(sub).unwrap())
+        );
+        // The admin node list drops the `custom` prefix.
+        assert_eq!(
+            personal_owner("personal72483aa3a63d4e929e0f06fb49bbd8bb"),
+            Some(Uuid::parse_str(sub).unwrap())
+        );
+        // Ours and the malformed ones are not owners.
+        assert_eq!(personal_owner("dev"), None);
+        assert_eq!(personal_owner("premium-prem02-1"), None);
+        assert_eq!(personal_owner("custompersonal-not-a-uuid"), None);
+        assert_eq!(personal_owner("personal"), None);
+    }
+
+    #[test]
+    fn channels_have_independent_toggles() {
+        let mut cfg = cfg();
+        assert!(cfg.telegram_ready());
+
+        // Turning telegram off must not need the token removed.
+        cfg.telegram_enabled = false;
+        assert!(!cfg.telegram_ready());
+        assert!(cfg.telegram_bot_token.is_some());
+        assert!(!cfg.can_deliver(), "nothing else is configured yet");
+
+        cfg.email = Some(AlertEmailConfig {
+            enabled: true,
+            smtp_host: "smtp.yandex.ru".into(),
+            smtp_port: 587,
+            username: "ops@frkn.org".into(),
+            password: "secret".into(),
+            from: "FRKN <pigeon@frkn.org>".into(),
+            to: vec!["ops@frkn.org".into()],
+            tls: "starttls".into(),
+        });
+        // Email alone keeps alerts alive while telegram is switched off.
+        assert!(cfg.can_deliver());
+        assert!(cfg.email_ready());
+
+        // Both toggles can be off independently of the credentials.
+        cfg.email.as_mut().unwrap().enabled = false;
+        assert!(!cfg.email_ready());
+        assert!(!cfg.can_deliver());
+        assert!(cfg.email.is_some(), "disabled is not the same as unconfigured");
     }
 
     #[test]

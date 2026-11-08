@@ -1109,6 +1109,214 @@ where
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AdminAlertChatRequest {
+    /// Telegram chat id of the owner: numeric (`123456789`, `-100...`) or a
+    /// channel username. Spaces are rejected so a pasted sentence cannot
+    /// silently become a bad chat.
+    pub chat_id: String,
+    #[serde(default = "default_alert_chat_enabled")]
+    pub enabled: bool,
+}
+
+fn default_alert_chat_enabled() -> bool {
+    true
+}
+
+/// Chat ids are numeric (group ids go negative) or `@username` / `@channel`.
+/// Anything with spaces is a paste accident, not a chat.
+fn normalize_chat_id(raw: &str) -> Option<String> {
+    let chat = raw.trim();
+    let ok_len = !chat.is_empty() && chat.len() <= 64;
+    let ok_chars = chat
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '@');
+    (ok_len && ok_chars).then(|| chat.to_string())
+}
+
+/// PUT /admin/api/subscriptions/{id}/alerts/telegram — владелец selfhosted-нод
+/// привязывает свой чат: алерты по его серверам пойдут туда, а не нам.
+pub async fn admin_api_set_alert_chat_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    req: AdminAlertChatRequest,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(Box::new(warp::reply::with_status(
+            "Admin disabled",
+            StatusCode::FORBIDDEN,
+        )));
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(Box::new(warp::reply::with_status(
+            "Unauthorized",
+            StatusCode::UNAUTHORIZED,
+        )));
+    }
+
+    let Some(chat_id) = normalize_chat_id(&req.chat_id) else {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "status": 400,
+                "message": "chat_id must be 1..64 characters: digits, -, _ or @"
+            })),
+            StatusCode::BAD_REQUEST,
+        )));
+    };
+
+    {
+        let mem = memory.memory.read().await;
+        match mem.subscriptions.find_by_id(&subscription_id) {
+            Some(sub) if !sub.is_deleted() => {}
+            _ => {
+                return Ok(Box::new(warp::reply::with_status(
+                    "Subscription not found",
+                    StatusCode::NOT_FOUND,
+                )))
+            }
+        }
+    }
+
+    if let Err(e) = memory
+        .db
+        .alerts()
+        .set_alert_chat(subscription_id, &chat_id, req.enabled)
+        .await
+    {
+        error!("Failed to set alert chat: {}", e);
+        return Ok(Box::new(warp::reply::with_status(
+            "Database error",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )));
+    }
+
+    Ok(Box::new(warp::reply::json(&serde_json::json!({
+        "subscription_id": subscription_id,
+        "chat_id": chat_id,
+        "enabled": req.enabled,
+    }))))
+}
+
+/// GET /admin/api/subscriptions/{id}/alerts/telegram — текущая привязка.
+pub async fn admin_api_get_alert_chat_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(Box::new(warp::reply::with_status(
+            "Admin disabled",
+            StatusCode::FORBIDDEN,
+        )));
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(Box::new(warp::reply::with_status(
+            "Unauthorized",
+            StatusCode::UNAUTHORIZED,
+        )));
+    }
+
+    match memory.db.alerts().alert_chat(subscription_id).await {
+        Ok(Some((chat_id, enabled))) => Ok(Box::new(warp::reply::json(&serde_json::json!({
+            "subscription_id": subscription_id,
+            "chat_id": chat_id,
+            "enabled": enabled,
+        })))),
+        Ok(None) => Ok(Box::new(warp::reply::json(&serde_json::json!({
+            "subscription_id": subscription_id,
+            "chat_id": null,
+            "enabled": false,
+        })))),
+        Err(e) => {
+            error!("Failed to read alert chat: {}", e);
+            Ok(Box::new(warp::reply::with_status(
+                "Database error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )))
+        }
+    }
+}
+
+/// DELETE /admin/api/subscriptions/{id}/alerts/telegram — снять привязку.
+pub async fn admin_api_delete_alert_chat_handler<N, C, S>(
+    subscription_id: uuid::Uuid,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(Box::new(warp::reply::with_status(
+            "Admin disabled",
+            StatusCode::FORBIDDEN,
+        )));
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(Box::new(warp::reply::with_status(
+            "Unauthorized",
+            StatusCode::UNAUTHORIZED,
+        )));
+    }
+
+    match memory.db.alerts().clear_alert_chat(subscription_id).await {
+        Ok(removed) => Ok(Box::new(warp::reply::json(&serde_json::json!({
+            "subscription_id": subscription_id,
+            "removed": removed,
+        })))),
+        Err(e) => {
+            error!("Failed to clear alert chat: {}", e);
+            Ok(Box::new(warp::reply::with_status(
+                "Database error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1137,5 +1345,16 @@ mod tests {
 
         assert_eq!(counts.total, 3);
         assert_eq!(counts.active, 2);
+    }
+
+    #[test]
+    fn chat_ids_are_normalized_and_validated() {
+        assert_eq!(normalize_chat_id("  123456789 "), Some("123456789".into()));
+        assert_eq!(normalize_chat_id("-1001234567890"), Some("-1001234567890".into()));
+        assert_eq!(normalize_chat_id("@frkn_ops"), Some("@frkn_ops".into()));
+        // A pasted sentence is not a chat id.
+        assert_eq!(normalize_chat_id("мой телеграм 12345"), None);
+        assert_eq!(normalize_chat_id(""), None);
+        assert_eq!(normalize_chat_id(&"1".repeat(65)), None);
     }
 }

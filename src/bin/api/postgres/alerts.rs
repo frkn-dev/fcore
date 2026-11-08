@@ -48,6 +48,16 @@ impl PgAlerts {
                     last_ms    bigint NOT NULL,
                     updated_at timestamptz NOT NULL DEFAULT now()
                 );
+
+                -- Куда владелец личной (selfhosted) ноды хочет получать алерты
+                -- по своим серверам. Одна строка на подписку.
+                CREATE TABLE IF NOT EXISTS subscription_alert_chats (
+                    subscription_id uuid PRIMARY KEY,
+                    telegram_chat_id text NOT NULL,
+                    enabled     boolean NOT NULL DEFAULT true,
+                    created_at  timestamptz NOT NULL DEFAULT now(),
+                    updated_at  timestamptz NOT NULL DEFAULT now()
+                );
                 "#,
             )
             .await?;
@@ -212,6 +222,93 @@ impl PgAlerts {
                     "delivered": r.get::<_, bool>("delivered"),
                     "at": r.get::<_, DateTime<Utc>>("created_at"),
                 })
+            })
+            .collect())
+    }
+
+    /// Привязать чат владельца к подписке: алерты по его личным нодам уйдут
+    /// туда, а не в наш общий чат.
+    pub async fn set_alert_chat(
+        &self,
+        subscription_id: uuid::Uuid,
+        chat_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        client
+            .execute(
+                r#"
+                INSERT INTO subscription_alert_chats (subscription_id, telegram_chat_id, enabled)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (subscription_id) DO UPDATE
+                    SET telegram_chat_id = EXCLUDED.telegram_chat_id,
+                        enabled = EXCLUDED.enabled,
+                        updated_at = now()
+                "#,
+                &[&subscription_id, &chat_id, &enabled],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Снять привязку: алерты по ноде больше не уходят владельцу.
+    pub async fn clear_alert_chat(&self, subscription_id: uuid::Uuid) -> Result<bool> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let removed = client
+            .execute(
+                "DELETE FROM subscription_alert_chats WHERE subscription_id = $1",
+                &[&subscription_id],
+            )
+            .await?;
+
+        Ok(removed > 0)
+    }
+
+    /// Одна привязка — для ответа админ-ручки.
+    pub async fn alert_chat(
+        &self,
+        subscription_id: uuid::Uuid,
+    ) -> Result<Option<(String, bool)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                "SELECT telegram_chat_id, enabled FROM subscription_alert_chats WHERE subscription_id = $1",
+                &[&subscription_id],
+            )
+            .await?;
+
+        Ok(rows
+            .first()
+            .map(|r| (r.get::<_, String>("telegram_chat_id"), r.get::<_, bool>("enabled"))))
+    }
+
+    /// Все включённые привязки: подписка → чат. Читается на каждом тике
+    /// алерт-движка, поэтому только `enabled`.
+    pub async fn load_alert_chats(&self) -> Result<std::collections::HashMap<uuid::Uuid, String>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                "SELECT subscription_id, telegram_chat_id FROM subscription_alert_chats WHERE enabled",
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<_, uuid::Uuid>("subscription_id"),
+                    r.get::<_, String>("telegram_chat_id"),
+                )
             })
             .collect())
     }

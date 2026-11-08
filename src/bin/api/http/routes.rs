@@ -520,6 +520,42 @@ where
             .and(warp::header::optional::<String>("authorization"))
             .and_then(admin_api_set_selfhosted_limits_handler);
 
+        // Владелец selfhosted-нод привязывает свой Telegram: алерты по его
+        // серверам уходят ему, а не в наш общий чат.
+        let admin_api_alert_chat_put = warp::put()
+            .and(warp::path!(
+                "admin" / "api" / "subscriptions" / Uuid / "alerts" / "telegram"
+            ))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_set_alert_chat_handler);
+
+        let admin_api_alert_chat_get = warp::get()
+            .and(warp::path!(
+                "admin" / "api" / "subscriptions" / Uuid / "alerts" / "telegram"
+            ))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_get_alert_chat_handler);
+
+        let admin_api_alert_chat_delete = warp::delete()
+            .and(warp::path!(
+                "admin" / "api" / "subscriptions" / Uuid / "alerts" / "telegram"
+            ))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_delete_alert_chat_handler);
+
         let admin_api_delete_subscription_route = warp::delete()
             .and(warp::path!("admin" / "api" / "subscriptions" / Uuid))
             .and(warp::path::end())
@@ -575,6 +611,9 @@ where
             .or(admin_api_create_subscription_route)
             .or(admin_api_extend_subscription_route)
             .or(admin_api_selfhosted_limits_route)
+            .or(admin_api_alert_chat_put)
+            .or(admin_api_alert_chat_get)
+            .or(admin_api_alert_chat_delete)
             .or(admin_api_delete_subscription_route)
             .or(admin_api_delete_connection_route);
 

@@ -1032,6 +1032,16 @@ where
             let alive: Vec<uuid::Uuid> = nodes.iter().map(|(id, _, _, _, _)| *id).collect();
             engine.retain_nodes(&alive);
 
+            // Куда слать алерты по личным нодам: владелец может привязать
+            // свой чат, и тогда события по его машинам уходят ему.
+            let owner_chats = match self.sync.db.alerts().load_alert_chats().await {
+                Ok(map) => map,
+                Err(e) => {
+                    tracing::warn!("alerts: cannot load owner chats: {e}");
+                    Default::default()
+                }
+            };
+
             let now_ms = chrono::Utc::now().timestamp_millis();
 
             for (node_id, hostname, env, node_ips, is_online) in nodes {
@@ -1088,11 +1098,18 @@ where
                         duration_sec,
                         detail.as_deref(),
                     );
-                    // Nodes on a customer's own machine (personal envs) are
-                    // logged and recorded, but never pushed: their outages are
-                    // not ours to wake up for.
+                    // Routing: a node on a customer's own machine belongs to a
+                    // subscription (`custompersonal<id>`). If that owner bound a
+                    // chat, the alert goes there; the quiet list only silences
+                    // our global channel, it does not hide the owner's alert.
+                    let owner_chat = crate::alerts::personal_owner(&env)
+                        .and_then(|sub| owner_chats.get(&sub).cloned());
                     let quiet = cfg.is_quiet_env(&env);
-                    let delivered = if quiet {
+                    let (delivered, route) = if let Some(chat) = owner_chat.as_deref() {
+                        let ok =
+                            crate::alerts::send_to_telegram_chat(&cfg, &client, chat, &text).await;
+                        (ok, "owner")
+                    } else if quiet {
                         tracing::info!(
                             "alert quiet env (log only): {} {} ({}) duration={}s",
                             kind.as_str(),
@@ -1100,18 +1117,19 @@ where
                             env,
                             duration_sec
                         );
-                        false
+                        (false, "quiet")
                     } else {
-                        crate::alerts::notify(&cfg, &client, &text).await
+                        (crate::alerts::notify(&cfg, &client, &text).await, "global")
                     };
 
                     tracing::info!(
-                        "alert {}: {} ({}) duration={}s delivered={}",
+                        "alert {}: {} ({}) duration={}s delivered={} route={}",
                         kind.as_str(),
                         hostname,
                         env,
                         duration_sec,
-                        delivered
+                        delivered,
+                        route
                     );
 
                     let details = serde_json::json!({
@@ -1120,6 +1138,7 @@ where
                         "ips": node_ips,
                         "detail": detail,
                         "quiet": quiet,
+                        "route": route,
                     });
                     if let Err(e) = self
                         .sync
