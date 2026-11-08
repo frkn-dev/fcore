@@ -10,3 +10,11 @@ snapshots/*.bin
 dev/data/*
 experimental/
 fcore.sublime-workspace
+
+docker/central/.env
+docker/central/config.toml
+
+docker/central/initial-schema.sql
+docker/central/agw_private.pem
+
+docker/central/report-schema.sql

@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: api
+      POSTGRES_USER: fcore
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fcore -d api"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  api:
+    build:
+      context: ../..
+      dockerfile: docker/central/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:3002:3002"
+    volumes:
+      - ./config.toml:/etc/fcore/api/config.toml:ro
+      - api_data:/var/lib/fcore/api
+      - api_logs:/var/log/fcore/api
+volumes:
+  postgres_data:
+  api_data:
+  api_logs:

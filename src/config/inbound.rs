@@ -7,10 +7,10 @@ use crate::error::{Error, Result};
 use crate::memory::connection::conn::Conn as Connection;
 use crate::memory::connection::operation::base::Operations;
 use crate::memory::tag::ProtoTag as Tag;
-use crate::utils::get_uuid_last_octet_simple;
 
 use crate::config::amnezia_wg::AmneziaWgSettings;
 use crate::config::h2::H2Settings;
+use crate::config::display::connection_name;
 use crate::config::wireguard::WireguardSettings;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -240,6 +240,22 @@ impl InboundConnLink for Inbound {
             Tag::VlessXhttpReality => self.vless_xhttp(conn_id, hostname, host, label),
             Tag::VlessXhttpCdn => self.vless_xhttp_cdn(conn_id, hostname, host, label),
             Tag::Hysteria2 => self.h2(hostname, label, conn),
+            Tag::Trojan => {
+                let mut url = Url::parse(&format!("trojan://{conn_id}@{host}:{}", self.port))?;
+                url.query_pairs_mut().append_pair("security", "tls");
+                url.set_fragment(Some(&connection_name(label, "Trojan", "Trojan")));
+                Ok(url.to_string())
+            }
+            Tag::Shadowsocks => {
+                let password = conn.get_password().ok_or(Error::Custom(
+                    "Shadowsocks password is missing".into(),
+                ))?;
+                let user_info = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(format!("chacha20-ietf-poly1305:{password}"));
+                let mut url = Url::parse(&format!("ss://{user_info}@{host}:{}", self.port))?;
+                url.set_fragment(Some(&connection_name(label, "Shadowsocks", "Shadowsocks")));
+                Ok(url.to_string())
+            }
             Tag::Wireguard => self.wireguard(conn_id, conn, hostname, host, label),
             Tag::AmneziaWg => self.amneziawg(conn_id, conn, hostname, host, label),
             Tag::AmneziaWgMobile => self.amneziawg(conn_id, conn, hostname, host, label),
@@ -442,7 +458,7 @@ PersistentKeepalive = {keepalive}
     fn vmess(
         &self,
         conn_id: &uuid::Uuid,
-        _hostname: &str,
+        hostname: &str,
         _host: &str,
         label: &str,
     ) -> Result<String> {
@@ -492,10 +508,14 @@ PersistentKeepalive = {keepalive}
 
         let conn = VmessConnection {
             v: "2".into(),
-            ps: format!("Vmess {}", label),
+            ps: connection_name(label, "Vmess", "VMess"),
             add: host.to_string(),
             port: port.to_string(),
-            id: conn_id.to_string(),
+            id: if std::env::var("FCORE_VMESS_DISTINCT").ok().as_deref() == Some("1") {
+                crate::utils::vmess_node_uuid(conn_id, hostname).to_string()
+            } else {
+                conn_id.to_string()
+            },
             aid: "0".into(),
             scy: "auto".into(),
             net: "tcp".into(),
@@ -508,9 +528,10 @@ PersistentKeepalive = {keepalive}
         let json_str = serde_json::to_string(&conn)
             .ok()
             .ok_or(Error::Custom("VMESS serde json error".into()))?;
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(json_str);
+        // Some clients reject a VMess URI when its Base64 payload ends in '='.
+        let base64_str = base64::engine::general_purpose::STANDARD_NO_PAD.encode(json_str);
 
-        Ok(format!("vmess://{base64_str}#{label}"))
+        Ok(format!("vmess://{base64_str}#{}", url::form_urlencoded::byte_serialize(connection_name(label, "Vmess", "VMess").as_bytes()).collect::<String>().replace('+', "%20")))
     }
 
     fn vless_xtls(
@@ -549,11 +570,7 @@ PersistentKeepalive = {keepalive}
             .append_pair("pbk", pbk)
             .append_pair("sid", sid);
 
-        url.set_fragment(Some(&format!(
-            "{} | {} XTLS",
-            label,
-            get_uuid_last_octet_simple(conn_id)
-        )));
+        url.set_fragment(Some(&connection_name(label, "VlessTcpReality", "VLESS XTLS")));
         Ok(url.to_string())
     }
 
@@ -586,11 +603,7 @@ PersistentKeepalive = {keepalive}
             .append_pair("pbk", &r.public_key)
             .append_pair("sid", r.short_ids.first().unwrap_or(&"".to_string()));
 
-        url.set_fragment(Some(&format!(
-            "{} | {} GRPC",
-            label,
-            get_uuid_last_octet_simple(conn_id)
-        )));
+        url.set_fragment(Some(&connection_name(label, "VlessGrpcReality", "VLESS gRPC")));
         Ok(url.to_string())
     }
 
@@ -613,19 +626,20 @@ PersistentKeepalive = {keepalive}
             .xhttp_settings
             .as_ref()
             .ok_or(Error::Custom("Missing xHTTP settings".into()))?;
+        let sni = r.server_names.first().ok_or(Error::Custom("Missing SNI".into()))?;
+        let sid = r.short_ids.first().ok_or(Error::Custom("Missing SID".into()))?;
 
         let mut url = Url::parse(&format!("vless://{conn_id}@{host}:{}", self.port))?;
         url.query_pairs_mut()
             .append_pair("security", "reality")
             .append_pair("type", "xhttp")
             .append_pair("path", &x.path)
-            .append_pair("pbk", &r.public_key);
+            .append_pair("pbk", &r.public_key)
+            .append_pair("sni", sni)
+            .append_pair("sid", sid)
+            .append_pair("fp", "chrome");
 
-        url.set_fragment(Some(&format!(
-            "{} | {} XHTTP",
-            label,
-            get_uuid_last_octet_simple(conn_id)
-        )));
+        url.set_fragment(Some(&connection_name(label, "VlessXhttpReality", "VLESS XHTTP")));
         Ok(url.to_string())
     }
 
@@ -672,11 +686,7 @@ PersistentKeepalive = {keepalive}
             url.query_pairs_mut().append_pair("extra", &extra_json);
         }
 
-        url.set_fragment(Some(&format!(
-            "{} | {} XHTTP-CDN",
-            label,
-            get_uuid_last_octet_simple(conn_id)
-        )));
+        url.set_fragment(Some(&connection_name(label, "VlessXhttpCdn", "VLESS XHTTP CDN")));
         Ok(url.to_string())
     }
 
@@ -692,11 +702,7 @@ PersistentKeepalive = {keepalive}
                 .append_pair("insecure", &h2.insecure.to_string())
                 .append_pair("up-mbps", &h2.up_mbps.unwrap_or(0).to_string());
 
-            url.set_fragment(Some(&format!(
-                "{} | {} H2",
-                label,
-                get_uuid_last_octet_simple(&token)
-            )));
+            url.set_fragment(Some(&connection_name(label, "Hysteria2", "Hysteria2")));
             Ok(url.to_string())
         } else {
             Err(Error::Custom("H2 Token is required".into()))
@@ -728,6 +734,28 @@ mod tests {
     use crate::memory::connection::proto::Proto;
     use crate::memory::connection::wireguard::{Keys as WgKeys, Param as WgParam};
     use crate::memory::env::Env;
+
+    #[test]
+    fn trojan_link_uses_connection_credential_and_tls() {
+        let inbound = Inbound {
+            tag: Tag::Trojan,
+            port: 8445,
+            stream_settings: None,
+            wg: None,
+            awg: None,
+            h2: None,
+            mtproto_secret: None,
+        };
+        let id = uuid::Uuid::from_u128(1);
+        let conn = Connection::new(&Env::Dev, None, Proto::Xray(Tag::Trojan), None);
+        let link = inbound.create_link(&id, &conn, "node", "192.0.2.1", "Test").unwrap();
+        let url = Url::parse(&link).unwrap();
+        assert_eq!(url.scheme(), "trojan");
+        assert_eq!(url.username(), id.to_string());
+        assert_eq!(url.host_str(), Some("192.0.2.1"));
+        assert_eq!(url.port(), Some(8445));
+        assert!(url.query_pairs().any(|(key, value)| key == "security" && value == "tls"));
+    }
 
     fn awg_inbound(obfuscation: Option<AwgObfuscationParams>) -> Inbound {
         Inbound {
@@ -960,7 +988,7 @@ mod tests {
             link
         );
         assert!(
-            link.ends_with("#Test%20|%20446655440000%20XHTTP-CDN"),
+            link.ends_with("#Test%20%C2%B7%20VLESS%20XHTTP%20CDN"),
             "unexpected fragment: {}",
             link
         );
