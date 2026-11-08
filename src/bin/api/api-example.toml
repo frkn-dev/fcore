@@ -148,6 +148,8 @@ enabled = true
 telegram_bot_token = ""
 telegram_chat_id = ""
 # Where an alert goes: telegram | email | both.
+# The same channel is used by POST /v1/admin/alerts/test, watchcat events and
+# snapshot-drift reports — not only by the node rules.
 channel = "telegram"
 # Envs that are logged but never pushed — machines owned by customers.
 # Prefix match; an empty list pushes for every env.

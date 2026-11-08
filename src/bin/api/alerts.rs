@@ -787,11 +787,44 @@ pub async fn send_telegram(
     Ok(())
 }
 
+/// Что ответил каждый канал. `None` — канал не выбран в конфиге.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NotifyReport {
+    pub telegram: Option<bool>,
+    pub email: Option<bool>,
+}
+
+impl NotifyReport {
+    /// Хотя бы один канал принял сообщение.
+    pub fn delivered(&self) -> bool {
+        self.telegram == Some(true) || self.email == Some(true)
+    }
+
+    /// Каналы, которые пытались доставить (для ответа админ-ручки).
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "telegram": self.telegram,
+            "email": self.email,
+            "delivered": self.delivered(),
+        })
+    }
+}
+
 /// Отправка во все каналы, которые просит `[alerts] channel`.
 /// `true`, если хотя бы один канал принял сообщение.
 pub async fn notify(cfg: &AlertsConfig, client: &reqwest::Client, text: &str) -> bool {
+    notify_report(cfg, client, text).await.delivered()
+}
+
+/// То же, но с результатом по каждому каналу — для админской «проверить
+/// алерты» ручки, чтобы было видно, что именно не дошло.
+pub async fn notify_report(
+    cfg: &AlertsConfig,
+    client: &reqwest::Client,
+    text: &str,
+) -> NotifyReport {
     let channel = cfg.notify_channel();
-    let mut delivered = false;
+    let mut report = NotifyReport::default();
 
     if channel.wants_telegram() {
         match (
@@ -800,27 +833,39 @@ pub async fn notify(cfg: &AlertsConfig, client: &reqwest::Client, text: &str) ->
         ) {
             (Some(token), Some(chat)) => {
                 match send_telegram(client, &cfg.telegram_api_base, token, chat, text).await {
-                    Ok(()) => delivered = true,
-                    Err(e) => tracing::error!("alerts: telegram delivery failed: {e}"),
+                    Ok(()) => report.telegram = Some(true),
+                    Err(e) => {
+                        tracing::error!("alerts: telegram delivery failed: {e}");
+                        report.telegram = Some(false);
+                    }
                 }
             }
-            _ => tracing::warn!("alerts: telegram is selected but token/chat_id is missing"),
+            _ => {
+                tracing::warn!("alerts: telegram is selected but token/chat_id is missing");
+                report.telegram = Some(false);
+            }
         }
     }
 
     if channel.wants_email() {
         match cfg.email.as_ref() {
             Some(email) => match send_email(email, text).await {
-                Ok(()) => delivered = true,
-                Err(e) => tracing::error!("alerts: email delivery failed: {e}"),
+                Ok(()) => report.email = Some(true),
+                Err(e) => {
+                    tracing::error!("alerts: email delivery failed: {e}");
+                    report.email = Some(false);
+                }
             },
-            None => tracing::warn!(
-                "alerts: channel asks for email but [alerts.email] is not configured"
-            ),
+            None => {
+                tracing::warn!(
+                    "alerts: channel asks for email but [alerts.email] is not configured"
+                );
+                report.email = Some(false);
+            }
         }
     }
 
-    delivered
+    report
 }
 
 /// Отправка по SMTP (`[alerts.email]`). Тема — первая строка сообщения,
@@ -1040,6 +1085,31 @@ mod tests {
         // `both` keeps working when only one side is configured.
         cfg.channel = "both".into();
         assert!(cfg.can_deliver());
+    }
+
+    #[test]
+    fn notify_report_counts_channels_separately() {
+        let none = NotifyReport::default();
+        assert!(!none.delivered());
+        assert_eq!(none.as_json()["telegram"], serde_json::Value::Null);
+
+        let telegram_only = NotifyReport {
+            telegram: Some(true),
+            email: None,
+        };
+        assert!(telegram_only.delivered());
+
+        let email_failed = NotifyReport {
+            telegram: None,
+            email: Some(false),
+        };
+        assert!(!email_failed.delivered(), "a failed channel is not delivery");
+
+        let both = NotifyReport {
+            telegram: Some(false),
+            email: Some(true),
+        };
+        assert!(both.delivered(), "one working channel is enough");
     }
 
     fn cfg_with_new_node_grace() -> AlertsConfig {

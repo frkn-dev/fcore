@@ -754,13 +754,10 @@ where
                 crate::http::handlers::watchcat::SnapshotDriftReport,
             >())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_string(
-                alerts_cfg.telegram_bot_token.clone().unwrap_or_default(),
-            ))
-            .and(with_param_string(
-                alerts_cfg.telegram_chat_id.clone().unwrap_or_default(),
-            ))
-            .and(with_param_string(alerts_cfg.telegram_api_base.clone()))
+            .and(warp::any().map({
+                let cfg = alerts_cfg.clone();
+                move || cfg.clone()
+            }))
             .and(warp::any().map(move || snapshot_drift_throttle.clone()))
             .and_then(crate::http::handlers::watchcat::snapshot_drift_handler);
 
@@ -771,13 +768,10 @@ where
             .and(warp::body::content_length_limit(16 * 1024))
             .and(warp::body::json::<crate::http::handlers::watchcat::WatchcatReport>())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_string(
-                alerts_cfg.telegram_bot_token.clone().unwrap_or_default(),
-            ))
-            .and(with_param_string(
-                alerts_cfg.telegram_chat_id.clone().unwrap_or_default(),
-            ))
-            .and(with_param_string(alerts_cfg.telegram_api_base.clone()))
+            .and(warp::any().map({
+                let cfg = alerts_cfg.clone();
+                move || cfg.clone()
+            }))
             .and(with_param_u64(alerts_cfg.watchcat_switch_throttle_sec))
             .and(with_param_u64(alerts_cfg.watchcat_intercept_throttle_sec))
             .and(with_param_u64(alerts_cfg.watchcat_no_healthy_throttle_sec))
@@ -1191,40 +1185,15 @@ where
             );
 
         let alerts_cfg = self.settings.alerts.clone();
+        let test_alerts_cfg = alerts_cfg.clone();
         let post_admin_alerts_test_route = warp::post()
             .and(warp::path!("v1" / "admin" / "alerts" / "test"))
             .and(warp::path::end())
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
             .and(warp::header::optional::<String>("authorization"))
-            .and(with_param_bool(alerts_cfg.enabled))
-            .and(with_param_string(alerts_cfg.telegram_api_base.clone()))
-            .and(with_param_string(
-                alerts_cfg.telegram_bot_token.clone().unwrap_or_default(),
-            ))
-            .and(with_param_string(
-                alerts_cfg.telegram_chat_id.clone().unwrap_or_default(),
-            ))
-            .and_then(
-                |admin_enabled: bool,
-                 admin_token: String,
-                 auth_header: Option<String>,
-                 alerts_enabled: bool,
-                 api_base: String,
-                 bot_token: String,
-                 chat_id: String| async move {
-                    crate::http::handlers::alerts::admin_alerts_test_handler(
-                        admin_enabled,
-                        admin_token,
-                        auth_header,
-                        alerts_enabled,
-                        api_base,
-                        bot_token,
-                        chat_id,
-                    )
-                    .await
-                },
-            );
+            .and(warp::any().map(move || test_alerts_cfg.clone()))
+            .and_then(crate::http::handlers::alerts::admin_alerts_test_handler);
 
         // GET /v1/admin/report/reports — отчёты клиента: кто прислал и что не так.
         let get_client_reports_route = warp::get()

@@ -67,16 +67,13 @@ where
     }
 }
 
-/// POST /v1/admin/alerts/test — отправить тестовое сообщение в тот же канал.
-#[allow(clippy::too_many_arguments)]
+/// POST /v1/admin/alerts/test — отправить тестовое сообщение во все каналы,
+/// которые выбраны в `[alerts] channel`, и вернуть результат по каждому.
 pub async fn admin_alerts_test_handler(
     admin_enabled: bool,
     admin_token: String,
     auth_header: Option<String>,
-    alerts_enabled: bool,
-    api_base: String,
-    bot_token: String,
-    chat_id: String,
+    alerts: crate::alerts::AlertsConfig,
 ) -> Result<warp::reply::Response, Rejection> {
     if !admin_enabled {
         return Ok(json_status(404, "not found"));
@@ -84,39 +81,37 @@ pub async fn admin_alerts_test_handler(
     if !check_token(auth_header, &admin_token) {
         return Ok(json_status(401, "unauthorized"));
     }
-    if !alerts_enabled || bot_token.is_empty() || chat_id.is_empty() {
+    if !alerts.can_deliver() {
         return Ok(json_status(
             400,
-            "alerts are not configured (alerts.enabled / telegram token / chat_id)",
+            "alerts are not configured (alerts.enabled / channel / telegram token+chat / email recipients)",
         ));
     }
 
+    let channel = alerts.channel.trim().to_ascii_lowercase();
     let text = format!(
-        "🧪 FRKN alerts: тестовое сообщение\n{}",
+        "🧪 FRKN alerts: тестовое сообщение\nканал: {}\nвремя: {}",
+        if channel.is_empty() { "telegram" } else { &channel },
         Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
 
     let client = reqwest::Client::new();
-    match crate::alerts::send_telegram(&client, &api_base, &bot_token, &chat_id, &text).await {
-        Ok(()) => Ok(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "status": 200,
-                "response": { "delivered": true },
-            })),
-            warp::http::StatusCode::OK,
-        )
-        .into_response()),
-        Err(e) => {
-            tracing::error!("alerts: test delivery failed: {e}");
-            Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "status": 502,
-                    "response": { "delivered": false },
-                    "message": e,
-                })),
-                warp::http::StatusCode::BAD_GATEWAY,
-            )
-            .into_response())
-        }
+    let report = crate::alerts::notify_report(&alerts, &client, &text).await;
+    if !report.delivered() {
+        tracing::error!("alerts: test delivery failed: {:?}", report);
     }
+
+    let status = if report.delivered() {
+        warp::http::StatusCode::OK
+    } else {
+        warp::http::StatusCode::BAD_GATEWAY
+    };
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "status": status.as_u16(),
+            "response": report.as_json(),
+        })),
+        status,
+    )
+    .into_response())
 }
