@@ -140,3 +140,32 @@ port = 5432
 db = "api"
 username = "postgres"
 password = "change-me"
+
+[alerts]
+# Master switch. While this is false the alert rules do not run at all: no
+# push, and no `alert_events` rows either.
+enabled = true
+telegram_bot_token = ""
+telegram_chat_id = ""
+# Per-channel switch: on/off without deleting the credentials.
+telegram_enabled = true
+# Channels are independent: an alert goes to every one that is configured —
+# Telegram below and/or [alerts.email]. The same set is used by
+# POST /v1/admin/alerts/test, watchcat events and snapshot-drift reports, not
+# only by the node rules.
+# Envs that are logged but never pushed to OUR chat — machines owned by
+# customers. Prefix match; an empty list pushes for every env.
+# A owner who bound a chat (see subscription_alert_chats) still gets their
+# own node alerts: quiet only silences the global channel.
+quiet_env_prefixes = ["personal", "custompersonal"]
+
+# Email delivery. Independent of Telegram: both fire when both are set.
+# [alerts.email]
+# enabled = true           # switch without deleting the SMTP block
+# smtp_host = "smtp.yandex.ru"
+# smtp_port = 587          # 587 = STARTTLS, 465 = implicit TLS
+# tls = "starttls"         # starttls | tls | none
+# username = "pigeon@frkn.org"
+# password = "change-me"
+# from = "FRKN alerts <pigeon@frkn.org>"
+# to = ["ops@frkn.org"]

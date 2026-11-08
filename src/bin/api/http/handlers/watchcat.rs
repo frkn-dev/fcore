@@ -194,9 +194,7 @@ impl NotifyThrottle {
 pub async fn watchcat_event_handler<N, C, S>(
     report: WatchcatReport,
     memory: MemSync<N, C, S>,
-    telegram: String,
-    chat_id: String,
-    api_base: String,
+    alerts: crate::alerts::AlertsConfig,
     switch_throttle_sec: u64,
     intercept_throttle_sec: u64,
     no_healthy_throttle_sec: u64,
@@ -261,23 +259,15 @@ where
 
     let mut notified = false;
     if allowed {
-        let token = telegram.as_str();
-        let chat = chat_id.as_str();
-        match (!token.is_empty(), !chat.is_empty()) {
-            (true, true) => {
-                let client = reqwest::Client::new();
-                let text = format_event_with_ips(&event, &node_ips);
-                match crate::alerts::send_telegram(&client, &api_base, token, chat, &text).await {
-                    Ok(()) => {
-                        notified = true;
-                        if let Err(err) = memory.db.watchcat().mark_notified(&event).await {
-                            tracing::warn!("watchcat: cannot mark notified: {err}");
-                        }
-                    }
-                    Err(err) => tracing::warn!("watchcat: telegram failed: {err}"),
-                }
+        let client = reqwest::Client::new();
+        let text = format_event_with_ips(&event, &node_ips);
+        if crate::alerts::notify(&alerts, &client, &text).await {
+            notified = true;
+            if let Err(err) = memory.db.watchcat().mark_notified(&event).await {
+                tracing::warn!("watchcat: cannot mark notified: {err}");
             }
-            _ => tracing::warn!("watchcat: telegram не настроен, событие только в таблице"),
+        } else {
+            tracing::warn!("watchcat: ни один канал не принял событие, оно только в таблице");
         }
     }
 
@@ -324,9 +314,7 @@ pub struct SnapshotDriftReport {
 pub async fn snapshot_drift_handler<N, C, S>(
     report: SnapshotDriftReport,
     memory: MemSync<N, C, S>,
-    telegram_token: String,
-    chat_id: String,
-    api_base: String,
+    alerts: crate::alerts::AlertsConfig,
     throttle: NotifyThrottle,
 ) -> Result<warp::reply::Response, Rejection>
 where
@@ -391,22 +379,11 @@ where
             "{ip_line}⚠️ {}\n{}: снапшот разошёлся с api\n{}: локально {}, в api {}\nнода обслуживает неполный набор — проверь /opt/fnode/snapshots",
             event.hostname, event.group_tag, event.detail.as_deref().unwrap_or(""), report.local, report.api
         );
-        if !telegram_token.is_empty() && !chat_id.is_empty() {
-            let client = reqwest::Client::new();
-            match crate::alerts::send_telegram(
-                &client,
-                &api_base,
-                &telegram_token,
-                &chat_id,
-                &text,
-            )
-            .await
-            {
-                Ok(()) => notified = true,
-                Err(err) => tracing::warn!("snapshot_drift: telegram failed: {err}"),
-            }
+        let client = reqwest::Client::new();
+        if crate::alerts::notify(&alerts, &client, &text).await {
+            notified = true;
         } else {
-            tracing::warn!("snapshot_drift: telegram не настроен, событие только в таблице");
+            tracing::warn!("snapshot_drift: ни один канал не принял событие, оно только в таблице");
         }
     }
 
