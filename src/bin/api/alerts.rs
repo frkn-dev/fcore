@@ -86,6 +86,35 @@ pub struct AlertsConfig {
     /// База Telegram Bot API (можно подменить на прокси).
     #[serde(default = "default_api_base")]
     pub telegram_api_base: String,
+    /// Envs, которые пишем только в лог и никогда не пушим: это машины
+    /// клиентов, а не наши. Сравнение по префиксу, поэтому `custompersonal`
+    /// накрывает `custompersonal<uuid>`. Пустой список — пушим по всем env.
+    #[serde(default = "default_quiet_env_prefixes")]
+    pub quiet_env_prefixes: Vec<String>,
+    /// Куда доставлять: `telegram` (по умолчанию), `email` или `both`.
+    #[serde(default = "default_channel")]
+    pub channel: String,
+    /// Почта для оповещений. Нужна, если `channel` = `email` или `both`.
+    #[serde(default)]
+    pub email: Option<AlertEmailConfig>,
+}
+
+/// SMTP для оповещений по почте (`[alerts.email]`).
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct AlertEmailConfig {
+    pub smtp_host: String,
+    /// 587 для STARTTLS, 465 для неявного TLS.
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    pub username: String,
+    pub password: String,
+    pub from: String,
+    /// Получатели.
+    #[serde(default)]
+    pub to: Vec<String>,
+    /// `starttls` (587), `tls` (465) или `none`. По умолчанию `starttls`.
+    #[serde(default = "default_smtp_tls")]
+    pub tls: String,
 }
 
 fn default_watchcat_switch_throttle() -> u64 {
@@ -145,6 +174,18 @@ fn default_flap_threshold() -> u64 {
 fn default_api_base() -> String {
     "https://api.telegram.org".to_string()
 }
+fn default_quiet_env_prefixes() -> Vec<String> {
+    vec!["personal".to_string(), "custompersonal".to_string()]
+}
+fn default_channel() -> String {
+    "telegram".to_string()
+}
+fn default_smtp_port() -> u16 {
+    587
+}
+fn default_smtp_tls() -> String {
+    "starttls".to_string()
+}
 
 impl Default for AlertsConfig {
     fn default() -> Self {
@@ -170,14 +211,66 @@ impl Default for AlertsConfig {
             flap_window_sec: default_flap_window(),
             flap_threshold: default_flap_threshold(),
             telegram_api_base: default_api_base(),
+            quiet_env_prefixes: default_quiet_env_prefixes(),
+            channel: default_channel(),
+            email: None,
         }
     }
 }
 
 impl AlertsConfig {
-    /// Оповещения реально могут доставляться.
+    /// Оповещения реально могут доставляться: включены и есть хотя бы один
+    /// настроенный канал.
     pub fn can_deliver(&self) -> bool {
-        self.enabled && self.telegram_bot_token.is_some() && self.telegram_chat_id.is_some()
+        if !self.enabled {
+            return false;
+        }
+        let telegram = self.telegram_bot_token.is_some() && self.telegram_chat_id.is_some();
+        let email = self.email.as_ref().map(|e| !e.to.is_empty()).unwrap_or(false);
+        match self.notify_channel() {
+            NotifyChannel::Telegram => telegram,
+            NotifyChannel::Email => email,
+            NotifyChannel::Both => telegram || email,
+        }
+    }
+
+    /// Разобранный `channel`. Неизвестное значение — Telegram, как раньше.
+    pub fn notify_channel(&self) -> NotifyChannel {
+        NotifyChannel::parse(&self.channel)
+    }
+
+    /// Env, по которому нельзя будить людей: машина клиента, а не наша.
+    /// Такие события пишем в журнал и в `alert_events`, но не пушим.
+    pub fn is_quiet_env(&self, env: &str) -> bool {
+        self.quiet_env_prefixes
+            .iter()
+            .any(|p| !p.is_empty() && env.starts_with(p.as_str()))
+    }
+}
+
+/// Куда уходит оповещение.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifyChannel {
+    Telegram,
+    Email,
+    Both,
+}
+
+impl NotifyChannel {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "email" | "mail" => Self::Email,
+            "both" | "all" => Self::Both,
+            _ => Self::Telegram,
+        }
+    }
+
+    fn wants_telegram(self) -> bool {
+        matches!(self, Self::Telegram | Self::Both)
+    }
+
+    fn wants_email(self) -> bool {
+        matches!(self, Self::Email | Self::Both)
     }
 }
 
@@ -694,6 +787,100 @@ pub async fn send_telegram(
     Ok(())
 }
 
+/// Отправка во все каналы, которые просит `[alerts] channel`.
+/// `true`, если хотя бы один канал принял сообщение.
+pub async fn notify(cfg: &AlertsConfig, client: &reqwest::Client, text: &str) -> bool {
+    let channel = cfg.notify_channel();
+    let mut delivered = false;
+
+    if channel.wants_telegram() {
+        match (
+            cfg.telegram_bot_token.as_deref(),
+            cfg.telegram_chat_id.as_deref(),
+        ) {
+            (Some(token), Some(chat)) => {
+                match send_telegram(client, &cfg.telegram_api_base, token, chat, text).await {
+                    Ok(()) => delivered = true,
+                    Err(e) => tracing::error!("alerts: telegram delivery failed: {e}"),
+                }
+            }
+            _ => tracing::warn!("alerts: telegram is selected but token/chat_id is missing"),
+        }
+    }
+
+    if channel.wants_email() {
+        match cfg.email.as_ref() {
+            Some(email) => match send_email(email, text).await {
+                Ok(()) => delivered = true,
+                Err(e) => tracing::error!("alerts: email delivery failed: {e}"),
+            },
+            None => tracing::warn!(
+                "alerts: channel asks for email but [alerts.email] is not configured"
+            ),
+        }
+    }
+
+    delivered
+}
+
+/// Отправка по SMTP (`[alerts.email]`). Тема — первая строка сообщения,
+/// тело — весь текст: алерт остаётся читаемым в превью и в поиске.
+pub async fn send_email(cfg: &AlertEmailConfig, text: &str) -> Result<(), String> {
+    use lettre::message::header::ContentType;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+    if cfg.to.is_empty() {
+        return Err("no recipients in [alerts.email] to".to_string());
+    }
+
+    let subject: String = text
+        .lines()
+        .next()
+        .unwrap_or("FRKN alert")
+        .chars()
+        .take(180)
+        .collect();
+    let mut builder = Message::builder()
+        .from(
+            cfg.from
+                .parse()
+                .map_err(|e| format!("bad from address: {e}"))?,
+        )
+        .subject(subject);
+    for to in &cfg.to {
+        builder = builder.to(to.parse().map_err(|e| format!("bad to address: {e}"))?);
+    }
+    let message = builder
+        .header(ContentType::TEXT_PLAIN)
+        .body(text.to_string())
+        .map_err(|e| format!("cannot build message: {e}"))?;
+
+    let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
+    let transport = match cfg.tls.trim().to_ascii_lowercase().as_str() {
+        "tls" | "ssl" | "implicit" => AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.smtp_host)
+            .map_err(|e| format!("bad smtp host: {e}"))?
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
+        "none" | "plain" => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_host)
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
+        _ => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.smtp_host)
+            .map_err(|e| format!("bad smtp host: {e}"))?
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
+    };
+
+    transport
+        .send(message)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("smtp send failed: {e}"))
+}
+
 /// Telegram message text (no IP list — for legacy callers and tests).
 pub fn format_message(kind: &AlertKind, hostname: &str, env: &str, duration_sec: i64) -> String {
     format_message_full(kind, hostname, env, &[], duration_sec, None)
@@ -784,7 +971,75 @@ mod tests {
             flap_window_sec: 3600,
             flap_threshold: 3,
             telegram_api_base: default_api_base(),
+            quiet_env_prefixes: default_quiet_env_prefixes(),
+            channel: default_channel(),
+            email: None,
         }
+    }
+
+    #[test]
+    fn personal_envs_are_quiet_by_default() {
+        let cfg = cfg();
+        // A customer's own machine: logged, never pushed.
+        assert!(cfg.is_quiet_env("custompersonal72483aa3a63d4e929e0f06fb49bbd8bb"));
+        assert!(cfg.is_quiet_env("personal72483aa3a63d4e929e0f06fb49bbd8bb"));
+        // Our machines still wake us up.
+        assert!(!cfg.is_quiet_env("dev"));
+        assert!(!cfg.is_quiet_env("gaming"));
+        assert!(!cfg.is_quiet_env("premium-prem02-1"));
+        assert!(!cfg.is_quiet_env("custompremium-prem-nl-01"));
+    }
+
+    #[test]
+    fn quiet_prefixes_are_configurable() {
+        let mut cfg = cfg();
+        cfg.quiet_env_prefixes = vec!["custompremium".into()];
+        assert!(!cfg.is_quiet_env("custompersonal72483aa3a63d4e929e0f06fb49bbd8bb"));
+        assert!(cfg.is_quiet_env("custompremium-a65e52c6af0e"));
+
+        // An empty list turns the filter off entirely: every env pushes.
+        cfg.quiet_env_prefixes = vec![];
+        assert!(!cfg.is_quiet_env("custompersonal72483aa3a63d4e929e0f06fb49bbd8bb"));
+        // An empty prefix must not match everything.
+        cfg.quiet_env_prefixes = vec!["".into()];
+        assert!(!cfg.is_quiet_env("dev"));
+    }
+
+    #[test]
+    fn channel_is_parsed_with_telegram_as_default() {
+        assert_eq!(NotifyChannel::parse(""), NotifyChannel::Telegram);
+        assert_eq!(NotifyChannel::parse("telegram"), NotifyChannel::Telegram);
+        assert_eq!(NotifyChannel::parse("EMAIL"), NotifyChannel::Email);
+        assert_eq!(NotifyChannel::parse(" mail "), NotifyChannel::Email);
+        assert_eq!(NotifyChannel::parse("both"), NotifyChannel::Both);
+        // A typo must not silently kill alerts.
+        assert_eq!(NotifyChannel::parse("tg"), NotifyChannel::Telegram);
+    }
+
+    #[test]
+    fn email_channel_needs_recipients() {
+        let mut cfg = cfg();
+        cfg.channel = "email".into();
+        // Telegram is configured, but the channel asks for email only.
+        assert!(!cfg.can_deliver());
+
+        cfg.email = Some(AlertEmailConfig {
+            smtp_host: "smtp.yandex.ru".into(),
+            smtp_port: 587,
+            username: "ops@frkn.org".into(),
+            password: "secret".into(),
+            from: "FRKN <pigeon@frkn.org>".into(),
+            to: vec![],
+            tls: "starttls".into(),
+        });
+        assert!(!cfg.can_deliver(), "no recipients means nothing to deliver");
+
+        cfg.email.as_mut().unwrap().to = vec!["ops@frkn.org".into()];
+        assert!(cfg.can_deliver());
+
+        // `both` keeps working when only one side is configured.
+        cfg.channel = "both".into();
+        assert!(cfg.can_deliver());
     }
 
     fn cfg_with_new_node_grace() -> AlertsConfig {

@@ -140,3 +140,25 @@ port = 5432
 db = "api"
 username = "postgres"
 password = "change-me"
+
+[alerts]
+# Master switch. While this is false the alert rules do not run at all: no
+# push, and no `alert_events` rows either.
+enabled = true
+telegram_bot_token = ""
+telegram_chat_id = ""
+# Where an alert goes: telegram | email | both.
+channel = "telegram"
+# Envs that are logged but never pushed — machines owned by customers.
+# Prefix match; an empty list pushes for every env.
+quiet_env_prefixes = ["personal", "custompersonal"]
+
+# Email delivery. Required when channel is email or both.
+# [alerts.email]
+# smtp_host = "smtp.yandex.ru"
+# smtp_port = 587          # 587 = STARTTLS, 465 = implicit TLS
+# tls = "starttls"         # starttls | tls | none
+# username = "pigeon@frkn.org"
+# password = "change-me"
+# from = "FRKN alerts <pigeon@frkn.org>"
+# to = ["ops@frkn.org"]

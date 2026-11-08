@@ -948,10 +948,12 @@ where
         let cfg = self.settings.alerts.clone();
         if !cfg.can_deliver() {
             tracing::warn!(
-                "alerts: disabled (enabled={}, telegram token={}, chat={}) — правила не работают",
+                "alerts: disabled (enabled={}, channel={}, telegram token={}, chat={}, email={}) — правила не работают",
                 cfg.enabled,
+                cfg.channel,
                 cfg.telegram_bot_token.is_some(),
-                cfg.telegram_chat_id.is_some()
+                cfg.telegram_chat_id.is_some(),
+                cfg.email.as_ref().map(|e| e.to.len()).unwrap_or(0)
             );
             // Не выходим: runtime считает завершившуюся задачу аварией.
             // Просто дремлем, пока конфиг не перечитают рестартом.
@@ -1087,28 +1089,21 @@ where
                         duration_sec,
                         detail.as_deref(),
                     );
-                    let delivered = match (
-                        cfg.telegram_bot_token.as_deref(),
-                        cfg.telegram_chat_id.as_deref(),
-                    ) {
-                        (Some(token), Some(chat)) => {
-                            match crate::alerts::send_telegram(
-                                &client,
-                                &cfg.telegram_api_base,
-                                token,
-                                chat,
-                                &text,
-                            )
-                            .await
-                            {
-                                Ok(()) => true,
-                                Err(e) => {
-                                    tracing::error!("alerts: delivery failed: {e}");
-                                    false
-                                }
-                            }
-                        }
-                        _ => false,
+                    // Nodes on a customer's own machine (personal envs) are
+                    // logged and recorded, but never pushed: their outages are
+                    // not ours to wake up for.
+                    let quiet = cfg.is_quiet_env(&env);
+                    let delivered = if quiet {
+                        tracing::info!(
+                            "alert quiet env (log only): {} {} ({}) duration={}s",
+                            kind.as_str(),
+                            hostname,
+                            env,
+                            duration_sec
+                        );
+                        false
+                    } else {
+                        crate::alerts::notify(&cfg, &client, &text).await
                     };
 
                     tracing::info!(
@@ -1125,6 +1120,7 @@ where
                         "env": env,
                         "ips": node_ips,
                         "detail": detail,
+                        "quiet": quiet,
                     });
                     if let Err(e) = self
                         .sync
