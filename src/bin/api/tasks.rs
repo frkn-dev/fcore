@@ -948,9 +948,8 @@ where
         let cfg = self.settings.alerts.clone();
         if !cfg.can_deliver() {
             tracing::warn!(
-                "alerts: disabled (enabled={}, channel={}, telegram token={}, chat={}, email={}) — правила не работают",
+                "alerts: disabled (enabled={}, telegram token={}, chat={}, email={}) — правила не работают",
                 cfg.enabled,
-                cfg.channel,
                 cfg.telegram_bot_token.is_some(),
                 cfg.telegram_chat_id.is_some(),
                 cfg.email.as_ref().map(|e| e.to.len()).unwrap_or(0)

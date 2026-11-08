@@ -67,8 +67,8 @@ where
     }
 }
 
-/// POST /v1/admin/alerts/test — отправить тестовое сообщение во все каналы,
-/// которые выбраны в `[alerts] channel`, и вернуть результат по каждому.
+/// POST /v1/admin/alerts/test — отправить тестовое сообщение во все
+/// настроенные каналы (телеграм и почта) и вернуть результат по каждому.
 pub async fn admin_alerts_test_handler(
     admin_enabled: bool,
     admin_token: String,
@@ -84,14 +84,12 @@ pub async fn admin_alerts_test_handler(
     if !alerts.can_deliver() {
         return Ok(json_status(
             400,
-            "alerts are not configured (alerts.enabled / channel / telegram token+chat / email recipients)",
+            "alerts are not configured (alerts.enabled / telegram token+chat / email recipients)",
         ));
     }
 
-    let channel = alerts.channel.trim().to_ascii_lowercase();
     let text = format!(
-        "🧪 FRKN alerts: тестовое сообщение\nканал: {}\nвремя: {}",
-        if channel.is_empty() { "telegram" } else { &channel },
+        "🧪 FRKN alerts: тестовое сообщение\nвремя: {}",
         Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
 

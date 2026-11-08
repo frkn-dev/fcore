@@ -91,10 +91,8 @@ pub struct AlertsConfig {
     /// накрывает `custompersonal<uuid>`. Пустой список — пушим по всем env.
     #[serde(default = "default_quiet_env_prefixes")]
     pub quiet_env_prefixes: Vec<String>,
-    /// Куда доставлять: `telegram` (по умолчанию), `email` или `both`.
-    #[serde(default = "default_channel")]
-    pub channel: String,
-    /// Почта для оповещений. Нужна, если `channel` = `email` или `both`.
+    /// Почта для оповещений. Отправка не зависит от Telegram: каждый
+    /// настроенный канал получает алерт, оба сразу тоже.
     #[serde(default)]
     pub email: Option<AlertEmailConfig>,
 }
@@ -177,9 +175,6 @@ fn default_api_base() -> String {
 fn default_quiet_env_prefixes() -> Vec<String> {
     vec!["personal".to_string(), "custompersonal".to_string()]
 }
-fn default_channel() -> String {
-    "telegram".to_string()
-}
 fn default_smtp_port() -> u16 {
     587
 }
@@ -212,31 +207,29 @@ impl Default for AlertsConfig {
             flap_threshold: default_flap_threshold(),
             telegram_api_base: default_api_base(),
             quiet_env_prefixes: default_quiet_env_prefixes(),
-            channel: default_channel(),
             email: None,
         }
     }
 }
 
 impl AlertsConfig {
-    /// Оповещения реально могут доставляться: включены и есть хотя бы один
-    /// настроенный канал.
-    pub fn can_deliver(&self) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        let telegram = self.telegram_bot_token.is_some() && self.telegram_chat_id.is_some();
-        let email = self.email.as_ref().map(|e| !e.to.is_empty()).unwrap_or(false);
-        match self.notify_channel() {
-            NotifyChannel::Telegram => telegram,
-            NotifyChannel::Email => email,
-            NotifyChannel::Both => telegram || email,
-        }
+    /// Telegram настроен (токен и чат).
+    pub fn telegram_ready(&self) -> bool {
+        self.telegram_bot_token.is_some() && self.telegram_chat_id.is_some()
     }
 
-    /// Разобранный `channel`. Неизвестное значение — Telegram, как раньше.
-    pub fn notify_channel(&self) -> NotifyChannel {
-        NotifyChannel::parse(&self.channel)
+    /// Почта настроена (SMTP-блок и хотя бы один получатель).
+    pub fn email_ready(&self) -> bool {
+        self.email
+            .as_ref()
+            .map(|e| !e.to.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Оповещения реально могут доставляться: включены и есть хотя бы один
+    /// настроенный канал. Каналы независимы — работают все, что настроены.
+    pub fn can_deliver(&self) -> bool {
+        self.enabled && (self.telegram_ready() || self.email_ready())
     }
 
     /// Env, по которому нельзя будить людей: машина клиента, а не наша.
@@ -245,32 +238,6 @@ impl AlertsConfig {
         self.quiet_env_prefixes
             .iter()
             .any(|p| !p.is_empty() && env.starts_with(p.as_str()))
-    }
-}
-
-/// Куда уходит оповещение.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NotifyChannel {
-    Telegram,
-    Email,
-    Both,
-}
-
-impl NotifyChannel {
-    pub fn parse(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "email" | "mail" => Self::Email,
-            "both" | "all" => Self::Both,
-            _ => Self::Telegram,
-        }
-    }
-
-    fn wants_telegram(self) -> bool {
-        matches!(self, Self::Telegram | Self::Both)
-    }
-
-    fn wants_email(self) -> bool {
-        matches!(self, Self::Email | Self::Both)
     }
 }
 
@@ -810,8 +777,8 @@ impl NotifyReport {
     }
 }
 
-/// Отправка во все каналы, которые просит `[alerts] channel`.
-/// `true`, если хотя бы один канал принял сообщение.
+/// Отправка во все настроенные каналы сразу: телеграм и почта независимы,
+/// алерт уходит в каждый, который есть в конфиге.
 pub async fn notify(cfg: &AlertsConfig, client: &reqwest::Client, text: &str) -> bool {
     notify_report(cfg, client, text).await.delivered()
 }
@@ -823,43 +790,25 @@ pub async fn notify_report(
     client: &reqwest::Client,
     text: &str,
 ) -> NotifyReport {
-    let channel = cfg.notify_channel();
     let mut report = NotifyReport::default();
 
-    if channel.wants_telegram() {
-        match (
-            cfg.telegram_bot_token.as_deref(),
-            cfg.telegram_chat_id.as_deref(),
-        ) {
-            (Some(token), Some(chat)) => {
-                match send_telegram(client, &cfg.telegram_api_base, token, chat, text).await {
-                    Ok(()) => report.telegram = Some(true),
-                    Err(e) => {
-                        tracing::error!("alerts: telegram delivery failed: {e}");
-                        report.telegram = Some(false);
-                    }
-                }
-            }
-            _ => {
-                tracing::warn!("alerts: telegram is selected but token/chat_id is missing");
+    if cfg.telegram_ready() {
+        let token = cfg.telegram_bot_token.as_deref().unwrap_or_default();
+        let chat = cfg.telegram_chat_id.as_deref().unwrap_or_default();
+        match send_telegram(client, &cfg.telegram_api_base, token, chat, text).await {
+            Ok(()) => report.telegram = Some(true),
+            Err(e) => {
+                tracing::error!("alerts: telegram delivery failed: {e}");
                 report.telegram = Some(false);
             }
         }
     }
 
-    if channel.wants_email() {
-        match cfg.email.as_ref() {
-            Some(email) => match send_email(email, text).await {
-                Ok(()) => report.email = Some(true),
-                Err(e) => {
-                    tracing::error!("alerts: email delivery failed: {e}");
-                    report.email = Some(false);
-                }
-            },
-            None => {
-                tracing::warn!(
-                    "alerts: channel asks for email but [alerts.email] is not configured"
-                );
+    if let Some(email) = cfg.email.as_ref() {
+        match send_email(email, text).await {
+            Ok(()) => report.email = Some(true),
+            Err(e) => {
+                tracing::error!("alerts: email delivery failed: {e}");
                 report.email = Some(false);
             }
         }
@@ -1017,7 +966,6 @@ mod tests {
             flap_threshold: 3,
             telegram_api_base: default_api_base(),
             quiet_env_prefixes: default_quiet_env_prefixes(),
-            channel: default_channel(),
             email: None,
         }
     }
@@ -1051,22 +999,11 @@ mod tests {
     }
 
     #[test]
-    fn channel_is_parsed_with_telegram_as_default() {
-        assert_eq!(NotifyChannel::parse(""), NotifyChannel::Telegram);
-        assert_eq!(NotifyChannel::parse("telegram"), NotifyChannel::Telegram);
-        assert_eq!(NotifyChannel::parse("EMAIL"), NotifyChannel::Email);
-        assert_eq!(NotifyChannel::parse(" mail "), NotifyChannel::Email);
-        assert_eq!(NotifyChannel::parse("both"), NotifyChannel::Both);
-        // A typo must not silently kill alerts.
-        assert_eq!(NotifyChannel::parse("tg"), NotifyChannel::Telegram);
-    }
-
-    #[test]
-    fn email_channel_needs_recipients() {
+    fn email_is_an_independent_channel() {
         let mut cfg = cfg();
-        cfg.channel = "email".into();
-        // Telegram is configured, but the channel asks for email only.
-        assert!(!cfg.can_deliver());
+        // Telegram alone is enough to deliver.
+        assert!(cfg.can_deliver());
+        assert!(!cfg.email_ready());
 
         cfg.email = Some(AlertEmailConfig {
             smtp_host: "smtp.yandex.ru".into(),
@@ -1077,14 +1014,21 @@ mod tests {
             to: vec![],
             tls: "starttls".into(),
         });
-        assert!(!cfg.can_deliver(), "no recipients means nothing to deliver");
+        assert!(!cfg.email_ready(), "no recipients means no email channel");
+        assert!(cfg.can_deliver(), "telegram still works");
 
         cfg.email.as_mut().unwrap().to = vec!["ops@frkn.org".into()];
+        assert!(cfg.email_ready());
+
+        // Email alone is enough too: removing telegram must not disable alerts.
+        cfg.telegram_bot_token = None;
+        cfg.telegram_chat_id = None;
+        assert!(!cfg.telegram_ready());
         assert!(cfg.can_deliver());
 
-        // `both` keeps working when only one side is configured.
-        cfg.channel = "both".into();
-        assert!(cfg.can_deliver());
+        // Neither channel — nothing to deliver.
+        cfg.email = None;
+        assert!(!cfg.can_deliver());
     }
 
     #[test]
