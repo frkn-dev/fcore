@@ -67,6 +67,58 @@ where
     }
 }
 
+/// Тело `POST /v1/admin/alerts/send`: свободный текст от другого сервиса
+/// (payment-gw шлёт так пустой сток ключей — молча терять оплаченный заказ
+/// нельзя, а своего SMTP у гейтвея нет).
+#[derive(Debug, serde::Deserialize)]
+pub struct SendAlertRequest {
+    #[serde(default)]
+    pub subject: String,
+    pub text: String,
+}
+
+const MAX_ALERT_TEXT: usize = 8000;
+
+/// POST /v1/admin/alerts/send — отправить произвольное оповещение в
+/// настроенные каналы. Ручка под `with_service_or_admin_auth`: её дёргают
+/// наши же бекенды сервисным токеном (payment-gw сообщает о пустом стоке
+/// ключей — своего SMTP у гейтвея нет).
+pub async fn admin_alerts_send_handler(
+    alerts: crate::alerts::AlertsConfig,
+    body: SendAlertRequest,
+) -> Result<warp::reply::Response, Rejection> {
+    if !alerts.can_deliver() {
+        return Ok(json_status(400, "alerts are not configured"));
+    }
+    let text = body.text.trim();
+    if text.is_empty() {
+        return Ok(json_status(400, "empty text"));
+    }
+    let text: String = text.chars().take(MAX_ALERT_TEXT).collect();
+    let subject = body.subject.trim();
+    let subject = if subject.is_empty() {
+        crate::alerts::email_subject("ops")
+    } else {
+        subject.chars().take(200).collect()
+    };
+
+    let client = reqwest::Client::new();
+    let report = crate::alerts::notify_report(&alerts, &client, &subject, "ops", &text).await;
+    if !report.delivered() {
+        tracing::error!("alerts: ops message delivery failed: {:?}", report);
+    }
+
+    let code = if report.delivered() { 200 } else { 502 };
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "status": code,
+            "response": report.as_json(),
+        })),
+        warp::http::StatusCode::from_u16(code).unwrap_or(warp::http::StatusCode::BAD_GATEWAY),
+    )
+    .into_response())
+}
+
 /// POST /v1/admin/alerts/test — отправить тестовое сообщение во все
 /// настроенные каналы (телеграм и почта) и вернуть результат по каждому.
 pub async fn admin_alerts_test_handler(

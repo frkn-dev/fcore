@@ -1234,6 +1234,17 @@ where
             .and(warp::any().map(move || test_alerts_cfg.clone()))
             .and_then(crate::http::handlers::alerts::admin_alerts_test_handler);
 
+        let send_alerts_cfg = alerts_cfg.clone();
+        let post_admin_alerts_send_route = warp::post()
+            .and(warp::path!("v1" / "admin" / "alerts" / "send"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::any().map(move || send_alerts_cfg.clone()))
+            .and(warp::body::json::<
+                crate::http::handlers::alerts::SendAlertRequest,
+            >())
+            .and_then(crate::http::handlers::alerts::admin_alerts_send_handler);
+
         // GET /v1/admin/report/reports — отчёты клиента: кто прислал и что не так.
         let get_client_reports_route = warp::get()
             .and(warp::path("v1"))
@@ -1790,6 +1801,7 @@ where
             .or(get_entry_usage_admin_route)
             .or(get_admin_alerts_route)
             .or(post_admin_alerts_test_route)
+            .or(post_admin_alerts_send_route)
             // Mesh
             .or(mesh_routes)
             // Admin
