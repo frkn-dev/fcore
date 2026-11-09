@@ -261,7 +261,8 @@ where
     if allowed {
         let client = reqwest::Client::new();
         let text = format_event_with_ips(&event, &node_ips);
-        if crate::alerts::notify(&alerts, &client, &text).await {
+        let subject = crate::alerts::email_subject(&event.hostname);
+        if crate::alerts::notify(&alerts, &client, &subject, &event.hostname, &text).await {
             notified = true;
             if let Err(err) = memory.db.watchcat().mark_notified(&event).await {
                 tracing::warn!("watchcat: cannot mark notified: {err}");
@@ -380,7 +381,8 @@ where
             event.hostname, event.group_tag, event.detail.as_deref().unwrap_or(""), report.local, report.api
         );
         let client = reqwest::Client::new();
-        if crate::alerts::notify(&alerts, &client, &text).await {
+        let subject = crate::alerts::email_subject(&event.hostname);
+        if crate::alerts::notify(&alerts, &client, &subject, &event.hostname, &text).await {
             notified = true;
         } else {
             tracing::warn!("snapshot_drift: ни один канал не принял событие, оно только в таблице");

@@ -1119,7 +1119,11 @@ where
                         );
                         (false, "quiet")
                     } else {
-                        (crate::alerts::notify(&cfg, &client, &text).await, "global")
+                        let subject = crate::alerts::email_subject(&hostname);
+                        (
+                            crate::alerts::notify(&cfg, &client, &subject, &hostname, &text).await,
+                            "global",
+                        )
                     };
 
                     tracing::info!(
