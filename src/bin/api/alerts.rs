@@ -835,10 +835,43 @@ pub async fn send_to_telegram_chat(
     }
 }
 
+/// Тема письма постоянна для одного хоста: почтовый клиент собирает алерты
+/// по этому хосту в один тред, а само правило (офлайн / вернулась / мигает)
+/// остаётся в теле. IP в теме смысла не имеет — их и так видно в тексте.
+pub fn email_subject(hostname: &str) -> String {
+    format!("[FRKN] {}", hostname.trim())
+}
+
+/// Хост, безопасный для заголовков письма: только буквы, цифры, точка, дефис
+/// и подчёркивание. Всё остальное выбрасываем, чтобы не собрать битый заголовок.
+fn header_token(hostname: &str) -> String {
+    let token: String = hostname
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect();
+    if token.is_empty() {
+        "unknown".to_string()
+    } else {
+        token
+    }
+}
+
+/// Корень треда для хоста: один и тот же у всех его алертов, поэтому клиенты,
+/// которые смотрят на `References`, тоже собирают их вместе.
+fn thread_root(hostname: &str) -> String {
+    format!("<frkn-alerts-{}@frkn.org>", header_token(hostname))
+}
+
 /// Отправка во все настроенные каналы сразу: телеграм и почта независимы,
 /// алерт уходит в каждый, который есть в конфиге.
-pub async fn notify(cfg: &AlertsConfig, client: &reqwest::Client, text: &str) -> bool {
-    notify_report(cfg, client, text).await.delivered()
+pub async fn notify(
+    cfg: &AlertsConfig,
+    client: &reqwest::Client,
+    subject: &str,
+    host: &str,
+    text: &str,
+) -> bool {
+    notify_report(cfg, client, subject, host, text).await.delivered()
 }
 
 /// То же, но с результатом по каждому каналу — для админской «проверить
@@ -846,6 +879,8 @@ pub async fn notify(cfg: &AlertsConfig, client: &reqwest::Client, text: &str) ->
 pub async fn notify_report(
     cfg: &AlertsConfig,
     client: &reqwest::Client,
+    subject: &str,
+    host: &str,
     text: &str,
 ) -> NotifyReport {
     let mut report = NotifyReport::default();
@@ -863,7 +898,7 @@ pub async fn notify_report(
     }
 
     if let Some(email) = cfg.email.as_ref().filter(|e| e.enabled) {
-        match send_email(email, text).await {
+        match send_email(email, subject, host, text).await {
             Ok(()) => report.email = Some(true),
             Err(e) => {
                 tracing::error!("alerts: email delivery failed: {e}");
@@ -877,7 +912,12 @@ pub async fn notify_report(
 
 /// Отправка по SMTP (`[alerts.email]`). Тема — первая строка сообщения,
 /// тело — весь текст: алерт остаётся читаемым в превью и в поиске.
-pub async fn send_email(cfg: &AlertEmailConfig, text: &str) -> Result<(), String> {
+pub async fn send_email(
+    cfg: &AlertEmailConfig,
+    subject: &str,
+    host: &str,
+    text: &str,
+) -> Result<(), String> {
     use lettre::message::header::ContentType;
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
@@ -886,20 +926,17 @@ pub async fn send_email(cfg: &AlertEmailConfig, text: &str) -> Result<(), String
         return Err("no recipients in [alerts.email] to".to_string());
     }
 
-    let subject: String = text
-        .lines()
-        .next()
-        .unwrap_or("FRKN alert")
-        .chars()
-        .take(180)
-        .collect();
     let mut builder = Message::builder()
         .from(
             cfg.from
                 .parse()
                 .map_err(|e| format!("bad from address: {e}"))?,
         )
-        .subject(subject);
+        .subject(subject.to_string())
+        // Same root for every alert of this host: clients that thread on
+        // References (Apple Mail, Thunderbird) group them even if they ignore
+        // the subject.
+        .references(thread_root(host));
     for to in &cfg.to {
         builder = builder.to(to.parse().map_err(|e| format!("bad to address: {e}"))?);
     }
@@ -1140,6 +1177,28 @@ mod tests {
         assert!(!cfg.email_ready());
         assert!(!cfg.can_deliver());
         assert!(cfg.email.is_some(), "disabled is not the same as unconfigured");
+    }
+
+    #[test]
+    fn mail_subject_is_stable_per_host() {
+        // The subject carries the host, not the rule: that is what makes a
+        // mail client group every alert of one node into a single thread.
+        assert_eq!(email_subject("ee.frkn.org"), "[FRKN] ee.frkn.org");
+        assert_eq!(email_subject("  vdska  "), "[FRKN] vdska");
+        assert_eq!(
+            email_subject("ee.frkn.org"),
+            email_subject("ee.frkn.org"),
+            "same host must always produce the same subject"
+        );
+        assert_ne!(email_subject("ee.frkn.org"), email_subject("nl2.frkn.org"));
+    }
+
+    #[test]
+    fn mail_thread_root_stays_inside_headers() {
+        assert_eq!(thread_root("ee.frkn.org"), "<frkn-alerts-ee.frkn.org@frkn.org>");
+        // Nothing that could break a header survives the filter.
+        assert_eq!(thread_root("bad host <script>"), "<frkn-alerts-badhostscript@frkn.org>");
+        assert_eq!(thread_root(""), "<frkn-alerts-unknown@frkn.org>");
     }
 
     #[test]
