@@ -270,6 +270,19 @@ pub enum AlertKind {
 }
 
 impl AlertKind {
+    /// Short Russian label for the mail subject: the on-call person should see
+    /// what happened without opening the thread.
+    pub fn label_ru(&self) -> &'static str {
+        match self {
+            Self::NodeOffline => "офлайн",
+            Self::NodeOfflineLong => "лежит > 1 ч",
+            Self::NodeRecovered => "снова онлайн",
+            Self::NodeFlapping => "мигает",
+            Self::NodeCpuHigh => "CPU",
+            Self::NodeDiskHigh => "диск",
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::NodeOffline => "node_offline",
@@ -842,6 +855,22 @@ pub fn email_subject(hostname: &str) -> String {
     format!("[FRKN] {}", hostname.trim())
 }
 
+/// Subject with the state: `[FRKN] ee.frkn.org — офлайн`. The subject used to
+/// be host-only so every alert of one node landed in a single thread, but then
+/// the mailbox list said nothing and the message had to be opened to see what
+/// happened. The cost is one thread per (node, state) instead of per node —
+/// `References` still points at the per-host root, so clients that thread on
+/// headers keep them next to each other.
+pub fn email_subject_state(hostname: &str, state: &str) -> String {
+    let host = hostname.trim();
+    let state = state.trim();
+    if state.is_empty() {
+        email_subject(host)
+    } else {
+        format!("[FRKN] {host} — {state}")
+    }
+}
+
 /// Хост, безопасный для заголовков письма: только буквы, цифры, точка, дефис
 /// и подчёркивание. Всё остальное выбрасываем, чтобы не собрать битый заголовок.
 fn header_token(hostname: &str) -> String {
@@ -1177,6 +1206,22 @@ mod tests {
         assert!(!cfg.email_ready());
         assert!(!cfg.can_deliver());
         assert!(cfg.email.is_some(), "disabled is not the same as unconfigured");
+    }
+
+    #[test]
+    fn mail_subject_carries_the_state() {
+        assert_eq!(
+            email_subject_state("ee.frkn.org", "офлайн"),
+            "[FRKN] ee.frkn.org — офлайн"
+        );
+        assert_eq!(
+            email_subject_state("  ee.frkn.org ", " снова онлайн "),
+            "[FRKN] ee.frkn.org — снова онлайн"
+        );
+        // Empty state degrades to the host-only form, never to a dangling dash.
+        assert_eq!(email_subject_state("ee.frkn.org", ""), "[FRKN] ee.frkn.org");
+        assert_eq!(AlertKind::NodeOffline.label_ru(), "офлайн");
+        assert_eq!(AlertKind::NodeRecovered.label_ru(), "снова онлайн");
     }
 
     #[test]

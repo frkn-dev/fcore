@@ -146,7 +146,7 @@ pub async fn admin_alerts_test_handler(
     );
 
     let client = reqwest::Client::new();
-    let subject = crate::alerts::email_subject("test");
+    let subject = crate::alerts::email_subject_state("test", "проверка канала");
     let report = crate::alerts::notify_report(&alerts, &client, &subject, "test", &text).await;
     if !report.delivered() {
         tracing::error!("alerts: test delivery failed: {:?}", report);
