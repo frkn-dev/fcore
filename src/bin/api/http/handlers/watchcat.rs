@@ -154,6 +154,17 @@ pub fn format_event_with_ips(event: &WatchcatEvent, node_ips: &[String]) -> Stri
     }
 }
 
+/// Same emoji the event body uses.
+pub fn event_emoji(kind: &str) -> &'static str {
+    match kind {
+        "switch" => "🔀",
+        "no_healthy" => "🛑",
+        "intercept_broken" => "⚠️",
+        "quarantine" => "🚧",
+        _ => "ℹ️",
+    }
+}
+
 /// Short Russian label for the mail subject of a watchcat event.
 pub fn event_state_label(kind: &str) -> &'static str {
     match kind {
@@ -274,6 +285,7 @@ where
         let text = format_event_with_ips(&event, &node_ips);
         let subject = crate::alerts::email_subject_state(
             &event.hostname,
+            event_emoji(&event.kind),
             event_state_label(&event.kind),
         );
         if crate::alerts::notify(&alerts, &client, &subject, &event.hostname, &text).await {
@@ -395,7 +407,7 @@ where
             event.hostname, event.group_tag, event.detail.as_deref().unwrap_or(""), report.local, report.api
         );
         let client = reqwest::Client::new();
-        let subject = crate::alerts::email_subject_state(&event.hostname, "снапшот");
+        let subject = crate::alerts::email_subject_state(&event.hostname, "⚠️", "снапшот");
         if crate::alerts::notify(&alerts, &client, &subject, &event.hostname, &text).await {
             notified = true;
         } else {

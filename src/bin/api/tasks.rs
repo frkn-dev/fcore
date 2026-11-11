@@ -1121,6 +1121,7 @@ where
                     } else {
                         let subject = crate::alerts::email_subject_state(
                             &hostname,
+                            kind.emoji(),
                             kind.label_ru(),
                         );
                         (

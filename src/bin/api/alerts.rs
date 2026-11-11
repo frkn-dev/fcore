@@ -270,6 +270,19 @@ pub enum AlertKind {
 }
 
 impl AlertKind {
+    /// Same circle the message body uses, so the mailbox list and the text
+    /// agree at a glance.
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            Self::NodeOffline => "🔴",
+            Self::NodeOfflineLong => "🚨",
+            Self::NodeRecovered => "🟢",
+            Self::NodeFlapping => "🟠",
+            Self::NodeCpuHigh => "🔥",
+            Self::NodeDiskHigh => "💾",
+        }
+    }
+
     /// Short Russian label for the mail subject: the on-call person should see
     /// what happened without opening the thread.
     pub fn label_ru(&self) -> &'static str {
@@ -861,13 +874,15 @@ pub fn email_subject(hostname: &str) -> String {
 /// happened. The cost is one thread per (node, state) instead of per node —
 /// `References` still points at the per-host root, so clients that thread on
 /// headers keep them next to each other.
-pub fn email_subject_state(hostname: &str, state: &str) -> String {
+pub fn email_subject_state(hostname: &str, emoji: &str, state: &str) -> String {
     let host = hostname.trim();
     let state = state.trim();
-    if state.is_empty() {
-        email_subject(host)
-    } else {
-        format!("[FRKN] {host} — {state}")
+    let emoji = emoji.trim();
+    match (emoji.is_empty(), state.is_empty()) {
+        (false, false) => format!("[FRKN] {emoji} {host} — {state}"),
+        (false, true) => format!("[FRKN] {emoji} {host}"),
+        (true, false) => format!("[FRKN] {host} — {state}"),
+        (true, true) => email_subject(host),
     }
 }
 
@@ -1211,15 +1226,25 @@ mod tests {
     #[test]
     fn mail_subject_carries_the_state() {
         assert_eq!(
-            email_subject_state("ee.frkn.org", "офлайн"),
+            email_subject_state("ee.frkn.org", "🔴", "офлайн"),
+            "[FRKN] 🔴 ee.frkn.org — офлайн"
+        );
+        assert_eq!(
+            email_subject_state("  ee.frkn.org ", " 🟢 ", " снова онлайн "),
+            "[FRKN] 🟢 ee.frkn.org — снова онлайн"
+        );
+        // Empty pieces degrade, never leaving a dangling dash or double space.
+        assert_eq!(
+            email_subject_state("ee.frkn.org", "", "офлайн"),
             "[FRKN] ee.frkn.org — офлайн"
         );
         assert_eq!(
-            email_subject_state("  ee.frkn.org ", " снова онлайн "),
-            "[FRKN] ee.frkn.org — снова онлайн"
+            email_subject_state("ee.frkn.org", "🔴", ""),
+            "[FRKN] 🔴 ee.frkn.org"
         );
-        // Empty state degrades to the host-only form, never to a dangling dash.
-        assert_eq!(email_subject_state("ee.frkn.org", ""), "[FRKN] ee.frkn.org");
+        assert_eq!(email_subject_state("ee.frkn.org", "", ""), "[FRKN] ee.frkn.org");
+        assert_eq!(AlertKind::NodeOffline.emoji(), "🔴");
+        assert_eq!(AlertKind::NodeRecovered.emoji(), "🟢");
         assert_eq!(AlertKind::NodeOffline.label_ru(), "офлайн");
         assert_eq!(AlertKind::NodeRecovered.label_ru(), "снова онлайн");
     }
