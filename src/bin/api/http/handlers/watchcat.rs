@@ -154,6 +154,17 @@ pub fn format_event_with_ips(event: &WatchcatEvent, node_ips: &[String]) -> Stri
     }
 }
 
+/// Short Russian label for the mail subject of a watchcat event.
+pub fn event_state_label(kind: &str) -> &'static str {
+    match kind {
+        "switch" => "переключение",
+        "no_healthy" => "нет живых выходов",
+        "intercept_broken" => "перехват не работает",
+        "quarantine" => "карантин",
+        _ => "событие",
+    }
+}
+
 /// Троттлинг уведомлений: ключ (нода, группа, тип) -> когда в прошлый раз.
 #[derive(Clone, Default)]
 pub struct NotifyThrottle {
@@ -261,7 +272,10 @@ where
     if allowed {
         let client = reqwest::Client::new();
         let text = format_event_with_ips(&event, &node_ips);
-        let subject = crate::alerts::email_subject(&event.hostname);
+        let subject = crate::alerts::email_subject_state(
+            &event.hostname,
+            event_state_label(&event.kind),
+        );
         if crate::alerts::notify(&alerts, &client, &subject, &event.hostname, &text).await {
             notified = true;
             if let Err(err) = memory.db.watchcat().mark_notified(&event).await {
@@ -381,7 +395,7 @@ where
             event.hostname, event.group_tag, event.detail.as_deref().unwrap_or(""), report.local, report.api
         );
         let client = reqwest::Client::new();
-        let subject = crate::alerts::email_subject(&event.hostname);
+        let subject = crate::alerts::email_subject_state(&event.hostname, "снапшот");
         if crate::alerts::notify(&alerts, &client, &subject, &event.hostname, &text).await {
             notified = true;
         } else {
