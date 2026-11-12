@@ -144,6 +144,21 @@ where
             tracing::warn!("alerts: task not started (no telegram token/chat_id)");
         }
 
+        if self.settings.digest.enabled
+            && self.settings.alerts.email.as_ref().map(|e| !e.to.is_empty()).unwrap_or(false)
+        {
+            spawn_task("digest_scheduler", {
+                let service = Arc::clone(&self);
+                // Каждые 10 минут: фактическая отправка — раз в сутки по
+                // локальному часу из конфига, отметка живёт в digest_runs.
+                async move {
+                    service.digest_scheduler(600).await;
+                }
+            });
+        } else {
+            tracing::info!("digest: task not started (disabled or no email recipients)");
+        }
+
         spawn_task("purge_block_observations", {
             let service = Arc::clone(&self);
             // Раз в сутки: сырые наблюдения живут 30 дней.

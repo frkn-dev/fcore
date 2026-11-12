@@ -1,5 +1,6 @@
 pub(crate) mod alerts;
 pub(crate) mod connect;
+pub(crate) mod digest;
 pub(crate) mod watchcat;
 pub(crate) mod connection;
 pub(crate) mod iap;

@@ -956,6 +956,72 @@ pub async fn notify_report(
 
 /// Отправка по SMTP (`[alerts.email]`). Тема — первая строка сообщения,
 /// тело — весь текст: алерт остаётся читаемым в превью и в поиске.
+/// SMTP-транспорт из конфига: один и тот же для алертов и для сводок.
+fn smtp_transport(
+    cfg: &AlertEmailConfig,
+) -> Result<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>, String> {
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{AsyncSmtpTransport, Tokio1Executor};
+
+    let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
+    Ok(match cfg.tls.trim().to_ascii_lowercase().as_str() {
+        "tls" | "ssl" | "implicit" => AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.smtp_host)
+            .map_err(|e| format!("bad smtp host: {e}"))?
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
+        "none" | "plain" => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_host)
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
+        _ => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.smtp_host)
+            .map_err(|e| format!("bad smtp host: {e}"))?
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
+    })
+}
+
+/// HTML-письмо с текстовым фолбэком: сводки читаются с телефона, и таблицы в
+/// HTML выглядят заметно лучше выровненного текста.
+pub async fn send_email_html(
+    cfg: &AlertEmailConfig,
+    subject: &str,
+    text: &str,
+    html: &str,
+) -> Result<(), String> {
+    use lettre::message::MultiPart;
+    use lettre::{AsyncTransport, Message};
+
+    if cfg.to.is_empty() {
+        return Err("no recipients in [alerts.email] to".to_string());
+    }
+
+    let mut builder = Message::builder()
+        .from(
+            cfg.from
+                .parse()
+                .map_err(|e| format!("bad from address: {e}"))?,
+        )
+        .subject(subject.to_string());
+    for to in &cfg.to {
+        builder = builder.to(to.parse().map_err(|e| format!("bad to address: {e}"))?);
+    }
+
+    let message = builder
+        .multipart(
+            MultiPart::alternative_plain_html(
+                text.to_string(),
+                format!(
+                    "<html><body style=\"margin:0;padding:18px;background:#fff\">{html}</body></html>"
+                ),
+            ),
+        )
+        .map_err(|e| format!("cannot build message: {e}"))?;
+
+    smtp_transport(cfg)?.send(message).await.map(|_| ()).map_err(|e| format!("smtp send failed: {e}"))
+}
+
 pub async fn send_email(
     cfg: &AlertEmailConfig,
     subject: &str,
