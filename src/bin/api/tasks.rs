@@ -36,6 +36,9 @@ pub trait Tasks {
     async fn persist_exit_usage(&self, interval_sec: u64);
     async fn purge_usage(&self, interval_sec: u64);
     async fn monitor_alerts(&self, interval_sec: u64);
+    /// Сводки по системе: раз в `interval_sec` проверяет, не пора ли отправить
+    /// daily / weekly / monthly отчёт (отметки об отправке — в `digest_runs`).
+    async fn digest_scheduler(&self, interval_sec: u64);
 
     async fn monitor_node_heartbeats(&self, check_interval_sec: u64, offline_threshold_sec: u64);
     async fn persist_connection_traffic(&self, interval_sec: u64);
@@ -944,6 +947,45 @@ where
     }
 
     /// Правила оповещений: нода офлайн дольше порога и её возвращение.
+    async fn digest_scheduler(&self, interval_sec: u64) {
+        let cfg = self.settings.digest.clone();
+        let email = match self.settings.alerts.email.clone() {
+            Some(e) if !e.to.is_empty() && e.enabled => e,
+            _ => {
+                tracing::warn!("digest: нет [alerts.email].to — сводки не отправляются");
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+            }
+        };
+        if !cfg.enabled {
+            tracing::info!("digest: выключен в конфиге ([digest].enabled = false)");
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        }
+        tracing::info!(
+            "digest: started (hour {} local, offset {}, weekly {}, monthly {})",
+            cfg.hour,
+            cfg.utc_offset_hours,
+            cfg.weekly,
+            cfg.monthly
+        );
+        let mut tick = tokio::time::interval(Duration::from_secs(interval_sec));
+        loop {
+            tick.tick().await;
+            match self.sync.db.digest().run_due(&cfg, &email).await {
+                Ok(sent) if !sent.is_empty() => {
+                    for subject in sent {
+                        tracing::info!("digest: отправлено — {subject}");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!("digest: ошибка планировщика: {e}"),
+            }
+        }
+    }
+
     async fn monitor_alerts(&self, interval_sec: u64) {
         let cfg = self.settings.alerts.clone();
         if !cfg.can_deliver() {

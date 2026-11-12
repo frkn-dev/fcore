@@ -12,6 +12,7 @@ use crate::{
 mod alerts;
 mod bootstrap;
 mod config;
+mod digest;
 mod entitlements;
 mod http;
 mod iap;

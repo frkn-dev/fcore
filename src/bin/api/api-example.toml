@@ -169,3 +169,12 @@ quiet_env_prefixes = ["personal", "custompersonal"]
 # password = "change-me"
 # from = "FRKN alerts <pigeon@frkn.org>"
 # to = ["ops@frkn.org"]
+
+# Сводки по системе в почту: daily каждый день, weekly по понедельникам,
+# monthly 1-го числа. Отправляются только если задан [alerts.email].
+# [digest]
+# enabled = true
+# hour = 9                # локальный час отправки
+# utc_offset_hours = 3    # МСК
+# weekly = true
+# monthly = true

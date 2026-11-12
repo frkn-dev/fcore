@@ -16,6 +16,9 @@ pub struct ServiceSettings {
     /// Правила оповещений (нода офлайн / вернулась).
     #[serde(default)]
     pub alerts: crate::alerts::AlertsConfig,
+    /// Сводки по системе (daily / weekly / monthly) в почту.
+    #[serde(default)]
+    pub digest: crate::digest::DigestConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]

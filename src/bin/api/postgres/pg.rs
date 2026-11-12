@@ -159,6 +159,10 @@ impl PgContext {
     pub fn private_feed(&self) -> PgPrivateFeed {
         PgPrivateFeed::new(self.manager.clone())
     }
+
+    pub fn digest(&self) -> crate::postgres::digest::PgDigest {
+        crate::postgres::digest::PgDigest::new(self.manager.clone())
+    }
 }
 
 #[async_trait::async_trait]
