@@ -221,7 +221,8 @@ impl Digest {
         d.by_env = client
             .query(
                 r#"select case
-                            when n.env like 'custompersonal%' or n.env like 'personal%' then 'личные'
+                            when n.env ilike 'custompersonal%' or n.env ilike 'personal%' then 'личные'
+                            when n.env ilike 'custompremium%' or n.env ilike 'premium%' then 'премиум'
                             else n.env
                           end as grp,
                           count(*),
@@ -261,12 +262,20 @@ impl Digest {
             .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
             .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
 
+        // Простой считаем по худшему эпизоду на ноду и не длиннее окна:
+        // иначе одна и та же авария складывается из node_offline и
+        // node_offline_long и «простой» получается больше календаря.
+        let window_secs = (to - from).num_seconds().max(1);
         let downtime: i64 = client
             .query_one(
-                r#"select coalesce(sum(duration_sec), 0)::bigint from alert_events
-                   where created_at >= $1 and created_at < $2
-                     and rule like 'node_offline%'"#,
-                &[&from, &to],
+                r#"select coalesce(sum(least(biggest, $3)), 0)::bigint from (
+                       select max(duration_sec) as biggest
+                       from alert_events
+                       where created_at >= $1 and created_at < $2
+                         and rule = 'node_offline'
+                       group by hostname
+                   ) t"#,
+                &[&from, &to, &window_secs],
             )
             .await?
             .try_get::<_, i64>(0)?;
@@ -375,13 +384,12 @@ impl Digest {
 
     fn window_label(&self) -> String {
         match (self.from, self.to) {
-            (Some(f), Some(t)) => {
-                if self.kind == Some(DigestKind::Monthly) {
-                    format!("{}", (t - Duration::days(1)).format("%m.%Y"))
-                } else {
-                    format!("{} — {}", f.format("%d.%m"), (t - Duration::days(1)).format("%d.%m"))
-                }
-            }
+            (Some(f), Some(t)) => match self.kind {
+                // за сутки — одна дата, иначе «10.11 — 10.11» в теме и в шапке
+                Some(DigestKind::Daily) => f.format("%d.%m").to_string(),
+                Some(DigestKind::Monthly) => (t - Duration::days(1)).format("%m.%Y").to_string(),
+                _ => format!("{} — {}", f.format("%d.%m"), (t - Duration::days(1)).format("%d.%m")),
+            },
             _ => String::new(),
         }
     }
@@ -401,8 +409,7 @@ impl Digest {
     pub fn subject(&self) -> String {
         let kind = self.kind.unwrap_or(DigestKind::Daily);
         format!(
-            "[FRKN] 📊 {} за {} — {} / {} нод онлайн, {} алертов, {} подключений",
-            kind.title().to_lowercase(),
+            "[FRKN] 📊 сводка за {} — {} / {} нод онлайн, {} алертов, {} подключений",
             self.window_label(),
             self.nodes_online,
             self.nodes_total,
