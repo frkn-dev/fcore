@@ -188,7 +188,7 @@ impl Digest {
                 &[&at],
             )
             .await?;
-        Ok(row.get(0))
+        row.try_get::<_, i64>(0)
     }
 
     pub async fn collect(
@@ -215,8 +215,8 @@ impl Digest {
                 &[&heartbeat_alive_ms],
             )
             .await?;
-        d.nodes_total = row.get(0);
-        d.nodes_online = row.get(1);
+        d.nodes_total = row.try_get(0)?;
+        d.nodes_online = row.try_get(1)?;
 
         d.by_env = client
             .query(
@@ -232,8 +232,8 @@ impl Digest {
             )
             .await?
             .iter()
-            .map(|r| (r.get(0), r.get(1), r.get(2)))
-            .collect();
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
 
         // --- алерты -----------------------------------------------------
         d.alerts_by_rule = client
@@ -245,8 +245,8 @@ impl Digest {
             )
             .await?
             .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect();
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
         d.alerts_total = d.alerts_by_rule.iter().map(|(_, c)| *c).sum();
 
         d.alert_hosts = client
@@ -258,18 +258,18 @@ impl Digest {
             )
             .await?
             .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect();
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
 
         let downtime: i64 = client
             .query_one(
-                r#"select coalesce(sum(duration_sec), 0) from alert_events
+                r#"select coalesce(sum(duration_sec), 0)::bigint from alert_events
                    where created_at >= $1 and created_at < $2
                      and rule like 'node_offline%'"#,
                 &[&from, &to],
             )
             .await?
-            .get(0);
+            .try_get::<_, i64>(0)?;
         d.downtime_minutes = downtime / 60;
 
         // --- клиенты ----------------------------------------------------
@@ -280,8 +280,8 @@ impl Digest {
                 &[&from, &to],
             )
             .await?;
-        d.connects = row.get(0);
-        d.connecting_subs = row.get(1);
+        d.connects = row.try_get(0)?;
+        d.connecting_subs = row.try_get(1)?;
 
         d.by_protocol = client
             .query(
@@ -291,8 +291,8 @@ impl Digest {
             )
             .await?
             .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect();
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
 
         d.by_country = client
             .query(
@@ -303,8 +303,8 @@ impl Digest {
             )
             .await?
             .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect();
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
 
         // --- бизнес: люди ----------------------------------------------
         d.active_now = Self::active_at(client, to).await?;
@@ -317,7 +317,7 @@ impl Digest {
                 &[&from, &to],
             )
             .await?
-            .get(0);
+            .try_get::<_, i64>(0)?;
 
         d.expired = client
             .query_one(
@@ -346,8 +346,8 @@ impl Digest {
             )
             .await?
             .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect();
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
 
         // --- тренд ------------------------------------------------------
         // Точки — концы периодов: 7 дней / 8 недель / 12 месяцев.
