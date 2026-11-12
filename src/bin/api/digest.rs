@@ -205,7 +205,8 @@ impl Digest {
         };
 
         // --- флот -------------------------------------------------------
-        let heartbeat_alive_ms = (Utc::now().timestamp_millis() - 240_000) as f64;
+        // bigint column: bind an i64, or tokio_postgres refuses to serialise f64
+        let heartbeat_alive_ms: i64 = Utc::now().timestamp_millis() - 240_000;
         let row = client
             .query_one(
                 r#"select count(*),
@@ -609,4 +610,58 @@ pub async fn run(
     }
     send_digest(cfg, &subject, &text, &digest.render_html()).await?;
     Ok((subject, text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn daily_window_is_yesterday_in_local_time() {
+        let cfg = DigestConfig::default(); // +3
+        let now = utc("2026-11-12T06:00:00Z"); // 09:00 MSK
+        let (from, to) = cfg.window_utc(DigestKind::Daily, now);
+        // вчерашние сутки по МСК = 11.11 00:00..12.11 00:00 MSK
+        assert_eq!(from, utc("2026-11-10T21:00:00Z"));
+        assert_eq!(to, utc("2026-11-11T21:00:00Z"));
+    }
+
+    #[test]
+    fn monthly_window_is_the_previous_calendar_month() {
+        let cfg = DigestConfig::default();
+        let now = utc("2026-11-01T06:00:00Z"); // 1 ноября, 09:00 MSK
+        let (from, to) = cfg.window_utc(DigestKind::Monthly, now);
+        assert_eq!(from, utc("2026-09-30T21:00:00Z")); // 1 окт 00:00 MSK
+        assert_eq!(to, utc("2026-10-31T21:00:00Z")); // 1 ноя 00:00 MSK
+    }
+
+    #[test]
+    fn weekly_window_is_seven_local_days() {
+        let cfg = DigestConfig::default();
+        let now = utc("2026-11-12T06:00:00Z");
+        let (from, to) = cfg.window_utc(DigestKind::Weekly, now);
+        assert_eq!((to - from).num_days(), 7);
+        assert_eq!(to, utc("2026-11-11T21:00:00Z"));
+    }
+
+    #[test]
+    fn subject_shows_counts() {
+        let d = Digest {
+            kind: Some(DigestKind::Daily),
+            from: Some(utc("2026-11-10T21:00:00Z")),
+            to: Some(utc("2026-11-11T21:00:00Z")),
+            nodes_total: 64,
+            nodes_online: 55,
+            alerts_total: 56,
+            connects: 3422,
+            ..Default::default()
+        };
+        let subject = d.subject();
+        assert!(subject.contains("55 / 64"), "{subject}");
+        assert!(subject.contains("56 алертов"), "{subject}");
+    }
 }

@@ -44,7 +44,17 @@ async fn main() -> Result<()> {
     let settings = ServiceSettings::from_file(config_path);
 
     settings.validate().expect("Wrong settings file");
-    println!(">>> Settings: {:?}", settings.clone());
+    // Never dump the whole struct: it carries service/admin tokens, SMTP and
+    // database passwords, and journald keeps them forever.
+    println!(
+        ">>> Settings: env={:?} listen={}:{} db={} alerts={} digest={}",
+        settings.service.subscription_title,
+        settings.service.listen,
+        settings.service.port,
+        settings.pg.db,
+        settings.alerts.enabled,
+        settings.digest.enabled
+    );
 
     bootstrap::init_tracing(settings.clone());
 
