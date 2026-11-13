@@ -74,8 +74,12 @@ where
 {
     !conn.get_deleted()
         && conn.get_proto().proto() == proto
-        // Hysteria2 is authorised by the global auth service rather than by env.
-        && (strict_env || proto == Tag::Hysteria2 || &conn.get_env() == env)
+        // Hysteria2 is authorised by the global auth service rather than by env,
+        // so only our own service token skips the env check for it. A node with
+        // a `node_` token always gets its own env and nothing else: the env term
+        // must not be waived for it, or a self-hosted node pulls the whole
+        // fleet's peers (its own env is derived from the node row, not the body).
+        && (&conn.get_env() == env || (!strict_env && proto == Tag::Hysteria2))
         && last_update.is_none_or(|ts| conn.get_modified_at().timestamp() as u64 >= ts)
         && sync_conn_visible(conn_nodes.get(conn_id), topic)
 }
@@ -1362,11 +1366,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        existing_default_pairs, main_feed_connection_visible, pinned_to, sync_conn_visible,
-        sync_env, validate_env_served, validate_node_pin,
+        existing_default_pairs, main_feed_connection_visible, pinned_to, sync_conn_matches,
+        sync_conn_visible, sync_env, validate_env_served, validate_node_pin,
     };
     use chrono::Utc;
-    use fcore::{Env, Inbound, Node, NodeStatus, NodeType, Tag, Topic};
+    use fcore::{Connection, Env, Inbound, Node, NodeStatus, NodeType, Proto, Tag, Topic};
     use std::collections::HashMap;
 
     #[test]
@@ -1447,6 +1451,83 @@ mod tests {
         assert!(!sync_conn_visible(Some(&node_a), &Topic::Init(node_b)));
         assert!(!sync_conn_visible(Some(&node_a), &Topic::Updates(Env::Ru)));
         assert!(!sync_conn_visible(Some(&node_a), &Topic::Auth));
+    }
+
+    // /connections/sync: the env term must never be waived for a `node_` token.
+    // Regression guard for 0.6.116: `strict_env || H2 || conn.env == env` turned
+    // the env check off exactly for self-hosted nodes, and a private node pulled
+    // every unpinned connection of the fleet (1478 + 1579 on prod, all envs).
+    #[test]
+    fn test_sync_conn_matches_node_token_is_env_scoped() {
+        let node = uuid::Uuid::new_v4();
+        let own = Env::personal_for(uuid::Uuid::new_v4());
+        let topic = Topic::Init(node);
+        let conn_id = uuid::Uuid::new_v4();
+        let no_pins: HashMap<uuid::Uuid, uuid::Uuid> = HashMap::new();
+        let dev = Connection::new(&Env::Dev, None, Proto::Xray(Tag::VlessTcpReality), None);
+        let h2 = Connection::new(
+            &Env::Dev,
+            None,
+            Proto::Hysteria2 {
+                token: uuid::Uuid::new_v4(),
+            },
+            None,
+        );
+
+        // node_ token (strict_env = true): a dev connection is not ours.
+        assert!(!sync_conn_matches(
+            &conn_id,
+            &dev,
+            Tag::VlessTcpReality,
+            &own,
+            true,
+            &topic,
+            None,
+            &no_pins
+        ));
+        // ...and the node's own env still syncs.
+        assert!(sync_conn_matches(
+            &conn_id,
+            &dev,
+            Tag::VlessTcpReality,
+            &Env::Dev,
+            true,
+            &topic,
+            None,
+            &no_pins
+        ));
+        // The historical Hysteria2 exemption belongs to the service token only:
+        // our nodes still get h2 of every env, a node_ token never does.
+        assert!(!sync_conn_matches(
+            &conn_id,
+            &h2,
+            Tag::Hysteria2,
+            &own,
+            true,
+            &topic,
+            None,
+            &no_pins
+        ));
+        assert!(sync_conn_matches(
+            &conn_id,
+            &h2,
+            Tag::Hysteria2,
+            &own,
+            false,
+            &topic,
+            None,
+            &no_pins
+        ));
+        assert!(sync_conn_matches(
+            &conn_id,
+            &h2,
+            Tag::Hysteria2,
+            &Env::Dev,
+            false,
+            &topic,
+            None,
+            &no_pins
+        ));
     }
 
     #[test]
