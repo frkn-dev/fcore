@@ -59,3 +59,10 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_translation JSONB;
 `COALESCE(EXCLUDED.pool_translation, nodes.pool_translation)`: пустое значение
 при повторной регистрации **не затирает** уже сохранённые переводы. `PgNode::all`
 читает их обратно в `Node`.
+
+## Публичный список нод
+
+С 0.6.133 `GET /status` отдаёт оба поля как есть (`pool` — идентификатор, `pool_translation` —
+отображаемые имена), оба всегда присутствуют и равны `null` у нод без пула. Клиент группирует по
+`pool` и рисует имя из `pool_translation` с фолбэком на `pool`; отдельного `pool_id` нет намеренно —
+второе поле означало бы второй источник правды. Подробнее — `docs/API.md`, раздел `GET /status`.
