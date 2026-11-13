@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use warp::http::StatusCode;
@@ -229,6 +230,12 @@ where
 /// Public node status: no inbounds, tags, UUIDs or metrics — only what the
 /// status page needs to render and probe nodes. `ports` is a deduplicated
 /// list of listen ports for connectivity checks, without protocol tags.
+///
+/// `pool` and `pool_translation` are passed through verbatim from the node's
+/// config (`[node] pool` / `[node] pool_translation`): the pool name is the
+/// identifier, the translation map is what a UI renders. Both are always
+/// present in JSON (`null` when the node has none) so a consumer can tell
+/// "legacy node without a pool" from "old api that does not know the field".
 #[derive(Clone, Debug, Serialize)]
 pub struct NodeStatusPublic {
     pub hostname: String,
@@ -238,6 +245,32 @@ pub struct NodeStatusPublic {
     pub status: NodeStatus,
     pub r#type: NodeType,
     pub ports: Vec<u16>,
+    pub pool: Option<String>,
+    pub pool_translation: Option<BTreeMap<String, String>>,
+}
+
+/// Is this node listed on the public status page? Personal (self-hosted)
+/// nodes are never published: they belong to their owner, not to FRKN.
+fn status_listed(node: &fcore::Node) -> bool {
+    !node.env.is_personal()
+}
+
+/// Map a node into its public status row (ports deduplicated, pool verbatim).
+fn node_status_public(node: &fcore::Node) -> NodeStatusPublic {
+    let mut ports: Vec<u16> = node.inbounds.values().map(|i| i.port).collect();
+    ports.sort_unstable();
+    ports.dedup();
+    NodeStatusPublic {
+        hostname: node.hostname.clone(),
+        address: node.address,
+        label: node.label.clone(),
+        country: node.country.clone(),
+        status: node.status.clone(),
+        r#type: node.r#type.clone(),
+        ports,
+        pool: node.pool.clone(),
+        pool_translation: node.pool_translation.clone(),
+    }
 }
 
 /// Public list of node statuses handler
@@ -264,23 +297,9 @@ where
         .nodes
         .all()
         .unwrap_or_default()
-        .into_iter()
-        .filter(|node| !node.env.is_personal())
-        .map(|node| {
-            let res = node.as_node_response();
-            let mut ports: Vec<u16> = res.inbounds.iter().map(|i| i.port).collect();
-            ports.sort_unstable();
-            ports.dedup();
-            NodeStatusPublic {
-                hostname: res.hostname,
-                address: res.address,
-                label: res.label,
-                country: res.country,
-                status: res.status,
-                r#type: res.r#type,
-                ports,
-            }
-        })
+        .iter()
+        .filter(|node| status_listed(node))
+        .map(node_status_public)
         .collect();
 
     let response = ResponseMessage {
@@ -443,4 +462,83 @@ where
         warp::reply::json(&status),
         status_code,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{node_status_public, status_listed};
+    use fcore::{Env, Node, NodeStatus, NodeType};
+    use std::collections::{BTreeMap, HashMap};
+
+    fn node(env: Env, pool: Option<&str>, translation: Option<(&str, &str)>) -> Node {
+        let translation: Option<BTreeMap<String, String>> = translation.map(|(lang, title)| {
+            [(lang.to_string(), title.to_string())]
+                .into_iter()
+                .collect()
+        });
+        Node {
+            uuid: uuid::Uuid::new_v4(),
+            env,
+            hostname: "eu01.frkn.org".to_string(),
+            address: "185.156.108.232".parse().unwrap(),
+            status: NodeStatus::Online,
+            label: "NL AWG EU-01".to_string(),
+            interface: "eth0".to_string(),
+            created_at: chrono::Utc::now(),
+            modified_at: chrono::Utc::now(),
+            inbounds: HashMap::new(),
+            cores: 4,
+            max_bandwidth_bps: 1_000_000_000,
+            country: "EU".to_string(),
+            r#type: NodeType::Node,
+            cluster: None,
+            node_ips: None,
+            pool: pool.map(str::to_string),
+            pool_translation: translation,
+            node_weights: BTreeMap::new(),
+        }
+    }
+
+    // /status: the pool is passed through verbatim, together with its
+    // translations; a node without a pool reports null, never a missing key.
+    #[test]
+    fn status_row_carries_pool_and_translation() {
+        let n = node(Env::Dev, Some("EU Рилзопровод"), Some(("ru", "EU Рилзопровод")));
+        let row = node_status_public(&n);
+        assert_eq!(row.pool.as_deref(), Some("EU Рилзопровод"));
+        assert_eq!(
+            row.pool_translation
+                .as_ref()
+                .and_then(|t| t.get("ru"))
+                .map(String::as_str),
+            Some("EU Рилзопровод")
+        );
+
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["pool"], "EU Рилзопровод");
+        assert_eq!(json["pool_translation"]["ru"], "EU Рилзопровод");
+    }
+
+    #[test]
+    fn status_row_without_pool_is_null_not_missing() {
+        let n = node(Env::Dev, None, None);
+        let json = serde_json::to_value(node_status_public(&n)).unwrap();
+        assert!(json.get("pool").is_some(), "pool key must always be present");
+        assert!(json["pool"].is_null());
+        assert!(json.get("pool_translation").is_some());
+        assert!(json["pool_translation"].is_null());
+    }
+
+    // Personal (self-hosted) nodes stay out of the public list.
+    #[test]
+    fn personal_nodes_are_not_listed() {
+        let shared = node(Env::Dev, Some("EU Рилзопровод"), None);
+        assert!(status_listed(&shared));
+        let personal = node(
+            Env::personal_for(uuid::Uuid::new_v4()),
+            Some("EU Рилзопровод"),
+            None,
+        );
+        assert!(!status_listed(&personal));
+    }
 }
