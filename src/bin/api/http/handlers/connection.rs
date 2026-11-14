@@ -1127,6 +1127,10 @@ where
                             result.push(serde_json::json!({
                                 "conn_id": conn_id,
                                 "label": node.label,
+                                // Hostname travels so the ЛК can tell nodes of one
+                                // pool apart ("RU Рилзопровод" x3 -> msk-tw,
+                                // msk-vdska, ...) without renumbering them.
+                                "hostname": node.hostname,
                                 "conn_label": mem.conn_labels.get(&conn_id),
                                 "env": node.env,
                                 "config": link
@@ -1235,6 +1239,10 @@ where
                             result.push(serde_json::json!({
                                 "conn_id": conn_id,
                                 "label": node.label,
+                                // Hostname travels so the ЛК can tell nodes of one
+                                // pool apart ("RU Рилзопровод" x3 -> msk-tw,
+                                // msk-vdska, ...) without renumbering them.
+                                "hostname": node.hostname,
                                 "conn_label": mem.conn_labels.get(&conn_id),
                                 "env": node.env,
                                 "config": link
@@ -1348,6 +1356,7 @@ where
                         if let Ok(url) = link {
                             result.push(serde_json::json!({
                                 "label": node.label,
+                                "hostname": node.hostname,
                                 "conn_label": mem.conn_labels.get(&conn_id),
                                 "url": url
                             }));
