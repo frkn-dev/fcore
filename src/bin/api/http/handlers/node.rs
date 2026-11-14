@@ -247,6 +247,10 @@ pub struct NodeStatusPublic {
     pub ports: Vec<u16>,
     pub pool: Option<String>,
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Base URL of the node's own speed-test endpoint, verbatim from
+    /// `nodes.bench_url`; `null` when the node has no bench (premium slots).
+    /// Consumers postfix `/speedtest/{1mb.test,10mb.test,ping.txt}` themselves.
+    pub speedtest_url: Option<String>,
 }
 
 /// Is this node listed on the public status page? Personal (self-hosted)
@@ -270,6 +274,7 @@ fn node_status_public(node: &fcore::Node) -> NodeStatusPublic {
         ports,
         pool: node.pool.clone(),
         pool_translation: node.pool_translation.clone(),
+        speedtest_url: node.bench_url.clone(),
     }
 }
 
@@ -496,7 +501,13 @@ mod tests {
             pool: pool.map(str::to_string),
             pool_translation: translation,
             node_weights: BTreeMap::new(),
+            bench_url: None,
         }
+    }
+
+    fn with_bench(mut n: Node, url: &str) -> Node {
+        n.bench_url = Some(url.to_string());
+        n
     }
 
     // /status: the pool is passed through verbatim, together with its
@@ -527,6 +538,35 @@ mod tests {
         assert!(json["pool"].is_null());
         assert!(json.get("pool_translation").is_some());
         assert!(json["pool_translation"].is_null());
+    }
+
+    // /status: the bench URL is passed through verbatim so consumers never have
+    // to derive a hostname from the node name (the zone is
+    // <hoster>-<cc>-<city>-bench-<nn>.bench.beacon.frkn.org now).
+    #[test]
+    fn status_row_carries_speedtest_url_verbatim() {
+        let n = with_bench(
+            node(Env::Dev, Some("EU Рилзопровод"), None),
+            "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443",
+        );
+        let json = serde_json::to_value(node_status_public(&n)).unwrap();
+        assert_eq!(
+            json["speedtest_url"],
+            "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443"
+        );
+        // no trailing slash and no path: the consumer adds /speedtest/...
+        let url = json["speedtest_url"].as_str().unwrap();
+        assert!(!url.ends_with('/'));
+        assert!(!url.contains("/speedtest"));
+    }
+
+    // A node without a bench (premium slots) reports null, never a missing key.
+    #[test]
+    fn status_row_without_bench_is_null_not_missing() {
+        let n = node(Env::Dev, Some("EU Рилзопровод"), None);
+        let json = serde_json::to_value(node_status_public(&n)).unwrap();
+        assert!(json.get("speedtest_url").is_some());
+        assert!(json["speedtest_url"].is_null());
     }
 
     // Personal (self-hosted) nodes stay out of the public list.

@@ -202,6 +202,13 @@ pub struct Node {
     /// PartialEq, so a weight change in the config registers as a node update.
     #[serde(default)]
     pub node_weights: BTreeMap<String, i32>,
+    /// Base URL of the node's own speed-test endpoint
+    /// (`https://<hoster>-<cc>-<city>-bench-<nn>.bench.beacon.frkn.org:19443`).
+    /// Lives only in the api database (`nodes.bench_url`) — a node does not know
+    /// its bench name and never sends this field, so registration must not clear
+    /// it. Exposed as `speedtest_url` in the public `/status`.
+    #[serde(default)]
+    pub bench_url: Option<String>,
 }
 
 /// Default weight of an entry address: a regular node. Lower = smaller share of
@@ -372,6 +379,7 @@ impl Node {
             pool: settings.pool,
             pool_translation: settings.pool_translation,
             node_weights: settings.node_weights.unwrap_or_default(),
+            bench_url: None,
         }
     }
 

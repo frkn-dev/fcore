@@ -2410,6 +2410,7 @@ mod tests {
             pool: Some("Russia".into()),
             pool_translation: None,
             node_weights: BTreeMap::new(),
+            bench_url: None,
         }
     }
 
@@ -2850,6 +2851,7 @@ mod tests {
             pool: None,
             pool_translation: None,
             node_weights: BTreeMap::new(),
+            bench_url: None,
         };
         let rev = config_rev(&node, Tag::Wireguard, &[]).unwrap();
         assert_eq!(
@@ -3118,6 +3120,7 @@ mod tests {
                 pool: pool.map(|s| s.to_string()),
                 pool_translation: None,
                 node_weights: BTreeMap::new(),
+                bench_url: None,
             }
         }
 

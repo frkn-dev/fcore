@@ -1579,6 +1579,7 @@ mod tests {
             pool: None,
             pool_translation: None,
             node_weights: std::collections::BTreeMap::new(),
+            bench_url: None,
         }
     }
 

@@ -290,7 +290,8 @@ VMess и Hysteria2). WG-семейство и `mtproto` в подписках н
         "type": "Node",
         "ports": [443, 8443],
         "pool": "EU Рилзопровод",
-        "pool_translation": { "ru": "EU Рилзопровод", "en": "EU Reel pipeline" }
+        "pool_translation": { "ru": "EU Рилзопровод", "en": "EU Reel pipeline" },
+        "speedtest_url": "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443"
       }
     ]
   }
@@ -302,6 +303,15 @@ VMess и Hysteria2). WG-семейство и `mtproto` в подписках н
 - `pool_translation` — карта `язык → отображаемое имя` (`[node] pool_translation`); отсутствующий язык = показывать `pool`.
 - Оба поля **всегда присутствуют** в JSON и равны `null`, если у ноды пула нет (легаси-ноды). Так потребитель отличает «пула нет» от «старый api, который поля не знает».
 - Personal-ноды (self-hosted) в ответ не попадают, как и раньше.
+
+Поле `speedtest_url` (0.6.134+):
+
+- **Base URL собственного бенча ноды**: `https://<host>:<port>`, всегда `https`, порт указан явно (сейчас 19443), **без завершающего слэша и без пути**. Потребитель сам добавляет `/speedtest/1mb.test`, `/speedtest/10mb.test`, `/speedtest/ping.txt` (с `?cb=` против кэша).
+- Значение отдаётся **дословно** из `nodes.bench_url`, ничего не достраивается: имена бенча живут в зоне `beacon.frkn.org` как `<hoster>-<cc>-<city>-bench-<nn>.bench.beacon.frkn.org`, и вывести их из hostname/адреса ноды нельзя.
+- **Per node**, а не per address и не per protocol: у ноды с несколькими `node_ips` и с несколькими протоколами адрес бенча один.
+- `null` — у ноды нет бенча (премиум-слоты). Потребитель показывает «нет тест-файла», а не «0 Мбит/с».
+- Поле не приходит от ноды: его ведёт api (`deploy/seed-nodes-bench-url.sql`), регистрация ноды его не перезаписывает.
+- Не проксировать: URL ведёт на саму ноду, иначе замер покажет канал прокси.
 
 ### `GET /nodes?env={env}`
 

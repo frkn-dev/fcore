@@ -250,6 +250,9 @@ impl NodeRequest {
                 .filter(|(ip, w)| **w > 0 && ip.parse::<Ipv4Addr>().is_ok())
                 .map(|(ip, w)| (ip.trim().to_string(), *w))
                 .collect(),
+            // The bench URL is api-side state (nodes.bench_url): a node does not
+            // know its bench name and must not be able to overwrite it.
+            bench_url: None,
         }
     }
 }
