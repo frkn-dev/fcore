@@ -497,6 +497,23 @@ Endpoint'ы `/v1/*` используют шифрование RSA+AES, когд�
   ```
 - **Response:** `200 OK` → `GatewayServicesResponse` (зашифрован)
 
+Поля пула и бенча в каждом `connections[]` (0.6.134+):
+
+```json
+{
+  "connection_uuid": "1ac65b82-…",
+  "node_id": "7f3c9a01-…",
+  "node_ips": ["177.177.20.172"],
+  "node_ports": { "177.177.20.172": 443 },
+  "pool": "EU Рилзопровод",
+  "speedtest_url": "https://mis-at-vie-bench-01.bench.beacon.frkn.org:19443"
+}
+```
+
+- `speedtest_url` — base URL бенча **этой ноды** (`https://host:port`, без пути и слэша), тот же, что в `/status`. Один на ноду: не зависит от адреса и протокола.
+- **Отсутствует** (не `null`), если у ноды бенча нет — премиум-слоты, легаси-ноды. Клиент показывает «нет тест-файла».
+- Выводить адрес из hostname нельзя: имена в зоне `beacon.frkn.org` — `<hoster>-<cc>-<city>-bench-<nn>.bench…`.
+
 ### `POST /v1/account_info`
 
 - **Auth:** нет
@@ -544,6 +561,7 @@ Endpoint'ы `/v1/*` используют шифрование RSA+AES, когд�
       "server_country_code": "SWE",
       "service_protocol": "awg",
       "service_type": "amnezia-free",
+      "speedtest_url": "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443",
       "user_country_code": "RU"
     },
     "service_info": {

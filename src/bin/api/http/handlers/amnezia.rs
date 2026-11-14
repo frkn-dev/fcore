@@ -140,6 +140,12 @@ pub struct GatewayConnection {
     /// behave the same.
     #[serde(rename = "node_ports", skip_serializing_if = "Option::is_none")]
     pub node_ports: Option<BTreeMap<String, u16>>,
+    /// Base URL of the node's own speed-test endpoint (`nodes.bench_url`), e.g.
+    /// `https://mis-at-vie-bench-01.bench.beacon.frkn.org:19443`. Per node, not
+    /// per address/protocol; absent when the node has no bench, in which case
+    /// the client shows "no test file" instead of measuring.
+    #[serde(rename = "speedtest_url", skip_serializing_if = "Option::is_none")]
+    pub speedtest_url: Option<String>,
     /// Pool/group name of the node (config.toml `[node] pool`). Clients
     /// group identically-named nodes and may localize the title via
     /// `pool_translation`. Absent for old nodes.
@@ -303,6 +309,10 @@ pub struct GatewayConfigResponse {
     /// single-address nodes so old clients see the old shape.
     #[serde(rename = "node_ips", skip_serializing_if = "Option::is_none")]
     pub node_ips: Option<Vec<String>>,
+    /// Base URL of the node's bench (`nodes.bench_url`), same value as in
+    /// `/v1/services`; absent when the node has no bench.
+    #[serde(rename = "speedtest_url", skip_serializing_if = "Option::is_none")]
+    pub speedtest_url: Option<String>,
     /// Порт конкретного адреса — та же карта, что в `/v1/services`, чтобы
     /// клиент не собирал её из двух ответов.
     #[serde(rename = "node_ports", skip_serializing_if = "Option::is_none")]
@@ -715,6 +725,7 @@ where
                             connection_label: format!("{pool_title} · {}", inbound_label(tag)),
                             node_ips: None,
                             node_ports: None,
+                            speedtest_url: node.bench_url.clone(),
                             pool: Some(pool.clone()),
                             pool_translation: node.pool_translation.clone(),
                             weight: node.max_weight(),
@@ -756,6 +767,7 @@ where
                     // равен порту протокола из конфига. Карта была бы чистым
                     // дублированием, поэтому её здесь нет.
                     node_ports: None,
+                    speedtest_url: node.bench_url.clone(),
                     pool: node.pool.clone(),
                     pool_translation: node.pool_translation.clone(),
                     weight: node.max_weight(),
@@ -796,6 +808,7 @@ where
             connection_label: "All countries".to_string(),
             node_ips: None,
             node_ports: None,
+            speedtest_url: None,
             pool: None,
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
@@ -1968,6 +1981,7 @@ where
             "user_country_code": params.user_country_code.unwrap_or(""),
             "server_country_code": params.server_country_code
         }),
+        speedtest_url: node.bench_url.clone(),
         share_label: None,
         country_code: None,
         country_name: None,
@@ -2325,6 +2339,44 @@ mod tests {
         assert!(share::auth_data_has_share_token(&req.auth_data));
     }
 
+    // /v1/services: the bench URL travels per connection and is omitted when the
+    // node has no bench, so old clients keep the old shape.
+    #[test]
+    fn gateway_connection_carries_speedtest_url() {
+        let base = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "AT".to_string(),
+            country_name: "Austria".to_string(),
+            service_protocol: "awg".to_string(),
+            env: "dev".to_string(),
+            connection_label: "EU Рилзопровод · AmneziaWG".to_string(),
+            node_ips: None,
+            node_ports: None,
+            speedtest_url: Some(
+                "https://mis-at-vie-bench-01.bench.beacon.frkn.org:19443".to_string(),
+            ),
+            pool: Some("EU Рилзопровод".to_string()),
+            pool_translation: None,
+            weight: DEFAULT_NODE_WEIGHT,
+            node_weights: None,
+            config_rev: None,
+        };
+        let v = serde_json::to_value(&base).unwrap();
+        assert_eq!(
+            v["speedtest_url"],
+            "https://mis-at-vie-bench-01.bench.beacon.frkn.org:19443"
+        );
+        let url = v["speedtest_url"].as_str().unwrap();
+        assert!(!url.ends_with('/') && !url.contains("/speedtest"));
+
+        // no bench -> key absent, not null
+        let mut without = base;
+        without.speedtest_url = None;
+        let v2 = serde_json::to_value(&without).unwrap();
+        assert!(v2.get("speedtest_url").is_none());
+    }
+
     #[test]
     fn gateway_connection_node_ips_serialization() {
         let base = GatewayConnection {
@@ -2337,6 +2389,7 @@ mod tests {
             connection_label: "Moscow · AmneziaWG".to_string(),
             node_ips: None,
             node_ports: None,
+            speedtest_url: None,
             pool: None,
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
@@ -2462,6 +2515,7 @@ mod tests {
             connection_label: "EU Рилзопровод · WireGuard".into(),
             node_ips: Some(ports.keys().cloned().collect()),
             node_ports: Some(ports.clone()),
+            speedtest_url: None,
             pool: Some("EU Рилзопровод".into()),
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
@@ -2579,6 +2633,7 @@ mod tests {
             connection_label: "RU Рилзопровод · AmneziaWG".into(),
             node_ips: Some(ports.keys().cloned().collect()),
             node_ports: Some(ports.clone()),
+            speedtest_url: None,
             pool: Some("RU Рилзопровод".into()),
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
@@ -2597,6 +2652,7 @@ mod tests {
             connection_label: "NL777 · AmneziaWG".into(),
             node_ips: None,
             node_ports: None,
+            speedtest_url: None,
             pool: None,
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
@@ -2759,6 +2815,7 @@ mod tests {
                 ("93.89.220.48".to_string(), 443u16),
                 ("77.221.152.88".to_string(), 8443u16),
             ])),
+            speedtest_url: None,
             pool: Some("Russia".into()),
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
@@ -2792,6 +2849,7 @@ mod tests {
             connection_label: "Moscow · AmneziaWG".into(),
             node_ips: None,
             node_ports: None,
+            speedtest_url: None,
             pool: None,
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
@@ -2894,6 +2952,7 @@ mod tests {
             connection_label: "Finland · AmneziaWG".to_string(),
             node_ips: None,
             node_ports: None,
+            speedtest_url: None,
             pool: Some("Finland".to_string()),
             pool_translation: Some(
                 [
@@ -2935,6 +2994,7 @@ mod tests {
             service_type: Some(share::SHARE_SERVICE_TYPE.to_string()),
             node_ips: Some(vec!["78.17.28.66".to_string(), "78.17.28.67".to_string()]),
             node_ports: Some(BTreeMap::from([("78.17.28.66".to_string(), 443u16)])),
+            speedtest_url: None,
             node_weights: None,
             config_rev: Some("abc".to_string()),
         };
@@ -2964,6 +3024,7 @@ mod tests {
             service_type: None,
             node_ips: None,
             node_ports: None,
+            speedtest_url: None,
             node_weights: None,
             config_rev: None,
         };
