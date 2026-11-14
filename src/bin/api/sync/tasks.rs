@@ -205,6 +205,20 @@ where
         // Validate input
         node.validate()?;
 
+        // Api-side state that a node cannot report must survive re-registration:
+        // bench_url lives only in the database (nodes.bench_url), and a node that
+        // restarts sends a Node without it. Without this the public /status lost
+        // speedtest_url for every node that ever re-registered.
+        let mut node = node;
+        {
+            let memory = self.memory.read().await;
+            if let Some(prev) = memory.nodes.get_by_id(&node.uuid) {
+                if node.bench_url.is_none() {
+                    node.bench_url = prev.bench_url.clone();
+                }
+            }
+        }
+
         // Insert into database first
         if let Err(e) = self.db.node().upsert(*node_id, node.clone()).await {
             error!("Failed to insert node {} into database: {}", node_id, e);
