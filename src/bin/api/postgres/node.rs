@@ -45,7 +45,8 @@ impl PgNode {
         client
             .batch_execute(
                 "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool TEXT;
-                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS node_weights JSONB;",
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS node_weights JSONB;
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS bench_url TEXT;",
             )
             .await?;
         Ok(())
@@ -375,6 +376,7 @@ impl PgNode {
                       n.pool,
                       n.pool_translation,
                       n.node_weights,
+                      n.bench_url,
 
                       i.id AS inbound_id,
                       i.tag,
@@ -421,6 +423,7 @@ impl PgNode {
             let r#type: NodeType = row.get("node_type");
             let cluster: Option<String> = row.get("cluster");
             let pool: Option<String> = row.get("pool");
+            let bench_url: Option<String> = row.get("bench_url");
             let node_weights: BTreeMap<String, i32> = row
                 .get::<_, Option<serde_json::Value>>("node_weights")
                 .and_then(|v| serde_json::from_value(v).ok())
@@ -504,6 +507,7 @@ impl PgNode {
                     pool: pool.clone(),
                     node_weights: node_weights.clone(),
                     pool_translation: pool_translation.clone(),
+                    bench_url: bench_url.clone(),
                 });
 
                 if let Some(_inbound_id) = inbound_id {
