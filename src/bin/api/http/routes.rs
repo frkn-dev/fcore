@@ -1245,18 +1245,16 @@ where
             >())
             .and_then(crate::http::handlers::alerts::admin_alerts_send_handler);
 
-        let digest_cfg_for_route = self.settings.digest.clone();
-        let digest_email_cfg = self.settings.alerts.email.clone();
-        let admin_digest_route = warp::post()
-            .and(warp::path!("v1" / "admin" / "digest" / "send"))
+        // Digest data for mrkting's daily/weekly/monthly email: the api owns
+        // the data, mrkting owns the schedule, the template and the SMTP.
+        let admin_digest_route = warp::get()
+            .and(warp::path!("v1" / "admin" / "digest"))
             .and(warp::path::end())
             .and(warp::query::<crate::http::handlers::alerts::DigestQuery>())
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
             .and(warp::header::optional::<String>("authorization"))
-            .and(warp::any().map(move || digest_cfg_for_route.clone()))
-            .and(warp::any().map(move || digest_email_cfg.clone()))
             .and_then(crate::http::handlers::alerts::admin_digest_handler);
 
         // GET /v1/admin/report/reports — отчёты клиента: кто прислал и что не так.

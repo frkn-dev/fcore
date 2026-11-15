@@ -47,13 +47,12 @@ async fn main() -> Result<()> {
     // Never dump the whole struct: it carries service/admin tokens, SMTP and
     // database passwords, and journald keeps them forever.
     println!(
-        ">>> Settings: env={:?} listen={}:{} db={} alerts={} digest={}",
+        ">>> Settings: env={:?} listen={}:{} db={} alerts={}",
         settings.service.subscription_title,
         settings.service.listen,
         settings.service.port,
         settings.pg.db,
-        settings.alerts.enabled,
-        settings.digest.enabled
+        settings.alerts.enabled
     );
 
     bootstrap::init_tracing(settings.clone());

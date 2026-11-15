@@ -602,6 +602,43 @@ Endpoint'ы `/v1/*` используют шифрование RSA+AES, когд�
 
 ---
 
+## Сводка (digest)
+
+### `GET /v1/admin/digest?kind=daily|weekly|monthly&from=<rfc3339>&to=<rfc3339>`
+
+Данные системной сводки, из которых mrkting собирает письмо владельцу. Раньше
+api сам собирал, рендерил и отправлял сводку; теперь у него только данные, а
+расписание, шаблон и SMTP живут в mrkting (`[digest]` в его конфиге).
+
+- **Auth:** admin token (`Authorization: Bearer <admin_token>`)
+- **Query:** `kind` — влияет на форму тренда (7 дней / 8 недель / 12 месяцев);
+  `from`/`to` — готовое окно в UTC, его считает отправитель по своим локальным
+  суткам. Без окна берётся прошлый период от `kind`.
+- **Response:** `200 OK`
+  ```json
+  {
+    "status": 200,
+    "window": { "from": "2026-11-14T21:00:00Z", "to": "2026-11-15T21:00:00Z" },
+    "digest": {
+      "kind": "daily",
+      "nodes_total": 64, "nodes_online": 55,
+      "by_env": [["dev", 10, 9], ["премиум", 20, 18]],
+      "alerts_total": 3, "alerts_by_rule": [["node_offline", 2]],
+      "alert_hosts": [["mis-at-vie-core-01.beacon.frkn.org", 2]],
+      "downtime_minutes": 12,
+      "connects": 3422, "connecting_subs": 890,
+      "by_protocol": [["AmneziaWg", 2100]],
+      "by_country": [["RU", 1500]],
+      "active_now": 1071, "active_at_start": 1062,
+      "created": 9, "expired": 9, "expiring_7d": 31,
+      "by_product": [["standard", 900]],
+      "trend": [["08.11", 1040], ["09.11", 1052]]
+    }
+  }
+  ```
+- Деньги (покупки, выручка) в этом ответе **не** отдаются: их mrkting берёт
+  прямо из payment-gw `/analytics/sales`.
+
 ## Admin panel
 
 Требует `admin_enabled = true` и непустой `admin_token`.

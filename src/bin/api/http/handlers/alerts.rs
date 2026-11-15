@@ -67,14 +67,20 @@ where
     }
 }
 
-/// `POST /v1/admin/digest/send?kind=daily|weekly|monthly&dry_run=1` —
-/// собрать сводку и отправить её (или только вернуть текст для проверки).
+/// `GET /v1/admin/digest?kind=daily&from=<rfc3339>&to=<rfc3339>` — данные
+/// сводки для письма. Собирает их api (данные лежат в его базе), а письмо
+/// рендерит и отправляет mrkting: у него расписание, шаблоны и SMTP.
+///
+/// Окно приходит готовым (`from`/`to`), потому что локальные сутки считает
+/// тот, кто отправляет. Без них берётся прошлый период от `kind`.
 #[derive(Debug, serde::Deserialize)]
 pub struct DigestQuery {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
-    pub dry_run: Option<bool>,
+    pub from: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    pub to: Option<chrono::DateTime<Utc>>,
 }
 
 pub async fn admin_digest_handler<N, C, S>(
@@ -83,8 +89,6 @@ pub async fn admin_digest_handler<N, C, S>(
     admin_enabled: bool,
     admin_token: String,
     auth_header: Option<String>,
-    digest_cfg: crate::digest::DigestConfig,
-    email: Option<crate::alerts::AlertEmailConfig>,
 ) -> Result<warp::reply::Response, Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -107,48 +111,24 @@ where
     }
     let kind = crate::digest::DigestKind::parse(query.kind.as_deref().unwrap_or("daily"))
         .unwrap_or(crate::digest::DigestKind::Daily);
-    let dry_run = query.dry_run.unwrap_or(false);
-    let now = Utc::now();
-    let (from, to) = digest_cfg.window_utc(kind, now);
-
-    let digest = match memory.db.digest().collect(&digest_cfg, kind, from, to).await {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!("digest: collect failed: {e}");
-            return Ok(json_status(500, "digest query failed"));
-        }
+    let (from, to) = match (query.from, query.to) {
+        (Some(f), Some(t)) if t > f => (f, t),
+        _ => kind.window(Utc::now()),
     };
-    let subject = digest.subject();
-    let text = digest.render_text();
 
-    if dry_run {
-        return Ok(warp::reply::with_status(
+    match memory.db.digest().collect(kind, from, to).await {
+        Ok(digest) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
                 "status": 200,
-                "subject": subject,
-                "text": text,
-            })),
-            warp::http::StatusCode::OK,
-        )
-        .into_response());
-    }
-
-    let Some(email) = email else {
-        return Ok(json_status(400, "no [alerts.email] configured"));
-    };
-    match crate::digest::send_digest(&email, &subject, &text, &digest.render_html()).await {
-        Ok(()) => Ok(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "status": 200,
-                "delivered": true,
-                "subject": subject,
+                "window": { "from": from, "to": to },
+                "digest": digest,
             })),
             warp::http::StatusCode::OK,
         )
         .into_response()),
         Err(e) => {
-            tracing::error!("digest: send failed: {e}");
-            Ok(json_status(502, "smtp delivery failed"))
+            tracing::error!("digest: collect failed: {e}");
+            Ok(json_status(500, "digest query failed"))
         }
     }
 }
