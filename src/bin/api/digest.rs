@@ -1,15 +1,15 @@
-//! Сводка по системе: daily / weekly / monthly отчёт в почту.
+//! Сводка по системе: данные для писем daily / weekly / monthly.
 //!
-//! Считается целиком из Postgres api — никаких внешних источников, поэтому
-//! отчёт переживает перезапуски и не зависит от того, что сейчас в памяти.
-//! Доставка — тем же SMTP, что у алертов (`[alerts.email]`).
+//! Считается целиком из Postgres api — отчёту не нужны внешние источники,
+//! поэтому он переживает перезапуски и не зависит от того, что сейчас в
+//! памяти. Отправку и расписание держит mrkting: он забирает готовый JSON
+//! через `GET /v1/admin/digest` и сам собирает письмо.
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use tokio_postgres::Client as PgClient;
 
-use crate::alerts::{send_email_html, AlertEmailConfig};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DigestKind {
     Daily,
     Weekly,
@@ -63,66 +63,6 @@ impl DigestKind {
     }
 }
 
-/// `[digest]` в конфиге api.
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct DigestConfig {
-    /// Выключено по умолчанию: сводка — это рассылка, её включают осознанно.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Локальный час отправки (0..23).
-    #[serde(default = "default_digest_hour")]
-    pub hour: u32,
-    /// Смещение локального времени от UTC (МСК = 3).
-    #[serde(default = "default_digest_offset")]
-    pub utc_offset_hours: i32,
-    /// Присылать недельную сводку по понедельникам.
-    #[serde(default = "default_true")]
-    pub weekly: bool,
-    /// Присылать месячную сводку 1-го числа.
-    #[serde(default = "default_true")]
-    pub monthly: bool,
-}
-
-fn default_digest_hour() -> u32 {
-    9
-}
-fn default_digest_offset() -> i32 {
-    3
-}
-fn default_true() -> bool {
-    true
-}
-
-impl Default for DigestConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            hour: default_digest_hour(),
-            utc_offset_hours: default_digest_offset(),
-            weekly: true,
-            monthly: true,
-        }
-    }
-}
-
-impl DigestConfig {
-    /// Окно отчёта в UTC с учётом локального смещения: «вчера» считается по
-    /// местным суткам, а не по UTC.
-    pub fn window_utc(
-        &self,
-        kind: DigestKind,
-        now_utc: DateTime<Utc>,
-    ) -> (DateTime<Utc>, DateTime<Utc>) {
-        let offset = Duration::hours(self.utc_offset_hours as i64);
-        let (from, to) = kind.window(now_utc + offset);
-        (from - offset, to - offset)
-    }
-
-    pub fn local_now(&self, now_utc: DateTime<Utc>) -> DateTime<Utc> {
-        now_utc + Duration::hours(self.utc_offset_hours as i64)
-    }
-}
-
 fn start_of_day(at: DateTime<Utc>) -> DateTime<Utc> {
     Utc.from_utc_datetime(&at.date_naive().and_hms_opt(0, 0, 0).unwrap())
 }
@@ -137,7 +77,7 @@ fn start_of_month(at: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// Всё, что попало в отчёт.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Digest {
     pub kind: Option<DigestKind>,
     pub from: Option<DateTime<Utc>>,
@@ -161,18 +101,6 @@ pub struct Digest {
     pub by_product: Vec<(String, i64)>,
     /// (подпись, активных на конец периода)
     pub trend: Vec<(String, i64)>,
-}
-
-fn rule_title(rule: &str) -> &str {
-    match rule {
-        "node_offline" => "🔴 офлайн",
-        "node_offline_long" => "🚨 офлайн > 1 ч",
-        "node_recovered" => "🟢 вернулась",
-        "node_flapping" => "🟠 мигает",
-        "node_cpu_high" => "🔥 CPU",
-        "node_disk_high" => "💾 диск",
-        other => other,
-    }
 }
 
 impl Digest {
@@ -393,230 +321,6 @@ impl Digest {
             _ => String::new(),
         }
     }
-
-    fn delta(&self) -> i64 {
-        self.active_now - self.active_at_start
-    }
-
-    fn delta_text(&self, value: i64) -> String {
-        if value > 0 {
-            format!("+{value}")
-        } else {
-            format!("{value}")
-        }
-    }
-
-    pub fn subject(&self) -> String {
-        let kind = self.kind.unwrap_or(DigestKind::Daily);
-        format!(
-            "[FRKN] 📊 сводка за {} — {} / {} нод онлайн, {} алертов, {} подключений",
-            self.window_label(),
-            self.nodes_online,
-            self.nodes_total,
-            self.alerts_total,
-            self.connects
-        )
-    }
-
-    pub fn render_text(&self) -> String {
-        let kind = self.kind.unwrap_or(DigestKind::Daily);
-        let mut out = String::new();
-        out.push_str(&format!("{}\n{}\n\n", kind.title(), self.window_label()));
-
-        out.push_str("── ФЛОТ ─────────────────────\n");
-        out.push_str(&format!(
-            "нод: {}   онлайн: {}   офлайн: {}\n",
-            self.nodes_total,
-            self.nodes_online,
-            self.nodes_total - self.nodes_online
-        ));
-        for (env, total, online) in &self.by_env {
-            out.push_str(&format!("  {env:<22} {online}/{total}\n"));
-        }
-
-        out.push_str("\n── АЛЕРТЫ ───────────────────\n");
-        out.push_str(&format!("всего: {}   простой: {} мин\n", self.alerts_total, self.downtime_minutes));
-        for (rule, count) in &self.alerts_by_rule {
-            out.push_str(&format!("  {:<16} {count}\n", rule_title(rule)));
-        }
-        if !self.alert_hosts.is_empty() {
-            out.push_str("  топ нод: ");
-            let items: Vec<String> = self
-                .alert_hosts
-                .iter()
-                .map(|(h, c)| format!("{h}×{c}"))
-                .collect();
-            out.push_str(&items.join(", "));
-            out.push('\n');
-        }
-
-        out.push_str("\n── КЛИЕНТЫ ──────────────────\n");
-        out.push_str(&format!(
-            "подключений: {}   от {} подписок\n",
-            self.connects, self.connecting_subs
-        ));
-        if !self.by_protocol.is_empty() {
-            let items: Vec<String> = self
-                .by_protocol
-                .iter()
-                .map(|(p, c)| format!("{p} {c}"))
-                .collect();
-            out.push_str(&format!("  протоколы: {}\n", items.join(", ")));
-        }
-        if !self.by_country.is_empty() {
-            let items: Vec<String> = self
-                .by_country
-                .iter()
-                .map(|(p, c)| format!("{p} {c}"))
-                .collect();
-            out.push_str(&format!("  страны: {}\n", items.join(", ")));
-        }
-
-        out.push_str("\n── ЛЮДИ ─────────────────────\n");
-        out.push_str(&format!(
-            "активных на конец периода: {} ({} к началу)\n",
-            self.active_now,
-            self.delta_text(self.delta())
-        ));
-        out.push_str(&format!(
-            "новых: {}   истекло: {}   истекают за 7 дней: {}\n",
-            self.created, self.expired, self.expiring_7d
-        ));
-        if !self.by_product.is_empty() {
-            let items: Vec<String> = self
-                .by_product
-                .iter()
-                .map(|(p, c)| format!("{p} {c}"))
-                .collect();
-            out.push_str(&format!("  продукты: {}\n", items.join(", ")));
-        }
-
-        out.push_str("\n── ТРЕНД ────────────────────\n");
-        for (label, value) in &self.trend {
-            out.push_str(&format!("  {label:<14} {value}\n"));
-        }
-
-        out
-    }
-
-    pub fn render_html(&self) -> String {
-        let kind = self.kind.unwrap_or(DigestKind::Daily);
-        let mut h = String::new();
-        h.push_str(
-            "<div style=\"font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#111\">",
-        );
-        h.push_str(&format!(
-            "<h2 style=\"margin:0 0 4px\">{}</h2><div style=\"color:#666;margin-bottom:16px\">{}</div>",
-            kind.title(),
-            self.window_label()
-        ));
-
-        h.push_str("<h3 style=\"margin:18px 0 6px\">Флот</h3><table cellpadding=4 style=\"border-collapse:collapse\">");
-        h.push_str(&format!(
-            "<tr><td>нод</td><td><b>{}</b></td><td>онлайн</td><td><b style=\"color:#1a7f37\">{}</b></td><td>офлайн</td><td><b style=\"color:#c62828\">{}</b></td></tr>",
-            self.nodes_total,
-            self.nodes_online,
-            self.nodes_total - self.nodes_online
-        ));
-        for (env, total, online) in &self.by_env {
-            h.push_str(&format!(
-                "<tr><td>{env}</td><td colspan=2>{online}/{total}</td></tr>"
-            ));
-        }
-        h.push_str("</table>");
-
-        h.push_str("<h3 style=\"margin:18px 0 6px\">Люди</h3><table cellpadding=4 style=\"border-collapse:collapse\">");
-        h.push_str(&format!(
-            "<tr><td>активных сейчас</td><td><b>{}</b></td><td>{}</td><td>к началу периода</td></tr>",
-            self.active_now,
-            self.delta_text(self.delta())
-        ));
-        h.push_str(&format!(
-            "<tr><td>новых</td><td><b>{}</b></td><td>истекло</td><td><b>{}</b></td><td>истекают за 7 дней</td><td><b>{}</b></td></tr>",
-            self.created, self.expired, self.expiring_7d
-        ));
-        h.push_str("</table>");
-
-        h.push_str("<h3 style=\"margin:18px 0 6px\">Алерты</h3>");
-        h.push_str(&format!(
-            "<div>всего <b>{}</b>, простой <b>{} мин</b></div>",
-            self.alerts_total, self.downtime_minutes
-        ));
-        if !self.alerts_by_rule.is_empty() {
-            h.push_str("<table cellpadding=3 style=\"border-collapse:collapse\">");
-            for (rule, count) in &self.alerts_by_rule {
-                h.push_str(&format!("<tr><td>{}</td><td><b>{count}</b></td></tr>", rule_title(rule)));
-            }
-            h.push_str("</table>");
-        }
-
-        h.push_str("<h3 style=\"margin:18px 0 6px\">Клиенты</h3>");
-        h.push_str(&format!(
-            "<div>подключений <b>{}</b> от <b>{}</b> подписок</div>",
-            self.connects, self.connecting_subs
-        ));
-        if !self.by_protocol.is_empty() {
-            let items: Vec<String> = self
-                .by_protocol
-                .iter()
-                .map(|(p, c)| format!("{p} — {c}"))
-                .collect();
-            h.push_str(&format!("<div style=\"color:#555\">протоколы: {}</div>", items.join(", ")));
-        }
-
-        h.push_str("<h3 style=\"margin:18px 0 6px\">Тренд</h3><table cellpadding=3 style=\"border-collapse:collapse\">");
-        for (label, value) in &self.trend {
-            h.push_str(&format!("<tr><td style=\"color:#666\">{label}</td><td><b>{value}</b></td></tr>"));
-        }
-        h.push_str("</table>");
-        h.push_str("<p style=\"color:#999;font-size:12px;margin-top:18px\">fcore api · отчёт собран из базы, без внешних источников</p></div>");
-        h
-    }
-}
-
-/// Отправить письмо с HTML-частью и текстовым фолбэком.
-pub async fn send_digest(
-    cfg: &AlertEmailConfig,
-    subject: &str,
-    text: &str,
-    html: &str,
-) -> Result<(), String> {
-    send_email_html(cfg, subject, text, html).await
-}
-
-/// Отправить уже собранный отчёт (или только вернуть его, если dry_run).
-pub async fn run_with(
-    digest: &Digest,
-    cfg: &AlertEmailConfig,
-    dry_run: bool,
-) -> Result<String, String> {
-    let subject = digest.subject();
-    if dry_run {
-        return Ok(subject);
-    }
-    send_digest(cfg, &subject, &digest.render_text(), &digest.render_html()).await?;
-    Ok(subject)
-}
-
-/// Собрать и отправить отчёт. Возвращает (subject, text) для проверки.
-pub async fn run(
-    client: &PgClient,
-    cfg: &AlertEmailConfig,
-    kind: DigestKind,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-    dry_run: bool,
-) -> Result<(String, String), String> {
-    let digest = Digest::collect(client, kind, from, to)
-        .await
-        .map_err(|e| format!("digest query failed: {e}"))?;
-    let subject = digest.subject();
-    let text = digest.render_text();
-    if dry_run {
-        return Ok((subject, text));
-    }
-    send_digest(cfg, &subject, &text, &digest.render_html()).await?;
-    Ok((subject, text))
 }
 
 #[cfg(test)]
@@ -628,47 +332,50 @@ mod tests {
     }
 
     #[test]
-    fn daily_window_is_yesterday_in_local_time() {
-        let cfg = DigestConfig::default(); // +3
-        let now = utc("2026-11-12T06:00:00Z"); // 09:00 MSK
-        let (from, to) = cfg.window_utc(DigestKind::Daily, now);
-        // вчерашние сутки по МСК = 11.11 00:00..12.11 00:00 MSK
-        assert_eq!(from, utc("2026-11-10T21:00:00Z"));
-        assert_eq!(to, utc("2026-11-11T21:00:00Z"));
+    fn daily_window_is_yesterday() {
+        let now = utc("2026-11-12T06:00:00Z");
+        let (from, to) = DigestKind::Daily.window(now);
+        assert_eq!(from, utc("2026-11-11T00:00:00Z"));
+        assert_eq!(to, utc("2026-11-12T00:00:00Z"));
+    }
+
+    #[test]
+    fn weekly_window_is_seven_days() {
+        let now = utc("2026-11-12T06:00:00Z");
+        let (from, to) = DigestKind::Weekly.window(now);
+        assert_eq!((to - from).num_days(), 7);
+        assert_eq!(to, utc("2026-11-12T00:00:00Z"));
     }
 
     #[test]
     fn monthly_window_is_the_previous_calendar_month() {
-        let cfg = DigestConfig::default();
-        let now = utc("2026-11-01T06:00:00Z"); // 1 ноября, 09:00 MSK
-        let (from, to) = cfg.window_utc(DigestKind::Monthly, now);
-        assert_eq!(from, utc("2026-09-30T21:00:00Z")); // 1 окт 00:00 MSK
-        assert_eq!(to, utc("2026-10-31T21:00:00Z")); // 1 ноя 00:00 MSK
+        let now = utc("2026-11-01T06:00:00Z");
+        let (from, to) = DigestKind::Monthly.window(now);
+        assert_eq!(from, utc("2026-10-01T00:00:00Z"));
+        assert_eq!(to, utc("2026-11-01T00:00:00Z"));
     }
 
     #[test]
-    fn weekly_window_is_seven_local_days() {
-        let cfg = DigestConfig::default();
-        let now = utc("2026-11-12T06:00:00Z");
-        let (from, to) = cfg.window_utc(DigestKind::Weekly, now);
-        assert_eq!((to - from).num_days(), 7);
-        assert_eq!(to, utc("2026-11-11T21:00:00Z"));
-    }
-
-    #[test]
-    fn subject_shows_counts() {
+    fn window_label_is_short() {
         let d = Digest {
             kind: Some(DigestKind::Daily),
-            from: Some(utc("2026-11-10T21:00:00Z")),
-            to: Some(utc("2026-11-11T21:00:00Z")),
-            nodes_total: 64,
-            nodes_online: 55,
-            alerts_total: 56,
-            connects: 3422,
+            from: Some(utc("2026-11-10T00:00:00Z")),
+            to: Some(utc("2026-11-11T00:00:00Z")),
             ..Default::default()
         };
-        let subject = d.subject();
-        assert!(subject.contains("55 / 64"), "{subject}");
-        assert!(subject.contains("56 алертов"), "{subject}");
+        assert_eq!(d.window_label(), "10.11");
+    }
+
+    #[test]
+    fn digest_serializes_tuples_as_pairs() {
+        let d = Digest {
+            kind: Some(DigestKind::Daily),
+            by_env: vec![("dev".to_string(), 3, 2)],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["kind"], "daily");
+        assert_eq!(json["by_env"][0][0], "dev");
+        assert_eq!(json["by_env"][0][1], 3);
     }
 }
