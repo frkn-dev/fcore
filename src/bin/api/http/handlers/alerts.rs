@@ -86,9 +86,6 @@ pub struct DigestQuery {
 pub async fn admin_digest_handler<N, C, S>(
     query: DigestQuery,
     memory: MemSync<N, C, S>,
-    admin_enabled: bool,
-    admin_token: String,
-    auth_header: Option<String>,
 ) -> Result<warp::reply::Response, Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -103,12 +100,6 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    if !admin_enabled {
-        return Ok(json_status(404, "not found"));
-    }
-    if !check_token(auth_header, &admin_token) {
-        return Ok(json_status(401, "unauthorized"));
-    }
     let kind = crate::digest::DigestKind::parse(query.kind.as_deref().unwrap_or("daily"))
         .unwrap_or(crate::digest::DigestKind::Daily);
     let (from, to) = match (query.from, query.to) {
