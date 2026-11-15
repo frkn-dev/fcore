@@ -81,6 +81,17 @@ pub struct DigestConfig {
     /// Присылать месячную сводку 1-го числа.
     #[serde(default = "default_true")]
     pub monthly: bool,
+    /// Откуда брать покупки: payment-gw `/analytics`. Без этой секции блок
+    /// покупок в письме просто не выводится (деньги живут в другой базе).
+    #[serde(default)]
+    pub payment: Option<PaymentSource>,
+}
+
+/// Источник данных по покупкам: payment-gw и его analytics-токен.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct PaymentSource {
+    pub endpoint: String,
+    pub token: String,
 }
 
 fn default_digest_hour() -> u32 {
@@ -101,6 +112,7 @@ impl Default for DigestConfig {
             utc_offset_hours: default_digest_offset(),
             weekly: true,
             monthly: true,
+            payment: None,
         }
     }
 }
@@ -161,6 +173,175 @@ pub struct Digest {
     pub by_product: Vec<(String, i64)>,
     /// (подпись, активных на конец периода)
     pub trend: Vec<(String, i64)>,
+    /// Покупки и деньги из payment-gw. `None` — источник не настроен;
+    /// `Some` с `error` — источник настроен, но недоступен.
+    pub purchases: Option<Purchases>,
+}
+
+/// Покупки за окно отчёта: транзакции payment-gw и выручка по ним.
+#[derive(Debug, Default, Clone)]
+pub struct Purchases {
+    pub transactions: i64,
+    pub confirmed: i64,
+    pub canceled: i64,
+    pub pending: i64,
+    pub revenue: f64,
+    /// (тип покупки, число, выручка)
+    pub by_type: Vec<(String, i64, f64)>,
+    /// (длительность в днях, число, выручка)
+    pub by_duration: Vec<(i32, i64, f64)>,
+    /// (промокод, число, выручка)
+    pub by_promocode: Vec<(String, i64, f64)>,
+    /// Почему данных нет: в письме это отдельная строка, иначе пустой блок
+    /// читается как «покупок не было».
+    pub error: Option<String>,
+}
+
+/// Собрать покупки из payment-gw `/analytics` за окно отчёта.
+///
+/// Деньги живут в базе payment-gw, а не в базе api, поэтому блок добирается
+/// HTTP-запросом: сломанный payment-gw не должен ронять письмо целиком.
+pub async fn fetch_purchases(
+    src: &PaymentSource,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    offset_hours: i32,
+) -> Purchases {
+    let days = ((to - from).num_days() + 2).max(2);
+    let url = format!(
+        "{}/analytics/sales?granularity=daily&days={days}",
+        src.endpoint.trim_end_matches('/')
+    );
+
+    let client = reqwest::Client::new();
+    let resp = match client
+        .get(&url)
+        .bearer_auth(&src.token)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Purchases {
+                error: Some(format!("payment-gw недоступен: {e}")),
+                ..Default::default()
+            }
+        }
+    };
+    if !resp.status().is_success() {
+        return Purchases {
+            error: Some(format!("payment-gw ответил {}", resp.status())),
+            ..Default::default()
+        };
+    }
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return Purchases {
+                error: Some(format!("ответ payment-gw не разобран: {e}")),
+                ..Default::default()
+            }
+        }
+    };
+
+    // Окно — локальные сутки, а бакеты payment-gw — календарные дни его базы.
+    // Берём бакеты, чья дата попадает в окно, и складываем вручную.
+    let shift = Duration::hours(offset_hours as i64);
+    let from_day = (from + shift).format("%Y-%m-%d").to_string();
+    let to_day = (to + shift).format("%Y-%m-%d").to_string();
+    Purchases::from_analytics(&body, &from_day, &to_day)
+}
+
+impl Purchases {
+    fn from_analytics(body: &serde_json::Value, from_day: &str, to_day: &str) -> Self {
+        let mut p = Purchases::default();
+        let mut types: std::collections::BTreeMap<String, (i64, f64)> = Default::default();
+        let mut durations: std::collections::BTreeMap<i32, (i64, f64)> = Default::default();
+        let mut promos: std::collections::BTreeMap<String, (i64, f64)> = Default::default();
+
+        let empty = Vec::new();
+        let buckets = body["data"].as_array().unwrap_or(&empty);
+        for b in buckets {
+            let day = b["bucket"].as_str().unwrap_or("");
+            if day < from_day || day >= to_day {
+                continue;
+            }
+            p.transactions += b["transactions"].as_i64().unwrap_or(0);
+            p.confirmed += b["confirmed"].as_i64().unwrap_or(0);
+            p.canceled += b["canceled"].as_i64().unwrap_or(0);
+            p.pending += b["pending"].as_i64().unwrap_or(0);
+            p.revenue += b["revenue"].as_f64().unwrap_or(0.0);
+
+            for t in b["byType"].as_array().unwrap_or(&empty) {
+                let key = type_title(t["type"].as_str().unwrap_or("")).to_string();
+                let e = types.entry(key).or_default();
+                e.0 += t["count"].as_i64().unwrap_or(0);
+                e.1 += t["revenue"].as_f64().unwrap_or(0.0);
+            }
+            for d in b["byDuration"].as_array().unwrap_or(&empty) {
+                let key = d["durationDays"].as_i64().unwrap_or(0) as i32;
+                let e = durations.entry(key).or_default();
+                e.0 += d["count"].as_i64().unwrap_or(0);
+                e.1 += d["revenue"].as_f64().unwrap_or(0.0);
+            }
+            for c in b["byPromocode"].as_array().unwrap_or(&empty) {
+                let key = c["promocode"].as_str().unwrap_or("без промокода").to_string();
+                let e = promos.entry(key).or_default();
+                e.0 += c["count"].as_i64().unwrap_or(0);
+                e.1 += c["revenue"].as_f64().unwrap_or(0.0);
+            }
+        }
+
+        let mut by_type: Vec<(String, i64, f64)> =
+            types.into_iter().map(|(k, (c, r))| (k, c, r)).collect();
+        by_type.sort_by(|a, b| b.1.cmp(&a.1));
+        p.by_type = by_type;
+
+        let mut by_duration: Vec<(i32, i64, f64)> =
+            durations.into_iter().map(|(k, (c, r))| (k, c, r)).collect();
+        by_duration.sort_by_key(|(d, _, _)| *d);
+        p.by_duration = by_duration;
+
+        let mut by_promocode: Vec<(String, i64, f64)> =
+            promos.into_iter().map(|(k, (c, r))| (k, c, r)).collect();
+        by_promocode.sort_by(|a, b| b.1.cmp(&a.1));
+        by_promocode.truncate(5);
+        p.by_promocode = by_promocode;
+
+        p
+    }
+
+    /// Доля отмен: выше 20% — повод посмотреть, что сломано в оплате.
+    fn cancel_ratio(&self) -> f64 {
+        if self.transactions == 0 {
+            0.0
+        } else {
+            self.canceled as f64 / self.transactions as f64
+        }
+    }
+}
+
+/// Название продукта из payment-gw в человеческое.
+fn type_title(t: &str) -> &str {
+    match t {
+        "KeyPurchase" => "ключ",
+        "SubscriptionRenewal" => "продление",
+        "Donation" => "донат",
+        "TrafficTopup" => "трафик",
+        other => other,
+    }
+}
+
+fn money(v: f64) -> String {
+    // Копейки в сводке не нужны, но и «12» вместо «12.00» — тоже.
+    let rounded = (v * 100.0).round() / 100.0;
+    if rounded.fract() == 0.0 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded:.2}")
+    }
 }
 
 fn rule_title(rule: &str) -> &str {
@@ -382,6 +563,21 @@ impl Digest {
         Ok(d)
     }
 
+    /// Добрать блок покупок из payment-gw: деньги живут в другой базе, поэтому
+    /// это отдельный HTTP-запрос. Недоступный payment-gw не отменяет письмо —
+    /// в блоке появится причина.
+    pub async fn attach_purchases(&mut self, cfg: &DigestConfig) {
+        let (from, to) = match (self.from, self.to) {
+            (Some(f), Some(t)) => (f, t),
+            _ => return,
+        };
+        if let Some(src) = cfg.payment.as_ref() {
+            self.purchases = Some(
+                fetch_purchases(src, from, to, cfg.utc_offset_hours).await,
+            );
+        }
+    }
+
     fn window_label(&self) -> String {
         match (self.from, self.to) {
             (Some(f), Some(t)) => match self.kind {
@@ -407,14 +603,20 @@ impl Digest {
     }
 
     pub fn subject(&self) -> String {
-        let kind = self.kind.unwrap_or(DigestKind::Daily);
+        let revenue = match &self.purchases {
+            Some(p) if p.error.is_none() && p.confirmed > 0 => {
+                format!(", выручка {}", money(p.revenue))
+            }
+            _ => String::new(),
+        };
         format!(
-            "[FRKN] 📊 сводка за {} — {} / {} нод онлайн, {} алертов, {} подключений",
+            "[FRKN] 📊 сводка за {} — {} / {} нод онлайн, {} алертов, {} подключений{}",
             self.window_label(),
             self.nodes_online,
             self.nodes_total,
             self.alerts_total,
-            self.connects
+            self.connects,
+            revenue
         )
     }
 
@@ -491,6 +693,54 @@ impl Digest {
             out.push_str(&format!("  продукты: {}\n", items.join(", ")));
         }
 
+        out.push_str("\n── ПОКУПКИ ──────────────────\n");
+        match &self.purchases {
+            None => out.push_str("источник не настроен ([digest.payment])\n"),
+            Some(p) => match &p.error {
+                Some(e) => out.push_str(&format!("нет данных: {e}\n")),
+                None if p.transactions == 0 => out.push_str("за период покупок нет\n".to_string().as_str()),
+                None => {
+                    out.push_str(&format!(
+                        "транзакций: {}   подтверждено: {}   отменено: {}   ждут: {}\n",
+                        p.transactions, p.confirmed, p.canceled, p.pending
+                    ));
+                    out.push_str(&format!("выручка: {}   чек: {}\n", money(p.revenue), money(
+                        if p.confirmed > 0 { p.revenue / p.confirmed as f64 } else { 0.0 }
+                    )));
+                    if !p.by_type.is_empty() {
+                        let items: Vec<String> = p
+                            .by_type
+                            .iter()
+                            .map(|(t, c, r)| format!("{t} {c} / {}", money(*r)))
+                            .collect();
+                        out.push_str(&format!("  типы: {}\n", items.join(", ")));
+                    }
+                    if !p.by_duration.is_empty() {
+                        let items: Vec<String> = p
+                            .by_duration
+                            .iter()
+                            .map(|(d, c, r)| format!("{d} дн {c} / {}", money(*r)))
+                            .collect();
+                        out.push_str(&format!("  сроки: {}\n", items.join(", ")));
+                    }
+                    if !p.by_promocode.is_empty() {
+                        let items: Vec<String> = p
+                            .by_promocode
+                            .iter()
+                            .map(|(code, c, r)| format!("{code} {c} / {}", money(*r)))
+                            .collect();
+                        out.push_str(&format!("  промокоды: {}\n", items.join(", ")));
+                    }
+                    if p.cancel_ratio() > 0.2 && p.transactions >= 3 {
+                        out.push_str(&format!(
+                            "  ⚠️ отмен {:.0}% — проверить платёжный канал\n",
+                            p.cancel_ratio() * 100.0
+                        ));
+                    }
+                }
+            },
+        }
+
         out.push_str("\n── ТРЕНД ────────────────────\n");
         for (label, value) in &self.trend {
             out.push_str(&format!("  {label:<14} {value}\n"));
@@ -562,6 +812,69 @@ impl Digest {
                 .map(|(p, c)| format!("{p} — {c}"))
                 .collect();
             h.push_str(&format!("<div style=\"color:#555\">протоколы: {}</div>", items.join(", ")));
+        }
+
+        h.push_str("<h3 style=\"margin:18px 0 6px\">Покупки</h3>");
+        match &self.purchases {
+            None => h.push_str("<div style=\"color:#999\">источник не настроен</div>"),
+            Some(p) => match &p.error {
+                Some(e) => h.push_str(&format!("<div style=\"color:#c62828\">нет данных: {e}</div>")),
+                None if p.transactions == 0 => {
+                    h.push_str("<div style=\"color:#666\">за период покупок нет</div>")
+                }
+                None => {
+                    h.push_str(&format!(
+                        "<table cellpadding=4 style=\"border-collapse:collapse\">\
+                         <tr><td>транзакций</td><td><b>{}</b></td><td>подтверждено</td><td><b style=\"color:#1a7f37\">{}</b></td><td>отменено</td><td><b style=\"color:#c62828\">{}</b></td><td>ждут</td><td><b>{}</b></td></tr>\
+                         <tr><td>выручка</td><td><b>{}</b></td><td>средний чек</td><td><b>{}</b></td></tr></table>",
+                        p.transactions,
+                        p.confirmed,
+                        p.canceled,
+                        p.pending,
+                        money(p.revenue),
+                        money(if p.confirmed > 0 { p.revenue / p.confirmed as f64 } else { 0.0 })
+                    ));
+                    if !p.by_type.is_empty() {
+                        let items: Vec<String> = p
+                            .by_type
+                            .iter()
+                            .map(|(t, c, r)| format!("{t} — {c} ({})", money(*r)))
+                            .collect();
+                        h.push_str(&format!(
+                            "<div style=\"color:#555\">типы: {}</div>",
+                            items.join(", ")
+                        ));
+                    }
+                    if !p.by_duration.is_empty() {
+                        let items: Vec<String> = p
+                            .by_duration
+                            .iter()
+                            .map(|(d, c, r)| format!("{d} дн — {c} ({})", money(*r)))
+                            .collect();
+                        h.push_str(&format!(
+                            "<div style=\"color:#555\">сроки: {}</div>",
+                            items.join(", ")
+                        ));
+                    }
+                    if !p.by_promocode.is_empty() {
+                        let items: Vec<String> = p
+                            .by_promocode
+                            .iter()
+                            .map(|(code, c, r)| format!("{code} — {c} ({})", money(*r)))
+                            .collect();
+                        h.push_str(&format!(
+                            "<div style=\"color:#555\">промокоды: {}</div>",
+                            items.join(", ")
+                        ));
+                    }
+                    if p.cancel_ratio() > 0.2 && p.transactions >= 3 {
+                        h.push_str(&format!(
+                            "<div style=\"color:#c62828;margin-top:4px\">⚠️ отмен {:.0}% — проверить платёжный канал</div>",
+                            p.cancel_ratio() * 100.0
+                        ));
+                    }
+                }
+            },
         }
 
         h.push_str("<h3 style=\"margin:18px 0 6px\">Тренд</h3><table cellpadding=3 style=\"border-collapse:collapse\">");
@@ -653,6 +966,51 @@ mod tests {
         let (from, to) = cfg.window_utc(DigestKind::Weekly, now);
         assert_eq!((to - from).num_days(), 7);
         assert_eq!(to, utc("2026-11-11T21:00:00Z"));
+    }
+
+    fn bucket(day: &str, tx: i64, conf: i64, canc: i64, rev: f64) -> serde_json::Value {
+        serde_json::json!({
+            "bucket": day,
+            "transactions": tx,
+            "confirmed": conf,
+            "canceled": canc,
+            "pending": tx - conf - canc,
+            "revenue": rev,
+            "byType": [{"type": "Subscription30Days", "count": conf, "revenue": rev}],
+            "byDuration": [{"durationDays": 30, "count": conf, "revenue": rev}],
+            "byPromocode": [{"promocode": "PROMO10", "count": conf, "revenue": rev}],
+        })
+    }
+
+    #[test]
+    fn purchases_sum_only_buckets_inside_the_window() {
+        let body = serde_json::json!({
+            "totals": {"transactions": 99, "confirmed": 99, "canceled": 0, "pending": 0, "revenue": 9999.0},
+            "data": [
+                bucket("2026-11-13", 5, 4, 1, 400.0),
+                bucket("2026-11-12", 3, 3, 0, 300.0),
+                bucket("2026-11-11", 7, 7, 0, 700.0), // до окна
+            ],
+        });
+        let p = Purchases::from_analytics(&body, "2026-11-12", "2026-11-14");
+        assert_eq!(p.transactions, 8);
+        assert_eq!(p.confirmed, 7);
+        assert_eq!(p.canceled, 1);
+        assert_eq!(p.revenue, 700.0);
+        assert_eq!(p.by_type.len(), 1);
+        assert_eq!(p.by_type[0].1, 7);
+        assert_eq!(p.by_duration[0].0, 30);
+        assert_eq!(p.by_promocode[0].0, "PROMO10");
+    }
+
+    #[test]
+    fn empty_window_is_zero_not_missing() {
+        let body = serde_json::json!({"data": []});
+        let p = Purchases::from_analytics(&body, "2026-11-12", "2026-11-14");
+        assert_eq!(p.transactions, 0);
+        assert_eq!(p.revenue, 0.0);
+        assert!(p.error.is_none());
+        assert_eq!(p.cancel_ratio(), 0.0);
     }
 
     #[test]

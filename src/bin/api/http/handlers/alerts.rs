@@ -111,7 +111,7 @@ where
     let now = Utc::now();
     let (from, to) = digest_cfg.window_utc(kind, now);
 
-    let digest = match memory.db.digest().collect(kind, from, to).await {
+    let digest = match memory.db.digest().collect(&digest_cfg, kind, from, to).await {
         Ok(d) => d,
         Err(e) => {
             tracing::error!("digest: collect failed: {e}");

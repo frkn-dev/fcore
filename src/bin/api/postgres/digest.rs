@@ -57,13 +57,20 @@ impl PgDigest {
 
     pub async fn collect(
         &self,
+        cfg: &DigestConfig,
         kind: DigestKind,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<digest::Digest> {
-        let mut manager = self.manager.lock().await;
-        let client = manager.get_client().await?;
-        Ok(digest::Digest::collect(client, kind, from, to).await?)
+        let mut digest = {
+            let mut manager = self.manager.lock().await;
+            let client = manager.get_client().await?;
+            digest::Digest::collect(client, kind, from, to).await?
+        };
+        // Purchases come from payment-gw (separate database), so they are
+        // fetched over HTTP and never take the lock or the report down.
+        digest.attach_purchases(cfg).await;
+        Ok(digest)
     }
 
     /// Отправить все отчёты, которые пора отправить. Вызывается раз в 10 минут.
@@ -100,7 +107,7 @@ impl PgDigest {
                 continue;
             }
             let (from, to) = cfg.window_utc(kind, now);
-            match digest::run_with(&self.collect(kind, from, to).await?, email, false).await {
+            match digest::run_with(&self.collect(cfg, kind, from, to).await?, email, false).await {
                 Ok(subject) => {
                     tracing::info!("digest: {} за {} отправлен", kind.as_str(), period);
                     sent.push(subject);
