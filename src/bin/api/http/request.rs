@@ -75,6 +75,9 @@ pub enum TagReq {
 
     #[serde(alias = "mtproto", alias = "Mtproto")]
     Mtproto,
+
+    #[serde(alias = "icebreaker", alias = "Icebreaker")]
+    Icebreaker,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Hash, Eq)]
@@ -118,6 +121,7 @@ impl TagReq {
             TagReq::VlessXhttpReality => vec![Tag::VlessXhttpReality],
             TagReq::VlessXhttpCdn => vec![Tag::VlessXhttpCdn],
             TagReq::Mtproto => vec![Tag::Mtproto],
+            TagReq::Icebreaker => vec![Tag::Icebreaker],
         }
     }
 
@@ -135,6 +139,7 @@ impl TagReq {
             Tag::Wireguard => TagReq::Wireguard,
             Tag::AmneziaWg | Tag::AmneziaWgMobile => TagReq::AmneziaWg,
             Tag::Mtproto => TagReq::Mtproto,
+            Tag::Icebreaker => TagReq::Icebreaker,
         }
     }
 }
@@ -591,6 +596,7 @@ impl SubscriptionInfoRequest {
             VlessXhttpReality => [Txt, Base64, Clash].into(),
             VlessXhttpCdn => [Txt, Base64, Clash].into(),
             Mtproto => [].into(),
+            Icebreaker => [].into(),
         }
     }
 

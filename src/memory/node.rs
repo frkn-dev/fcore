@@ -497,6 +497,7 @@ mod tests {
             pool: None,
             pool_translation: None,
             node_weights: BTreeMap::new(),
+            bench_url: None,
         };
 
         let response = node.as_node_response();

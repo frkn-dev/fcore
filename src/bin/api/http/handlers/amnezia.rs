@@ -323,6 +323,10 @@ pub struct GatewayConfigResponse {
     pub node_weights: Option<BTreeMap<String, i32>>,
     #[serde(rename = "config_rev", skip_serializing_if = "Option::is_none")]
     pub config_rev: Option<String>,
+    /// Icebreaker transport: URL, per-connection token and MTU. Only for the
+    /// owning request — never in `/v1/services`, logs or the share feed.
+    #[serde(rename = "icebreaker_config", skip_serializing_if = "Option::is_none")]
+    pub icebreaker_config: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -364,8 +368,29 @@ fn proto_label(tag: Tag) -> &'static str {
         Tag::AmneziaWgMobile => "awg-mobile",
         Tag::Wireguard => "wireguard",
         Tag::Hysteria2 => "hysteria2",
+        Tag::Icebreaker => "icebreaker",
         _ => "vless",
     }
+}
+
+/// Icebreaker transport block for `/v1/config`.
+///
+/// `url`/`sni` come from the node's Icebreaker inbound (the node owns its
+/// endpoint), the token is the per-connection secret — the node stores only
+/// its hash. See `docs/ICEBREAKER_TZ.md` §6.2.
+fn build_icebreaker_config(
+    node: &fcore::Node,
+    inbound: &fcore::Inbound,
+    token: &uuid::Uuid,
+) -> serde_json::Value {
+    let host = node.connection_host();
+    serde_json::json!({
+        "url": format!("https://{}:{}/tunnel", host, inbound.port),
+        "token": token.to_string(),
+        "sni": node.hostname,
+        "mtu": 1280,
+        "transport": "webtransport",
+    })
 }
 
 /// Returns a human-readable inbound name for the given tag.
@@ -381,6 +406,7 @@ fn inbound_label(tag: Tag) -> &'static str {
         Tag::Hysteria2 => "Hysteria2",
         Tag::Mtproto => "MTProto",
         Tag::Vmess => "VMess",
+        Tag::Icebreaker => "Icebreaker",
     }
 }
 
@@ -1874,7 +1900,24 @@ where
     // Build the config for the protocol of the chosen connection, not of the
     // service card: an explicitly requested connection may be of either type.
     let conn_tag = conn.get_proto().proto();
-    let server_config_json = if conn_tag == Tag::Hysteria2 {
+    let icebreaker_config = if conn_tag == Tag::Icebreaker {
+        let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
+            http::internal_error("node has no Icebreaker inbound").into_response()
+        })?;
+        let token = conn.get_token().ok_or_else(|| {
+            http::internal_error("connection has no Icebreaker token").into_response()
+        })?;
+        Some(build_icebreaker_config(&node, inbound, &token))
+    } else {
+        None
+    };
+
+    let server_config_json = if conn_tag == Tag::Icebreaker {
+        // Deliberately empty: the transport config travels in
+        // `icebreaker_config`, and an empty string keeps old clients from
+        // parsing this as an Amnezia server config.
+        serde_json::json!({})
+    } else if conn_tag == Tag::Hysteria2 {
         let inbound = node.inbounds.get(&conn_tag).ok_or_else(|| {
             http::internal_error("Node has no matching Hysteria2 inbound").into_response()
         })?;
@@ -1966,6 +2009,7 @@ where
             "awg-mobile".to_string(),
             "hysteria2".to_string(),
             "wireguard".to_string(),
+            "icebreaker".to_string(),
         ],
         service_info: serde_json::json!({
             "name": service_name,
@@ -1991,6 +2035,7 @@ where
         node_ports,
         node_weights,
         config_rev,
+        icebreaker_config,
     })
 }
 
@@ -2997,6 +3042,7 @@ mod tests {
             speedtest_url: None,
             node_weights: None,
             config_rev: Some("abc".to_string()),
+            icebreaker_config: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["share_label"], "Android Mama");
@@ -3027,6 +3073,7 @@ mod tests {
             speedtest_url: None,
             node_weights: None,
             config_rev: None,
+            icebreaker_config: None,
         };
         let v = serde_json::to_value(&owner).unwrap();
         for field in [

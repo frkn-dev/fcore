@@ -380,6 +380,13 @@ where
         }
 
         match req.proto {
+            // Icebreaker needs a node registry that premium slots do not have;
+            // the transport is enabled per core node first.
+            Tag::Icebreaker => {
+                return Ok(http::bad_request(
+                    "Icebreaker is not available for premium slots",
+                ))
+            }
             // WG-family protocols share the allocation logic; each tag
             // draws from its own address pool.
             Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile => {

@@ -20,6 +20,8 @@ pub enum Proto {
     // order, so appending preserves binary compatibility with older nodes/api
     // for all pre-existing protocols.
     AmneziaWgMobile { param: WgParam },
+    /// Per-connection WebTransport token: the node keeps only its hash.
+    Icebreaker { token: uuid::Uuid },
 }
 
 impl Proto {
@@ -32,12 +34,14 @@ impl Proto {
             Proto::Hysteria2 { .. } => Tag::Hysteria2,
             Proto::Xray(tag) => *tag,
             Proto::Mtproto { .. } => Tag::Mtproto,
+            Proto::Icebreaker { .. } => Tag::Icebreaker,
         }
     }
 
     pub fn token(&self) -> Option<uuid::Uuid> {
         match self {
             Proto::Hysteria2 { token } => Some(*token),
+            Proto::Icebreaker { token } => Some(*token),
             _ => None,
         }
     }

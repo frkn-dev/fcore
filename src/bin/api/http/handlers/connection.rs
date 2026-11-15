@@ -341,6 +341,11 @@ where
     let proto_name = proto.to_string();
 
     let proto = match proto {
+        // Icebreaker gets a per-connection token; the node hands out the VPN
+        // IP when the client is registered there (docs/ICEBREAKER_TZ.md).
+        Tag::Icebreaker => Proto::Icebreaker {
+            token: uuid::Uuid::new_v4(),
+        },
         // WG-family protocols share the allocation logic; each tag draws
         // from its own address pool.
         Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile => {

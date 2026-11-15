@@ -49,6 +49,10 @@ pub enum ProtoTag {
     // for all pre-existing protocols.
     #[serde(rename = "AmneziaWgMobile")]
     AmneziaWgMobile,
+    // Same rule for every new transport: append only, never insert — rkyv
+    // discriminants follow declaration order.
+    #[serde(rename = "Icebreaker")]
+    Icebreaker,
 }
 
 impl fmt::Display for ProtoTag {
@@ -65,6 +69,7 @@ impl fmt::Display for ProtoTag {
             ProtoTag::Hysteria2 => write!(f, "Hysteria2"),
             ProtoTag::Mtproto => write!(f, "Mtproto"),
             ProtoTag::AmneziaWgMobile => write!(f, "AmneziaWgMobile"),
+            ProtoTag::Icebreaker => write!(f, "Icebreaker"),
         }
     }
 }
@@ -92,6 +97,11 @@ impl ProtoTag {
         *self == ProtoTag::Mtproto
     }
 
+    /// Stealth WebTransport transport (see docs/ICEBREAKER_TZ.md).
+    pub fn is_icebreaker(&self) -> bool {
+        *self == ProtoTag::Icebreaker
+    }
+
     /// Whether the protocol is allowed while a subscription runs on its
     /// traffic balance (traffic mode): only protocols with per-connection
     /// traffic accounting are metered. `metered_conns` holds tag names as in
@@ -117,6 +127,7 @@ impl std::str::FromStr for ProtoTag {
             "AmneziaWgMobile" => Ok(ProtoTag::AmneziaWgMobile),
             "Hysteria2" => Ok(ProtoTag::Hysteria2),
             "Mtproto" => Ok(ProtoTag::Mtproto),
+            "Icebreaker" => Ok(ProtoTag::Icebreaker),
             _ => Err(()),
         }
     }
@@ -125,6 +136,20 @@ impl std::str::FromStr for ProtoTag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icebreaker_roundtrips_through_string() {
+        use std::str::FromStr;
+        assert_eq!(ProtoTag::Icebreaker.to_string(), "Icebreaker");
+        assert_eq!(ProtoTag::from_str("Icebreaker"), Ok(ProtoTag::Icebreaker));
+        assert!(ProtoTag::Icebreaker.is_icebreaker());
+    }
+
+    #[test]
+    fn icebreaker_is_last_so_rkyv_discriminants_stay_stable() {
+        // Appending only: the previous last variant keeps its discriminant.
+        assert_eq!(ProtoTag::AmneziaWgMobile as u8 + 1, ProtoTag::Icebreaker as u8);
+    }
 
     fn metered() -> Vec<String> {
         [
