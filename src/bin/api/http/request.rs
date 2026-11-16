@@ -100,6 +100,9 @@ impl TagReq {
                 Tag::Vmess,
                 Tag::Shadowsocks,
             ],
+            // "Proxy" is the whole proxy feed: WG/AWG belong here too, so a
+            // mihomo proxy-provider gets every node. Formats without a WG
+            // renderer simply skip those entries.
             TagReq::Proxy => vec![
                 Tag::VlessTcpReality,
                 Tag::VlessGrpcReality,
@@ -108,6 +111,9 @@ impl TagReq {
                 Tag::Vmess,
                 Tag::Shadowsocks,
                 Tag::Hysteria2,
+                Tag::Wireguard,
+                Tag::AmneziaWg,
+                Tag::AmneziaWgMobile,
             ],
             TagReq::Wireguard => vec![Tag::Wireguard],
             // Mobile AWG connections are served as plain "amneziawg" links.
