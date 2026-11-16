@@ -583,8 +583,9 @@ impl SubscriptionInfoRequest {
         match proto {
             Xray => [Txt, Base64, Clash].into(),
             Proxy => [Txt, Base64, Clash].into(),
-            Wireguard => [].into(),
-            AmneziaWg => [].into(),
+            // mihomo speaks wireguard and amnezia-wg (amnezia-wg-option)
+            Wireguard => [Clash].into(),
+            AmneziaWg => [Clash].into(),
             Hysteria2 => [Txt, Base64, Clash].into(),
             VlessTcpReality => [Txt, Base64, Clash].into(),
             VlessGrpcReality => [Txt, Base64, Clash].into(),
@@ -755,8 +756,16 @@ mod tests {
             assert!(req.validate().is_ok(), "clash rejected for proto={proto}");
         }
 
+        // WireGuard and AmneziaWG now have a clash renderer too: mihomo takes
+        // `type: wireguard` with `amnezia-wg-option`.
+        for proto in ["wireguard", "amneziawg"] {
+            let qs = format!("id={}&format=clash&env=all&proto={}", id, proto);
+            let req: SubscriptionInfoRequest = serde_urlencoded::from_str(&qs).unwrap();
+            assert!(req.validate().is_ok(), "clash rejected for proto={proto}");
+        }
+
         // Sanity: protocols without a clash renderer stay rejected.
-        let qs = format!("id={}&format=clash&env=all&proto=wireguard", id);
+        let qs = format!("id={}&format=clash&env=all&proto=mtproto", id);
         let req: SubscriptionInfoRequest = serde_urlencoded::from_str(&qs).unwrap();
         assert!(req.validate().is_err());
     }
