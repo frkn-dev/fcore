@@ -47,12 +47,36 @@ pub enum ClashProxy {
         reality_opts: Option<RealityOpts>,
         #[serde(rename = "grpc-opts", skip_serializing_if = "Option::is_none")]
         grpc_opts: Option<GrpcOpts>,
-        #[serde(rename = "http-opts", skip_serializing_if = "Option::is_none")]
-        http_opts: Option<XHttpOpts>,
+        // mihomo reads `xhttp-opts` (string path) for network: xhttp; the old
+        // `http-opts` key belongs to network: http and left the node dead.
+        #[serde(rename = "xhttp-opts", skip_serializing_if = "Option::is_none")]
+        xhttp_opts: Option<XHttpOpts>,
         #[serde(rename = "client-fingerprint")]
         client_fingerprint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         flow: Option<String>,
+    },
+    /// mihomo/wireguard outbound. AWG uses the same shape plus
+    /// `amnezia-wg-option`, which is what makes the node handshake.
+    Wireguard {
+        name: String,
+        server: String,
+        port: u16,
+        /// Client address inside the tunnel (`10.x.y.z/32` style is accepted,
+        /// mihomo wants a bare IP).
+        ip: String,
+        #[serde(rename = "private-key")]
+        private_key: String,
+        #[serde(rename = "public-key")]
+        public_key: String,
+        #[serde(rename = "allowed-ips")]
+        allowed_ips: Vec<String>,
+        udp: bool,
+        mtu: u16,
+        #[serde(rename = "persistent-keepalive", skip_serializing_if = "Option::is_none")]
+        persistent_keepalive: Option<u16>,
+        #[serde(rename = "amnezia-wg-option", skip_serializing_if = "Option::is_none")]
+        amnezia_wg_option: Option<AwgOpts>,
     },
     Hysteria2 {
         name: String,
@@ -88,12 +112,28 @@ pub struct HttpOpts {
 
 #[derive(Serialize)]
 pub struct XHttpOpts {
-    path: Vec<String>,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 #[derive(Serialize, Default)]
 pub struct HttpHeaders {
     connection: Vec<&'static str>,
+}
+
+/// mihomo `amnezia-wg-option`: the obfuscation knobs of AmneziaWG.
+#[derive(Serialize)]
+pub struct AwgOpts {
+    pub jc: u16,
+    pub jmin: u16,
+    pub jmax: u16,
+    pub s1: u16,
+    pub s2: u16,
+    pub h1: u32,
+    pub h2: u32,
+    pub h3: u32,
+    pub h4: u32,
 }
 
 #[derive(Serialize)]
@@ -142,12 +182,15 @@ impl InboundClashConfig for Inbound {
                 ClashProxy::Vmess { name, .. } => name.clone(),
                 ClashProxy::Vless { name, .. } => name.clone(),
                 ClashProxy::Hysteria2 { name, .. } => name.clone(),
+                ClashProxy::Wireguard { name, .. } => name.clone(),
             })
             .collect();
 
         ClashConfig {
             port: 7890,
-            mode: "global",
+            // `global` meant "everything goes to GLOBAL and the url-test group
+            // idles"; `rule` with a MATCH tail is what mihomo users expect.
+            mode: "rule",
             proxies,
             proxy_groups: vec![ClashProxyGroup {
                 name: "♻️ Automatic".into(),
@@ -156,7 +199,7 @@ impl InboundClashConfig for Inbound {
                 interval: 300,
                 proxies: proxy_names,
             }],
-            rules: vec![],
+            rules: vec!["MATCH,♻️ Automatic".into()],
         }
     }
 
@@ -201,6 +244,69 @@ impl InboundClashConfig for Inbound {
             });
         }
 
+        // WireGuard family carries no xray stream settings: handle it before
+        // the stream guard below, or every WG/AWG node is silently dropped.
+        if matches!(
+            self.tag,
+            Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile
+        ) {
+            {
+                let param = conn.get_wireguard().or_else(|| conn.get_amneziawg())?;
+                let (peer_pubkey, mtu, keepalive, awg_opts) = match self.tag {
+                    Tag::Wireguard => {
+                        let wg = self.wg.as_ref()?;
+                        (
+                            wg.keys.pubkey().ok()?,
+                            wg.keepalive.map(|_| 1420).unwrap_or(1420),
+                            wg.keepalive,
+                            None,
+                        )
+                    }
+                    _ => {
+                        let awg = self.awg.as_ref()?;
+                        let opts = awg.obfuscation.as_ref().and_then(|o| {
+                            Some(AwgOpts {
+                                jc: o.jc,
+                                jmin: o.jmin,
+                                jmax: o.jmax,
+                                s1: o.s1,
+                                s2: o.s2,
+                                h1: o.h1.parse().ok()?,
+                                h2: o.h2.parse().ok()?,
+                                h3: o.h3.parse().ok()?,
+                                h4: o.h4.parse().ok()?,
+                            })
+                        });
+                        (
+                            awg.interface.private_key.pubkey().ok()?,
+                            awg.interface.mtu.unwrap_or(1420),
+                            awg.keepalive,
+                            opts,
+                        )
+                    }
+                };
+
+                // mihomo wants a bare address; the mask carries the prefix.
+                let client_ip = param.address.to_string();
+                let prefix = get_uuid_last_octet_simple(conn_id);
+                let name = format!("{} [{}] {}", label, self.tag, prefix);
+
+                return Some(ClashProxy::Wireguard {
+                    name,
+                    server: host.to_string(),
+                    port,
+                    ip: client_ip.split('/').next().unwrap_or(&client_ip).to_string(),
+                    private_key: param.keys.privkey.clone(),
+                    public_key: peer_pubkey,
+                    allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+                    udp: true,
+                    mtu,
+                    persistent_keepalive: keepalive,
+                    amnezia_wg_option: awg_opts,
+                });
+            }
+        }
+
         let stream = self.stream_settings.as_ref()?;
 
         let proxy = match self.tag {
@@ -238,7 +344,7 @@ impl InboundClashConfig for Inbound {
             Tag::VlessGrpcReality | Tag::VlessTcpReality | Tag::VlessXhttpReality => {
                 let reality = stream.reality_settings.as_ref()?;
 
-                let (network, grpc_opts, flow, http_opts) = match stream {
+                let (network, grpc_opts, flow, xhttp_opts) = match stream {
                     StreamSettings {
                         grpc_settings: Some(grpc),
                         ..
@@ -260,7 +366,8 @@ impl InboundClashConfig for Inbound {
                         None,
                         None,
                         Some(XHttpOpts {
-                            path: vec![xhttp.path.clone()],
+                            path: xhttp.path.clone(),
+                            mode: None,
                         }),
                     ),
                     StreamSettings {
@@ -293,7 +400,7 @@ impl InboundClashConfig for Inbound {
                         short_id: reality.short_ids.first().cloned().unwrap_or_default(),
                     }),
                     grpc_opts,
-                    http_opts,
+                    xhttp_opts,
                     flow,
                 })
             }
@@ -322,8 +429,9 @@ impl InboundClashConfig for Inbound {
                     client_fingerprint: "chrome".to_string(),
                     reality_opts: None,
                     grpc_opts: None,
-                    http_opts: Some(XHttpOpts {
-                        path: vec![xhttp.path.clone()],
+                    xhttp_opts: Some(XHttpOpts {
+                        path: xhttp.path.clone(),
+                        mode: None,
                     }),
                     flow: None,
                 })
@@ -449,4 +557,111 @@ mod tests {
             .proxy(&conn_id, &conn, "node.example", "1.2.3.4", "Phone")
             .is_none());
     }
+    fn awg_inbound() -> Inbound {
+        use crate::config::amnezia_wg::{
+            AmneziaWgSettings, AwgInterfaceConfig, AwgObfuscationParams,
+        };
+        use crate::IpAddrMask;
+        use crate::WgKeys;
+
+        Inbound {
+            tag: Tag::AmneziaWgMobile,
+            port: 8443,
+            stream_settings: None,
+            wg: None,
+            awg: Some(AmneziaWgSettings {
+                interface: AwgInterfaceConfig {
+                    interface: "awg0".into(),
+                    address: "10.8.0.1/24".parse().unwrap(),
+                    listen_port: 8443,
+                    mtu: Some(1280),
+                    private_key: WgKeys {
+                        privkey: WgKeys::default().privkey,
+                    },
+                    dns: vec!["1.1.1.1".parse().unwrap()],
+                },
+                obfuscation: Some(AwgObfuscationParams {
+                    jc: 5,
+                    jmin: 50,
+                    jmax: 1000,
+                    s1: 30,
+                    s2: 40,
+                    s3: 0,
+                    s4: 0,
+                    h1: "1000001".into(),
+                    h2: "1000002".into(),
+                    h3: "1000003".into(),
+                    h4: "1000004".into(),
+                    i1: String::new(),
+                    i2: String::new(),
+                    i3: String::new(),
+                    i4: String::new(),
+                    i5: String::new(),
+                    random_trailers: None,
+                    disable_cookies: None,
+                    header_protection_key: None,
+                    content_padding_addition: None,
+                    rekey_after_time: None,
+                    rekey_timeout: None,
+                    reject_after_time: None,
+                    keepalive_timeout: None,
+                    max_handshake_attempts: None,
+                }),
+                keepalive: Some(25),
+            }),
+            h2: None,
+            mtproto_secret: None,
+        }
+    }
+
+    #[test]
+    fn amneziawg_proxy_renders_for_mihomo() {
+        let conn_id = uuid::Uuid::parse_str("6f9619ff-8b86-d011-b42d-00c04fc964ff").unwrap();
+        let param = crate::WgParam::new(crate::IpAddrMask::new(
+            "10.8.0.42".parse().unwrap(),
+            32,
+        ));
+        let conn = Connection::new(&Env::Ru, None, Proto::new_awg_mobile(&param), None);
+
+        let proxy = awg_inbound()
+            .proxy(&conn_id, &conn, "node.example", "1.2.3.4", "Windows")
+            .expect("awg proxy");
+        let v = serde_yaml::to_value(&proxy).unwrap();
+
+        assert_eq!(v["type"].as_str(), Some("wireguard"));
+        assert_eq!(v["server"].as_str(), Some("1.2.3.4"));
+        assert_eq!(v["port"].as_u64(), Some(8443));
+        assert_eq!(v["mtu"].as_u64(), Some(1280));
+        assert_eq!(v["ip"].as_str(), Some("10.8.0.42"));
+        assert!(v["private-key"].as_str().is_some());
+        assert!(v["public-key"].as_str().is_some());
+        assert_eq!(v["amnezia-wg-option"]["jc"].as_u64(), Some(5));
+        assert_eq!(v["amnezia-wg-option"]["h1"].as_u64(), Some(1_000_001));
+        assert_eq!(v["allowed-ips"][0].as_str(), Some("0.0.0.0/0"));
+    }
+
+    #[test]
+    fn clash_config_routes_with_a_rule() {
+        let cfg = Inbound::clash(vec![]);
+        let v = serde_yaml::to_value(&cfg).unwrap();
+        assert_eq!(v["mode"].as_str(), Some("rule"));
+        assert_eq!(v["rules"][0].as_str(), Some("MATCH,♻️ Automatic"));
+    }
+
+    /// Writes a representative YAML to /tmp so it can be fed to a real mihomo
+    /// binary (`mihomo -t -f`). Run with `cargo test -- --ignored dump_clash`.
+    #[test]
+    #[ignore]
+    fn dump_clash_yaml_for_mihomo_validation() {
+        let conn_id = uuid::Uuid::parse_str("6f9619ff-8b86-d011-b42d-00c04fc964ff").unwrap();
+        let param = crate::WgParam::new(crate::IpAddrMask::new("10.8.0.42".parse().unwrap(), 32));
+        let conn = Connection::new(&Env::Ru, None, Proto::new_awg_mobile(&param), None);
+        let awg = awg_inbound()
+            .proxy(&conn_id, &conn, "node.example", "1.2.3.4", "Windows")
+            .expect("awg proxy");
+        let cfg = Inbound::clash(vec![awg]);
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        std::fs::write("/tmp/clash_sample.yaml", yaml).unwrap();
+    }
+
 }
