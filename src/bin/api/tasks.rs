@@ -397,10 +397,10 @@ where
                 mem.subscriptions
                     .iter()
                     .filter_map(|(id, sub)| {
-                        // A selfhosted account never takes shared
-                        // connections — it only holds the nodes the user
-                        // registered via an install token.
-                        if sub.plan_kind() == PlanKind::Selfhosted {
+                        // Accounts without shared access (self-hosted,
+                        // resell partners) never take shared connections —
+                        // they only hold the nodes they registered themselves.
+                        if !sub.has_shared_access() {
                             return None;
                         }
                         if sub.is_active() {

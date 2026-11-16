@@ -71,6 +71,19 @@ pub struct Subscription {
     pub premium_until: Option<DateTime<Utc>>,
     pub plan_kind: PlanKind,
 
+    /// Access to FRKN shared configs. Paid products set it; a self-hosted or
+    /// resell partner gets `false` and lives on its own nodes only. This is a
+    /// right, not a plan: one account may hold both.
+    #[serde(default = "default_true")]
+    pub shared_access: bool,
+    /// How many own nodes the account may register via install tokens.
+    #[serde(default)]
+    pub own_nodes_limit: i64,
+    /// Partner resell: may create child users and hand them access to the
+    /// account's own nodes.
+    #[serde(default)]
+    pub resell_enabled: bool,
+
     /// Selfhosted caps (PG columns `server_limit` / `user_limit`): how many
     /// own nodes ("servers", offline included) and how many child
     /// subscriptions ("users") the account may hold. Only meaningful for
@@ -95,6 +108,10 @@ pub struct Subscription {
 /// columns, non-selfhosted plans).
 pub const DEFAULT_SERVER_LIMIT: i64 = 3;
 pub const DEFAULT_USER_LIMIT: i64 = 20;
+
+fn default_true() -> bool {
+    true
+}
 
 fn default_server_limit() -> i64 {
     DEFAULT_SERVER_LIMIT
@@ -141,6 +158,10 @@ impl Subscription {
             premium_until: None,
             plan_kind: PlanKind::Standard,
 
+            shared_access: true,
+            own_nodes_limit: 0,
+            resell_enabled: false,
+
             server_limit: DEFAULT_SERVER_LIMIT,
             user_limit: DEFAULT_USER_LIMIT,
 
@@ -166,6 +187,10 @@ impl Subscription {
             premium_token: None,
             premium_until: None,
             plan_kind: PlanKind::Lite,
+
+            shared_access: true,
+            own_nodes_limit: 0,
+            resell_enabled: false,
 
             server_limit: DEFAULT_SERVER_LIMIT,
             user_limit: DEFAULT_USER_LIMIT,
@@ -193,6 +218,10 @@ impl Subscription {
             premium_token: None,
             premium_until: None,
             plan_kind: PlanKind::Selfhosted,
+
+            shared_access: false,
+            own_nodes_limit: DEFAULT_SERVER_LIMIT,
+            resell_enabled: true,
 
             server_limit: DEFAULT_SERVER_LIMIT,
             user_limit: DEFAULT_USER_LIMIT,
@@ -228,11 +257,44 @@ impl Subscription {
             premium_until: None,
             plan_kind: PlanKind::Selfhosted,
 
+            shared_access: false,
+            own_nodes_limit: 0,
+            resell_enabled: false,
+
             server_limit: 0,
             user_limit: 0,
 
             limit_bytes: None,
             product: Product::Standard,
+        }
+    }
+
+    /// Access to the FRKN shared feed. Old rows (before the flag existed)
+    /// fall back to the plan kind: only selfhosted had no shared configs.
+    pub fn has_shared_access(&self) -> bool {
+        self.shared_access && self.plan_kind != PlanKind::Selfhosted
+    }
+
+    /// May register its own nodes (`POST /private/node` via install token).
+    pub fn can_own_nodes(&self) -> bool {
+        self.own_nodes_limit > 0 || self.plan_kind == PlanKind::Selfhosted
+    }
+
+    /// May create child users and hand them access (partner resell).
+    pub fn can_resell(&self) -> bool {
+        self.resell_enabled || self.plan_kind == PlanKind::Selfhosted
+    }
+
+    /// Whether the env belongs to this account and is served regardless of
+    /// payment state: the personal env of an own-node account, and the
+    /// account's premium slot.
+    pub fn owns_env(&self, env: &Env) -> bool {
+        if env.is_personal() && Env::personal_for(self.id) == *env {
+            return true;
+        }
+        match (&self.scope_env, env.is_premium()) {
+            (Some(scope), true) => scope == env,
+            _ => false,
         }
     }
 
@@ -269,6 +331,9 @@ impl Default for Subscription {
             premium_token: None,
             premium_until: None,
             plan_kind: PlanKind::Standard,
+            shared_access: true,
+            own_nodes_limit: 0,
+            resell_enabled: false,
             server_limit: DEFAULT_SERVER_LIMIT,
             user_limit: DEFAULT_USER_LIMIT,
             limit_bytes: None,
@@ -307,6 +372,21 @@ impl From<tokio_postgres::Row> for Subscription {
                 .ok()
                 .and_then(|s| PlanKind::from_str(&s).ok())
                 .unwrap_or_default(),
+            // Rights, not plan: missing columns on an older schema fall back
+            // to the historical meaning (selfhosted = no shared configs).
+            shared_access: row
+                .try_get::<_, bool>("shared_access")
+                .unwrap_or_else(|_| {
+                    row.try_get::<_, String>("plan_kind")
+                        .map(|k| k != "selfhosted")
+                        .unwrap_or(true)
+                }),
+            own_nodes_limit: row
+                .try_get::<_, i32>("own_nodes_limit")
+                .map(i64::from)
+                .or_else(|_| row.try_get::<_, i64>("own_nodes_limit"))
+                .unwrap_or_default(),
+            resell_enabled: row.try_get::<_, bool>("resell_enabled").unwrap_or(false),
             // Tolerate both INT4 and BIGINT and an unmigrated schema.
             server_limit: row
                 .try_get::<_, i32>("server_limit")
@@ -391,6 +471,40 @@ pub trait Operations {
     fn set_limit_bytes(&mut self, bytes: i64);
 
     fn plan_kind(&self) -> PlanKind;
+
+    /// Access to the FRKN shared feed. Default keeps the pre-flag semantics
+    /// so any other implementor (tests, fixtures) keeps working.
+    fn has_shared_access(&self) -> bool {
+        self.plan_kind() != PlanKind::Selfhosted
+    }
+
+    /// May register its own nodes via install tokens.
+    fn can_own_nodes(&self) -> bool {
+        self.plan_kind() == PlanKind::Selfhosted
+    }
+
+    /// How many own nodes are allowed (0 = none).
+    fn own_nodes_limit(&self) -> i64 {
+        if self.can_own_nodes() {
+            self.server_limit()
+        } else {
+            0
+        }
+    }
+
+    /// May create child users and hand them access (partner resell).
+    fn can_resell(&self) -> bool {
+        self.plan_kind() == PlanKind::Selfhosted
+    }
+
+    /// Whether the env belongs to this account and must be served regardless
+    /// of the paid term (own node / premium slot).
+    fn owns_env(&self, env: &Env) -> bool {
+        if env.is_personal() && Env::personal_for(self.id()) == *env {
+            return true;
+        }
+        false
+    }
 
     /// Tariff product of the subscription (`legacy` when it was created
     /// before products existed). Orthogonal to `plan_kind`.
@@ -575,6 +689,32 @@ impl Operations for Subscription {
 
     fn plan_kind(&self) -> PlanKind {
         self.plan_kind
+    }
+
+    fn has_shared_access(&self) -> bool {
+        Subscription::has_shared_access(self)
+    }
+
+    fn can_own_nodes(&self) -> bool {
+        Subscription::can_own_nodes(self)
+    }
+
+    fn own_nodes_limit(&self) -> i64 {
+        if self.own_nodes_limit > 0 {
+            self.own_nodes_limit
+        } else if self.can_own_nodes() {
+            self.server_limit
+        } else {
+            0
+        }
+    }
+
+    fn can_resell(&self) -> bool {
+        Subscription::can_resell(self)
+    }
+
+    fn owns_env(&self, env: &Env) -> bool {
+        Subscription::owns_env(self, env)
     }
 
     fn product(&self) -> Product {
@@ -902,4 +1042,38 @@ mod tests {
         premium.plan_kind = PlanKind::Premium;
         assert!(!premium.top_up_allowed(true));
     }
+    #[test]
+    fn selfhosted_keeps_own_nodes_and_no_shared_feed() {
+        let id = uuid::Uuid::new_v4();
+        let env = Env::personal_for(id);
+        let sub = Subscription::new_selfhosted(id, "ref".into(), env.clone());
+        assert!(!sub.has_shared_access(), "selfhosted takes no shared configs");
+        assert!(sub.can_own_nodes(), "selfhosted may register its own nodes");
+        assert!(sub.can_resell(), "selfhosted may create child users");
+        assert!(sub.owns_env(&env), "its own env is served regardless of term");
+    }
+
+    #[test]
+    fn paid_account_may_gain_own_nodes_without_losing_shared() {
+        let mut sub = Subscription::new(uuid::Uuid::new_v4(), "ref".into(), None, None);
+        assert!(sub.has_shared_access());
+        assert!(!sub.can_own_nodes());
+
+        // "Paid plan + own server" is the combination the old plan_kind model
+        // could not express.
+        sub.own_nodes_limit = 2;
+        assert!(sub.has_shared_access(), "shared configs stay available");
+        assert!(sub.can_own_nodes(), "own node slots are available too");
+    }
+
+    #[test]
+    fn owns_env_does_not_leak_other_accounts() {
+        let me = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let sub = Subscription::new(me, "ref".into(), None, None);
+        assert!(sub.owns_env(&Env::personal_for(me)));
+        assert!(!sub.owns_env(&Env::personal_for(other)));
+        assert!(!sub.owns_env(&Env::Dev));
+    }
+
 }

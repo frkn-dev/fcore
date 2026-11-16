@@ -1393,7 +1393,7 @@ where
         match resolve_serving_access(
             &memory.db,
             sub_id,
-            serving_access(sub, traffic_mode_enabled),
+            super::serving_access_owner_aware(sub, traffic_mode_enabled),
         )
         .await
         {
@@ -1560,7 +1560,7 @@ where
     let access = resolve_serving_access(
         &memory.db,
         sub_id,
-        serving_access(sub, traffic_mode_enabled),
+        super::serving_access_owner_aware(sub, traffic_mode_enabled),
     )
     .await;
     if access == ServingAccess::Expired {
@@ -1713,10 +1713,20 @@ where
         None => return Err(http::not_found("Subscription not found").into_response()),
     };
 
+    // An account that owns nodes keeps its own nodes after the paid term or
+    // the traffic balance ends: only shared configs stay gated, and that
+    // decision is made per connection below.
+    let base_access = serving_access(sub, traffic_mode_enabled);
+    let owns_nodes = sub.can_own_nodes() || sub.can_resell();
+    let shared_expired = base_access == ServingAccess::Expired;
     let access = resolve_serving_access(
         &memory.db,
         *sub_id,
-        serving_access(sub, traffic_mode_enabled),
+        if owns_nodes {
+            ServingAccess::Full
+        } else {
+            base_access
+        },
     )
     .await;
     let traffic_mode = match access {
@@ -1820,6 +1830,12 @@ where
             return Err(http::not_found("No suitable connection/node found").into_response());
         }
     };
+
+    // Paywall for shared configs only: an own-node account whose paid term
+    // ended still gets its own nodes, but not the FRKN shared feed.
+    if shared_expired && !sub.owns_env(&conn.get_env()) {
+        return Err(subscription_expired_response(sub.expires_at()));
+    }
 
     let pinned = mem.conn_nodes.contains_key(&conn_id);
     let pool = if pinned {

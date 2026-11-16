@@ -91,6 +91,21 @@ where
     }
 }
 
+/// Subscription-level access for the cabinet and the service list: an account
+/// that owns nodes (self-hosted or resell partner) keeps them even when the
+/// paid term or the traffic balance has ended. Shared configs stay gated —
+/// that check lives on the connection path (`build_gateway_config_response`).
+pub(crate) fn serving_access_owner_aware<S>(sub: &S, traffic_mode_enabled: bool) -> ServingAccess
+where
+    S: SubscriptionOperations,
+{
+    if sub.can_own_nodes() || sub.can_resell() {
+        ServingAccess::Full
+    } else {
+        serving_access(sub, traffic_mode_enabled)
+    }
+}
+
 /// Resolves a possibly-pending `CheckBalance` to a terminal state by loading
 /// the lifetime traffic from the DB: balance left -> TrafficMode, exhausted
 /// -> Expired. Fail-open on a DB error (warn + TrafficMode): a traffic-DB

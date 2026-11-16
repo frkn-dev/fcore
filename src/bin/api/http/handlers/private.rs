@@ -549,7 +549,11 @@ where
     {
         let mem = memory.memory.read().await;
         if let Some(sub) = mem.subscriptions.find_by_id(&req.subscription_id) {
-            let limit = sub.server_limit();
+            // Own nodes are a right, not a plan: a paid account may have it too.
+            let limit = sub.own_nodes_limit();
+            if limit <= 0 {
+                return Ok(super::share::forbidden("own nodes are not enabled for this account"));
+            }
             let used = mem
                 .nodes
                 .get_by_env(&scope_env)
@@ -1539,6 +1543,16 @@ where
     let owner_id = req.subscription_id;
     if let Err(reply) = check_user_owner(&memory, owner_id).await {
         return Ok(reply);
+    }
+
+    // Resell is a flag: only partners may create users on their own nodes.
+    {
+        let mem = memory.memory.read().await;
+        if let Some(owner) = mem.subscriptions.find_by_id(&owner_id) {
+            if !owner.can_resell() {
+                return Ok(super::share::forbidden("resell is not enabled for this account"));
+            }
+        }
     }
 
     // The account's own nodes, and the (proto, node) pairs to mint for the
