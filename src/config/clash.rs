@@ -162,6 +162,12 @@ pub struct ClashProxyGroup {
     proxies: Vec<String>,
 }
 
+/// Short label of a node hostname: mihomo requires unique proxy names, and a
+/// pool feeds the same connection from several nodes.
+fn short_host(hostname: &str) -> &str {
+    hostname.split('.').next().unwrap_or(hostname)
+}
+
 pub trait InboundClashConfig {
     fn proxy(
         &self,
@@ -220,10 +226,11 @@ impl InboundClashConfig for Inbound {
             let token = conn.get_token()?;
 
             let name = format!(
-                "{} [{}] {}",
+                "{} [{}] {} {}",
                 label,
                 self.tag,
-                get_uuid_last_octet_simple(&token)
+                get_uuid_last_octet_simple(&token),
+                short_host(_hostname)
             );
 
             return Some(ClashProxy::Hysteria2 {
@@ -289,7 +296,7 @@ impl InboundClashConfig for Inbound {
                 // mihomo wants a bare address; the mask carries the prefix.
                 let client_ip = param.address.to_string();
                 let prefix = get_uuid_last_octet_simple(conn_id);
-                let name = format!("{} [{}] {}", label, self.tag, prefix);
+                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
 
                 return Some(ClashProxy::Wireguard {
                     name,
@@ -319,7 +326,7 @@ impl InboundClashConfig for Inbound {
 
                 let prefix = get_uuid_last_octet_simple(conn_id);
 
-                let name = format!("{} [{}] {}", label, self.tag, prefix);
+                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
 
                 Some(ClashProxy::Vmess {
                     name,
@@ -383,7 +390,7 @@ impl InboundClashConfig for Inbound {
                 };
 
                 let prefix = get_uuid_last_octet_simple(conn_id);
-                let name = format!("{} [{}] {}", label, self.tag, prefix);
+                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
 
                 Some(ClashProxy::Vless {
                     name,
@@ -415,7 +422,7 @@ impl InboundClashConfig for Inbound {
                     .unwrap_or_else(|| host.to_string());
 
                 let prefix = get_uuid_last_octet_simple(conn_id);
-                let name = format!("{} [{}] {}", label, self.tag, prefix);
+                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
 
                 Some(ClashProxy::Vless {
                     name,
@@ -662,6 +669,32 @@ mod tests {
         let cfg = Inbound::clash(vec![awg]);
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         std::fs::write("/tmp/clash_sample.yaml", yaml).unwrap();
+    }
+
+    #[test]
+    fn proxy_names_are_unique_across_pool_nodes() {
+        // The same connection is fed from every pool node: mihomo rejects the
+        // whole config when two proxies share a name.
+        let conn_id = uuid::Uuid::parse_str("6f9619ff-8b86-d011-b42d-00c04fc964ff").unwrap();
+        let param = crate::WgParam::new(crate::IpAddrMask::new("10.8.0.42".parse().unwrap(), 32));
+        let conn = Connection::new(&Env::Ru, None, Proto::new_awg_mobile(&param), None);
+
+        let a = awg_inbound()
+            .proxy(&conn_id, &conn, "tw-ru-msk-core-01.example", "1.1.1.1", "RU")
+            .unwrap();
+        let b = awg_inbound()
+            .proxy(&conn_id, &conn, "vdska-ru-msk-core-01.example", "2.2.2.2", "RU")
+            .unwrap();
+
+        let (na, nb) = match (&a, &b) {
+            (ClashProxy::Wireguard { name: x, .. }, ClashProxy::Wireguard { name: y, .. }) => {
+                (x.clone(), y.clone())
+            }
+            _ => panic!("expected wireguard proxies"),
+        };
+        assert_ne!(na, nb, "proxy names must differ per node");
+        assert!(na.ends_with("tw-ru-msk-core-01"));
+        assert!(nb.ends_with("vdska-ru-msk-core-01"));
     }
 
 }
