@@ -434,6 +434,16 @@ where
                             plan, used, limit
                         );
                     }
+                    // Write-through: the grant is in Postgres, memory gets the
+                    // same row so `POST /v1/peers` of this very subscription
+                    // sees its rights without a restart.
+                    memory
+                        .memory
+                        .write()
+                        .await
+                        .peers_state
+                        .access
+                        .insert(sub_id, row.clone());
                     tracing::info!(
                         "activation: subscription {} assigned to {} ({}/{})",
                         sub_id,

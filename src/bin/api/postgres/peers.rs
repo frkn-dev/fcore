@@ -130,12 +130,34 @@ impl PgPeers {
             .query("SELECT env, plan, max_subscriptions, enabled FROM env_capacity", &[])
             .await?;
 
+        let limit_rows = client
+            .query(
+                r#"
+                SELECT subscription_id, peers_per_device, peers_per_subscription
+                FROM subscription_limits
+                "#,
+                &[],
+            )
+            .await?;
+
         let mut state = crate::peers::store::PeersState {
             peers: crate::peers::store::PeerStore::load(peers),
             devices: crate::peers::store::DeviceStore::load(devices),
             access: crate::peers::store::AccessStore::load(grants),
             ..Default::default()
         };
+
+        for row in limit_rows {
+            state.limits.insert(
+                row.get::<_, Uuid>("subscription_id"),
+                (
+                    row.get::<_, Option<i32>>("peers_per_device")
+                        .map(i64::from),
+                    row.get::<_, Option<i32>>("peers_per_subscription")
+                        .map(i64::from),
+                ),
+            );
+        }
 
         for row in network_rows {
             let env = Env::from_str(&row.get::<_, String>("env"))
@@ -1018,6 +1040,8 @@ impl PgPeers {
         Ok(rows.iter().map(peer_from_row).collect())
     }
 
+    /// Insert a tunnel and return the stored row, so the caller can put the
+    /// same row into memory and into the bus without a second SELECT.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_peer(
         &self,
@@ -1028,19 +1052,22 @@ impl PgPeers {
         public_key: &str,
         address: Ipv4Addr,
         label: Option<&str>,
-    ) -> Result<Inserted> {
+    ) -> Result<Option<PeerRow>> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
         let host = format!("{}/32", address);
-        let inserted = client
-            .execute(
-                r#"
-                INSERT INTO peers
-                    (device_id, subscription_id, env, proto, public_key, address, label)
-                VALUES ($1, $2, $3, $4, $5, $6::cidr, $7)
-                ON CONFLICT DO NOTHING
-                "#,
+        let row = client
+            .query_opt(
+                &format!(
+                    r#"
+                    INSERT INTO peers
+                        (device_id, subscription_id, env, proto, public_key, address, label)
+                    VALUES ($1, $2, $3, $4, $5, $6::cidr, $7)
+                    ON CONFLICT DO NOTHING
+                    RETURNING {PEER_COLUMNS}
+                    "#
+                ),
                 &[
                     &device_id,
                     &subscription_id,
@@ -1053,11 +1080,7 @@ impl PgPeers {
             )
             .await?;
 
-        Ok(if inserted > 0 {
-            Inserted::Done
-        } else {
-            Inserted::Conflict
-        })
+        Ok(row.as_ref().map(peer_from_row))
     }
 
     pub async fn revoke_peer(&self, id: Uuid, reason: &str) -> Result<bool> {

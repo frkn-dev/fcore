@@ -7,8 +7,7 @@
 //! in memory, and a `ON CONFLICT DO NOTHING` result means "take the next
 //! address", not an error the user sees.
 
-use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -535,7 +534,6 @@ pub async fn publish_peers_init<N, C, S>(
 pub async fn post_peers_handler<N, C, S>(
     req: PeerCreateRequest,
     memory: MemSync<N, C, S>,
-    remember_days: i64,
     default_limits: Limits,
 ) -> Box<dyn warp::Reply>
 where
@@ -648,9 +646,9 @@ where
     };
 
     // Grant decides whether this env/protocol is allowed at all.
-    let grant = match db.grant(req.subscription_id, &env).await {
-        Ok(grant) => grant,
-        Err(e) => return db_error("grant", e),
+    let grant = {
+        let mem = memory.memory.read().await;
+        mem.peers_state.grant(&req.subscription_id, &env).cloned()
     };
     let now = Utc::now();
     if let Err(refusal) = peers::check_grant(grant.as_ref().map(grant_of).as_ref(), proto, now) {
@@ -666,22 +664,20 @@ where
         }
     }
 
-    let limits = match db.limits(req.subscription_id).await {
-        Ok((per_device, per_subscription)) => {
-            Limits::resolve(default_limits, per_device, per_subscription)
-        }
-        Err(e) => return db_error("limits", e),
+    let (per_device, per_subscription) = {
+        let mem = memory.memory.read().await;
+        mem.peers_state.limits_for(&req.subscription_id)
     };
-    match db.live_counts(req.subscription_id, device.id).await {
-        Ok((device_live, sub_live)) => {
-            if let Err(refusal) = limits.check_device(device_live) {
-                return refusal_reply(refusal);
-            }
-            if let Err(refusal) = limits.check_subscription(sub_live) {
-                return refusal_reply(refusal);
-            }
-        }
-        Err(e) => return db_error("live_counts", e),
+    let limits = Limits::resolve(default_limits, per_device, per_subscription);
+    let (device_live, sub_live) = {
+        let mem = memory.memory.read().await;
+        mem.peers_state.peers.counts(&req.subscription_id, &device.id)
+    };
+    if let Err(refusal) = limits.check_device(device_live as i64) {
+        return refusal_reply(refusal);
+    }
+    if let Err(refusal) = limits.check_subscription(sub_live as i64) {
+        return refusal_reply(refusal);
     }
 
     let public_key = req
@@ -690,8 +686,15 @@ where
         .unwrap_or_else(|| device.public_key.clone());
 
     // Idempotency: the same key in the same env is the same tunnel.
-    match db.live_peer_by_key(&env, &public_key).await {
-        Ok(Some(existing)) if existing.subscription_id == req.subscription_id => {
+    let existing = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .peers
+            .live_by_key(&env, &public_key)
+            .cloned()
+    };
+    match existing {
+        Some(existing) if existing.subscription_id == req.subscription_id => {
             let cards = {
                 let mem = memory.memory.read().await;
                 pool_cards(&mem.nodes, &env, proto)
@@ -705,22 +708,20 @@ where
                 }),
             );
         }
-        Ok(Some(_)) => return refusal_reply(Refusal::KeyTaken),
-        Ok(None) => {}
-        Err(e) => return db_error("live_peer_by_key", e),
+        Some(_) => return refusal_reply(Refusal::KeyTaken),
+        None => {}
     }
 
-    let blocks = match db.env_blocks(&env).await {
-        Ok(blocks) => blocks,
-        Err(e) => return db_error("env_blocks", e),
+    let (blocks, mut used) = {
+        let mem = memory.memory.read().await;
+        (
+            mem.peers_state.block_masks(&env),
+            mem.peers_state.peers.used_in(&env),
+        )
     };
     if blocks.is_empty() {
         return refusal_reply(Refusal::EnvNotServed);
     }
-    let mut used: HashSet<Ipv4Addr> = match db.used_addresses(&env).await {
-        Ok(used) => used.into_iter().collect(),
-        Err(e) => return db_error("used_addresses", e),
-    };
 
     let mut created: Option<PeerRow> = None;
     for attempt in 0..3 {
@@ -739,21 +740,11 @@ where
             )
             .await
         {
-            Ok(Inserted::Done) => {
-                match db
-                    .peers_of(req.subscription_id, Some(device.id), remember_days)
-                    .await
-                {
-                    Ok(rows) => {
-                        created = rows.into_iter().find(|p| {
-                            p.public_key == public_key && p.env == env && p.revoked_at.is_none()
-                        });
-                    }
-                    Err(e) => return db_error("peers_of", e),
-                }
+            Ok(Some(row)) => {
+                created = Some(row);
                 break;
             }
-            Ok(Inserted::Conflict) => {
+            Ok(None) => {
                 // Either the address or the label was taken between our read
                 // and the insert: retry with the next address.
                 tracing::info!(
@@ -775,6 +766,16 @@ where
             serde_json::json!({ "error": "conflict" }),
         );
     };
+
+    // Write-through: Postgres holds the row, memory gets the same one, so the
+    // next request sees this tunnel without a query.
+    memory
+        .memory
+        .write()
+        .await
+        .peers_state
+        .peers
+        .insert(peer.clone());
 
     publish_peer(&memory, fcore::Action::Create, &peer).await;
 
@@ -854,10 +855,21 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
     let db = memory.db.peers();
-    match db.peer_by_id(peer_id).await {
-        Ok(Some(peer)) if peer.subscription_id == req.subscription_id => {
+    let peer = {
+        let mem = memory.memory.read().await;
+        mem.peers_state.peers.get(&peer_id).cloned()
+    };
+    match peer {
+        Some(peer) if peer.subscription_id == req.subscription_id => {
             match db.revoke_peer(peer_id, "user").await {
-                Ok(_) => {
+                Ok(true) => {
+                    memory
+                        .memory
+                        .write()
+                        .await
+                        .peers_state
+                        .peers
+                        .remove_live(peer_id);
                     publish_peer(&memory, fcore::Action::Delete, &peer).await;
                     json_reply(
                         200,
@@ -865,12 +877,12 @@ where
                         serde_json::json!({ "peer_id": peer_id }),
                     )
                 }
+                Ok(false) => refusal_reply(Refusal::PeerNotFound),
                 Err(e) => db_error("revoke_peer", e),
             }
         }
-        Ok(Some(_)) => refusal_reply(Refusal::PeerNotFound),
-        Ok(None) => refusal_reply(Refusal::PeerNotFound),
-        Err(e) => db_error("peer_by_id", e),
+        Some(_) => refusal_reply(Refusal::PeerNotFound),
+        None => refusal_reply(Refusal::PeerNotFound),
     }
 }
 
@@ -970,15 +982,24 @@ where
         Ok(Some(device)) if device.subscription_id == req.subscription_id => {
             // Revoke before deleting: the FK cascade drops the rows without
             // publishing, and the nodes would keep the peers until restart.
-            let doomed = db
-                .peers_of(device.subscription_id, Some(device_id), 0)
-                .await
-                .unwrap_or_default();
+            let doomed: Vec<PeerRow> = {
+                let mem = memory.memory.read().await;
+                mem.peers_state
+                    .peers
+                    .live_of_device(&device_id)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            };
             for peer in &doomed {
-                if peer.revoked_at.is_some() {
-                    continue;
-                }
                 if db.revoke_peer(peer.id, "user").await.is_ok() {
+                    memory
+                        .memory
+                        .write()
+                        .await
+                        .peers_state
+                        .peers
+                        .remove_live(peer.id);
                     publish_peer(&memory, fcore::Action::Delete, peer).await;
                 }
             }
@@ -1014,9 +1035,14 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
     let db = memory.db.peers();
-    let grants = match db.grants(subscription_id).await {
-        Ok(grants) => grants,
-        Err(e) => return db_error("grants", e),
+    let grants: Vec<AccessRow> = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .access
+            .of_sub(&subscription_id)
+            .into_iter()
+            .cloned()
+            .collect()
     };
 
     let mut access = Vec::with_capacity(grants.len());
@@ -1058,20 +1084,24 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
     let db = memory.db.peers();
-    match db.grants(subscription_id).await {
-        Ok(grants) => {
-            let mut access = Vec::with_capacity(grants.len());
-            for grant in &grants {
-                let used = db
-                    .used_bytes(subscription_id, &grant.env)
-                    .await
-                    .unwrap_or(0);
-                access.push(access_view(grant, used));
-            }
-            json_reply(200, "ok", serde_json::json!({ "access": access }))
-        }
-        Err(e) => db_error("grants", e),
+    let grants: Vec<AccessRow> = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .access
+            .of_sub(&subscription_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    };
+    let mut access = Vec::with_capacity(grants.len());
+    for grant in &grants {
+        let used = db
+            .used_bytes(subscription_id, &grant.env)
+            .await
+            .unwrap_or(0);
+        access.push(access_view(grant, used));
     }
+    json_reply(200, "ok", serde_json::json!({ "access": access }))
 }
 
 /// POST /v1/access (service token): grants the rights the payer bought.
@@ -1161,6 +1191,13 @@ where
                     .used_bytes(req.subscription_id, &row.env)
                     .await
                     .unwrap_or(0);
+                memory
+                    .memory
+                    .write()
+                    .await
+                    .peers_state
+                    .access
+                    .insert(req.subscription_id, row.clone());
                 json_reply(
                     200,
                     "grant assigned",
@@ -1183,10 +1220,12 @@ where
     // A grant for an env nobody serves is a typo, not a right: refuse it so
     // the mistake surfaces at the caller instead of at the user's connect
     // button.
-    match db.env_blocks(&env).await {
-        Ok(blocks) if blocks.is_empty() => return refusal_reply(Refusal::EnvNotServed),
-        Ok(_) => {}
-        Err(e) => return db_error("env_blocks", e),
+    let served = {
+        let mem = memory.memory.read().await;
+        !mem.peers_state.block_masks(&env).is_empty()
+    };
+    if !served {
+        return refusal_reply(Refusal::EnvNotServed);
     }
     match db
         .upsert_grant(
@@ -1201,6 +1240,13 @@ where
     {
         Ok(row) => {
             let used = db.used_bytes(req.subscription_id, &env).await.unwrap_or(0);
+            memory
+                .memory
+                .write()
+                .await
+                .peers_state
+                .access
+                .insert(req.subscription_id, row.clone());
             json_reply(
                 200,
                 "grant upserted",
@@ -1236,20 +1282,37 @@ where
     let db = memory.db.peers();
     match db.revoke_grant(req.subscription_id, &env).await {
         Ok(true) => {
+            memory
+                .memory
+                .write()
+                .await
+                .peers_state
+                .access
+                .remove(&req.subscription_id, &env);
             // Rights removed means the tunnels go too, immediately: leaving
             // them up until the cleanup task runs would keep a revoked
             // subscription connected.
-            let live: Vec<_> = db
-                .peers_of(req.subscription_id, None, 0)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|p| p.env == env && p.revoked_at.is_none())
-                .collect();
+            let live: Vec<PeerRow> = {
+                let mem = memory.memory.read().await;
+                mem.peers_state
+                    .peers
+                    .live_of_sub(&req.subscription_id)
+                    .into_iter()
+                    .filter(|peer| peer.env == env)
+                    .cloned()
+                    .collect()
+            };
             let revoked = db
                 .revoke_env_peers(req.subscription_id, &env, "subscription_ended")
                 .await
                 .unwrap_or(0);
+            memory
+                .memory
+                .write()
+                .await
+                .peers_state
+                .peers
+                .remove_env_of_sub(&req.subscription_id, &env);
             for peer in &live {
                 publish_peer(&memory, fcore::Action::Delete, peer).await;
             }
@@ -1341,9 +1404,14 @@ where
         Err(e) => return db_error("peers_of", e),
     };
 
-    let grants = match db.grants(device.subscription_id).await {
-        Ok(rows) => rows,
-        Err(e) => return db_error("grants", e),
+    let grants: Vec<AccessRow> = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .access
+            .of_sub(&device.subscription_id)
+            .into_iter()
+            .cloned()
+            .collect()
     };
     let mut access = Vec::with_capacity(grants.len());
     for grant in &grants {

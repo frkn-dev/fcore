@@ -1722,14 +1722,12 @@ where
             .and(with_param_bool(peers_enabled))
             .and(warp::body::json::<peers_handlers::PeerCreateRequest>())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_u64(peers_remember_days))
             .and(with_param_u64(peers_per_device))
             .and(with_param_u64(peers_per_subscription))
             .and_then(
                 |enabled: bool,
                  req: peers_handlers::PeerCreateRequest,
                  sync: MemSync<N, C, S>,
-                 remember_days: u64,
                  per_device: u64,
                  per_subscription: u64| async move {
                     if !enabled {
@@ -1742,8 +1740,7 @@ where
                         per_subscription: per_subscription as i64,
                     };
                     Ok(
-                        peers_handlers::post_peers_handler(req, sync, remember_days as i64, limits)
-                            .await,
+                        peers_handlers::post_peers_handler(req, sync, limits).await,
                     )
                 },
             );
