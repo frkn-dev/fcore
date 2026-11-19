@@ -16,7 +16,7 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, catalog::*, cluster::*, connection::*, healthcheck_handler, iap::*,
-        key::*, mesh::*, metrics::*, node::*, peers as peers_handlers, premium::*,
+        key::*, metrics::*, node::*, peers as peers_handlers, premium::*,
         premium_inventory::*, private::*, score::*, share::*, subscription::*,
     },
     param::*,
@@ -1639,73 +1639,6 @@ where
             .and(warp::any().map(move || share_feed_rate_limiter.clone()))
             .and_then(share_feed_handler);
 
-        // Mesh relay (/v1/mesh/*): UIN registry + sealed-slot inbox for the
-        // last-mile E2E messenger. Public, no Bearer auth — send/pull are
-        // authorized by the sender's/recipient's Ed25519 signature; the POST
-        // routes share a coarse per-IP rate limit.
-        let mesh_rate_limiter = Arc::new(RateLimiter::new(60, std::time::Duration::from_secs(60)));
-        let with_mesh_registry = warp::any().map({
-            let mesh = self.mesh.clone();
-            move || mesh.clone()
-        });
-        let with_mesh_limiter = warp::any().map({
-            let limiter = mesh_rate_limiter.clone();
-            move || limiter.clone()
-        });
-
-        let post_mesh_register_route = warp::post()
-            .and(warp::path("v1"))
-            .and(warp::path("mesh"))
-            .and(warp::path("register"))
-            .and(warp::path::end())
-            .and(body_limit())
-            .and(warp::body::json::<MeshRegisterRequest>())
-            .and(with_mesh_registry.clone())
-            .and(warp::addr::remote())
-            .and(warp::header::optional::<String>("x-forwarded-for"))
-            .and(with_mesh_limiter.clone())
-            .and_then(mesh_register_handler);
-
-        let get_mesh_lookup_route = warp::get()
-            .and(warp::path("v1"))
-            .and(warp::path("mesh"))
-            .and(warp::path("lookup"))
-            .and(warp::path::param::<String>())
-            .and(warp::path::end())
-            .and(with_mesh_registry.clone())
-            .and_then(mesh_lookup_handler);
-
-        let post_mesh_send_route = warp::post()
-            .and(warp::path("v1"))
-            .and(warp::path("mesh"))
-            .and(warp::path("send"))
-            .and(warp::path::end())
-            .and(body_limit())
-            .and(warp::body::json::<MeshSendRequest>())
-            .and(with_mesh_registry.clone())
-            .and(warp::addr::remote())
-            .and(warp::header::optional::<String>("x-forwarded-for"))
-            .and(with_mesh_limiter.clone())
-            .and_then(mesh_send_handler);
-
-        let post_mesh_pull_route = warp::post()
-            .and(warp::path("v1"))
-            .and(warp::path("mesh"))
-            .and(warp::path("pull"))
-            .and(warp::path::end())
-            .and(body_limit())
-            .and(warp::body::json::<MeshPullRequest>())
-            .and(with_mesh_registry.clone())
-            .and(warp::addr::remote())
-            .and(warp::header::optional::<String>("x-forwarded-for"))
-            .and(with_mesh_limiter.clone())
-            .and_then(mesh_pull_handler);
-
-        let mesh_routes = post_mesh_register_route
-            .or(get_mesh_lookup_route)
-            .or(post_mesh_send_route)
-            .or(post_mesh_pull_route);
-
         // Peers: the client owns the key pair, the api hands out the address.
         // Mounted even when disabled — the handlers answer 404 in that case,
         // so a half-configured deployment is visible instead of silent.
@@ -2187,8 +2120,6 @@ where
             .or(admin_digest_route)
             // Peers
             .or(peers_routes)
-            // Mesh
-            .or(mesh_routes)
             // Admin
             .or(admin_routes)
             // Premium

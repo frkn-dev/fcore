@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use fcore::{
-    mesh::MeshRegistry, Connection, ConnectionApiOperations, ConnectionBaseOperations, Connections,
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, Connections,
     MetricStorage, NodeStorageOperations, Subscription, SubscriptionOperations, Subscriptions,
 };
 
@@ -34,9 +34,6 @@ where
     pub settings: ServiceSettings,
     pub metrics: Arc<MetricStorage>,
     pub agw_private_key: Option<Arc<PKey<Private>>>,
-    /// Mesh messenger relay: UIN registry (persisted via rkyv snapshot) +
-    /// memory-only sealed-slot inbox.
-    pub mesh: Arc<MeshRegistry>,
 }
 
 impl<N, C, S> Service<N, C, S>
@@ -64,14 +61,12 @@ where
         settings: ServiceSettings,
         metrics: Arc<MetricStorage>,
         agw_private_key: Option<Arc<PKey<Private>>>,
-        mesh: Arc<MeshRegistry>,
     ) -> Self {
         Self {
             sync,
             settings,
             metrics,
             agw_private_key,
-            mesh,
         }
     }
 }

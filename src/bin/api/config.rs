@@ -312,10 +312,6 @@ pub struct ServiceConfig {
     /// plane for clients that already work.
     #[serde(default = "default_pool_strict_inbounds")]
     pub pool_strict_inbounds: bool,
-    /// Path of the mesh registry rkyv snapshot (UIN → device pubkeys). The
-    /// mesh inbox itself is memory-only by design.
-    #[serde(default = "default_mesh_snapshot_path")]
-    pub mesh_snapshot_path: String,
     /// Peer scheme. Disabled by default: an api that has the code but no
     /// enabled section behaves exactly like before this feature.
     #[serde(default)]
@@ -446,10 +442,6 @@ fn default_device_limit_max_ticks() -> u32 {
 
 fn default_conns_reconcile_interval_sec() -> u64 {
     3600
-}
-
-fn default_mesh_snapshot_path() -> String {
-    "/var/lib/fcore/api/mesh-registry.bin".to_string()
 }
 
 fn default_tombstone_republish_interval_sec() -> u64 {

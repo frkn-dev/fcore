@@ -536,3 +536,4 @@ mod tests {
         assert_eq!(state.peers.counts(&sub, &device), (0, 0));
     }
 }
+

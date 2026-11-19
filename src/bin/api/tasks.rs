@@ -948,6 +948,11 @@ where
         tmp_mem.main_feed_nodes = db.private_feed().all().await?.into_iter().collect();
 
         let mut mem = self.sync.memory.write().await;
+        // The peers layer is loaded once at bootstrap and kept up to date by the
+        // handlers (write-through); this rebuild must carry it over, otherwise
+        // every grant and env block disappears from memory on the first sync
+        // and peer requests start answering no_grant / env_not_served.
+        tmp_mem.peers_state = std::mem::take(&mut mem.peers_state);
         *mem = tmp_mem;
 
         Ok(())

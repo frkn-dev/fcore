@@ -1,6 +1,6 @@
 [package]
 name = "fcore"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2021"
 build = "build.rs"
 
@@ -97,9 +97,5 @@ path = "src/bin/api/main.rs"
 [[bin]]
 name = "auth"
 path = "src/bin/auth/main.rs"
-
-[[bin]]
-name = "meshd"
-path = "src/bin/mesh/main.rs"
 
 

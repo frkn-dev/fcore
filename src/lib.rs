@@ -3,7 +3,6 @@ pub mod error;
 pub mod geoip;
 pub mod http;
 pub mod memory;
-pub mod mesh;
 pub mod metrics;
 pub mod proto;
 pub mod score;

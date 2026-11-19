@@ -6,7 +6,6 @@ pub mod cluster;
 pub mod connection;
 pub mod iap;
 pub mod key;
-pub mod mesh;
 pub mod metrics;
 pub mod node;
 pub mod peers;
