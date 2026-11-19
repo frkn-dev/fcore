@@ -232,12 +232,21 @@ pub struct AccessView {
     pub used_bytes: i64,
 }
 
+/// Protocol name as the app reads it: peer protocols go out in the snake_case
+/// form of the contract (`amnezia_peer`), everything else keeps the config
+/// spelling the rest of the panel already uses.
+fn proto_wire_name(tag: &fcore::Tag) -> String {
+    PeerProto::from_tag(*tag)
+        .map(|proto| proto.as_str().to_string())
+        .unwrap_or_else(|| tag.to_string())
+}
+
 fn peer_view(row: &PeerRow) -> PeerView {
     PeerView {
         peer_id: row.id,
         device_id: row.device_id,
         env: row.env.to_string(),
-        proto: row.proto.to_string(),
+        proto: proto_wire_name(&row.proto),
         address: row.address.clone(),
         label: row.label.clone(),
         created_at: row.created_at,
@@ -263,7 +272,7 @@ fn access_view(row: &AccessRow, used_bytes: i64) -> AccessView {
         env: row.env.to_string(),
         plan: row.plan.clone(),
         plan_title: plan_title(row.plan.as_deref()),
-        protos: row.protos.iter().map(|t| t.to_string()).collect(),
+        protos: row.protos.iter().map(proto_wire_name).collect(),
         sources: row.sources.clone(),
         expires_at: row.expires_at,
         traffic_limit: row.traffic_limit,
@@ -381,7 +390,31 @@ fn cards_for_grants<N: NodeStorageOperations>(nodes: &N, grants: &[AccessRow]) -
     for grant in grants {
         for proto in [PeerProto::Amnezia, PeerProto::Wireguard] {
             if grant.protos.contains(&proto.tag()) {
-                out.extend(pool_cards(nodes, &grant.env, proto));
+                let cards = pool_cards(nodes, &grant.env, proto);
+                if cards.is_empty() {
+                    // One line per empty card: which env, which proto, and what
+                    // the nodes of that env announce — the answer to "почему
+                    // /v1/locations вернул pools: []".
+                    let seen: Vec<String> = nodes
+                        .iter_nodes()
+                        .filter(|(_, node)| &node.env == &grant.env)
+                        .map(|(_, node)| {
+                            format!(
+                                "{:?} serving={} tags=[{}]",
+                                node.status,
+                                node.status.is_serving(),
+                                node.inbounds.keys().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+                            )
+                        })
+                        .collect();
+                    tracing::warn!(
+                        "peers: no cards for env {:?} proto {} — nodes: [{}]",
+                        grant.env,
+                        proto.as_str(),
+                        seen.join("; ")
+                    );
+                }
+                out.extend(cards);
             }
         }
     }
@@ -446,12 +479,19 @@ where
 
     let mut shards: Vec<(String, i64)> = Vec::new();
     for (env, count) in node_counts {
-        let override_row = overrides.iter().find(|(e, _, _)| e == &env);
-        if let Some((_, _, false)) = override_row {
+        // `env_capacity` is the mapping plan → shard: an env that is not
+        // declared for THIS plan must never take its users, even when it has
+        // live nodes (otherwise a `super-duper` shard serves `standard`
+        // subscribers just because nobody disabled it).
+        let Some(row) = overrides.iter().find(|(e, _, _)| e == &env) else {
+            continue;
+        };
+        let (_, max, enabled) = row;
+        if !*enabled {
             continue; // switched off by the admin
         }
-        let limit = match override_row.and_then(|(_, max, _)| *max) {
-            Some(max) => max,
+        let limit = match max {
+            Some(max) => *max,
             None => (count * subscriptions_per_node).max(1),
         };
         shards.push((env, limit));
