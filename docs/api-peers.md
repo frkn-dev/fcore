@@ -1,141 +1,93 @@
-# Peers API
+# Peers API — контракт для клиента
 
-Схема «пиров»: пара ключей живёт на устройстве, адрес выдаёт только api. Заменяет серверные ключи
-для новых env (`standard-*`, `super-duper-*`); `connections` (vless, hysteria2, статик wg/awg)
-продолжают работать как раньше.
+Все клиентские ручки пиров говорят **только в AGW-конверте** и **только POST**.
+Плейн-JSON тела нет вовсе: запрос без `keyPayload` отбивается `400 keyPayload missing` —
+именно так приложение отличает «наш api» от чужого.
 
-Контракт целиком: `../../PEERS-SPEC.md` (вне репозитория). Здесь — то, что нужно вызывающему.
+Причина: `subscription_id`, `peer_id`, `device_id` не попадают ни в query string, ни в путь,
+значит их нет в access-логах, в истории браузера и в крэш-репортах.
 
-## Кто есть кто
+## Конверт
 
-* **grant** — право подписки на env: `protos[]`, свой срок, свой лимит трафика. Одна строка на env.
-* **device** — установка приложения: `device_uid` (uuid, его генерит клиент), `device_name`, ключ по
-  умолчанию, `support_tag` — короткий код для поддержки (`7K2M-9XQ4P`).
-* **peer** — туннель: устройство + env + протокол + адрес `/32`. Может нести свой ключ (роутер).
-
-## Клиентские ручки (секрет — uuid подписки)
-
-Все клиентские ручки — **POST с AGW-конвертом** (`{keyPayload, apiPayload}`, тот же, что у
-`/v1/services`): тело только зашифрованное, `subscription_id` не попадает в query, логи и
-крэш-репорты. Id, которые раньше были в пути (`/v1/peers/{id}`), переехали в тело.
-Причина и детали — `peers-envelope.md`.
-
-Ошибки: HTTP-статус = `Refusal::status()` (400/402/403/404/409/503), плюс стабильный код в
-`response.error` (`quota_exhausted`, `grant_expired`, `no_grant`, `proto_not_granted`,
-`env_not_served`, `device_limit`, `subscription_limit`, `key_taken`, `label_taken`,
-`no_free_address`, `device_not_found`, `peer_not_found`). 402 различается только по коду:
-`quota_exhausted` — трафик, `grant_expired` — срок.
-
-### `POST /v1/locations` — тело `{ "subscription_id": "<uuid>" }`
-
-Что доступно и куда подключаться.
+Запрос:
 
 ```json
 {
-  "access": [
-    { "env": "standard-ru", "protos": ["amnezia_peer", "wireguard_peer"],
-      "expires_at": null, "traffic_limit": null, "used_bytes": 0 }
-  ],
-  "pools": [
-    { "env": "standard-ru", "pool": "MSK", "pool_translation": {"ru": "Москва"},
-      "proto": "amnezia_peer",
-      "nodes": [{ "endpoint": "1.2.3.4:51820", "server_public_key": "…",
-                  "mtu": 1280, "dns": ["1.1.1.1"], "keepalive": 25,
-                  "obfuscation": {"jc": 4, "jmin": 40, "jmax": 70, "s1": 30, "s2": 60,
-                                  "h1": "…", "h2": "…"} }] }
-  ]
+  "keyPayload": "<base64(RSA-PKCS#1v1.5({aes_key, aes_iv, aes_salt}))>",
+  "apiPayload": "<base64(AES-256-CBC(JSON тела, IV = aes_iv[0..16], PKCS#7))>"
 }
 ```
 
-`pools` — карточки в приложении (одна на пул внутри env). Адрес и ключ у всех карточек одного env
-общие, меняются только `endpoint`/`server_public_key`/обфускация.
+Ответ — **не** JSON, а сырые байты AES-256-CBC с тем же `aes_key` и `aes_iv[0..16]`.
+Заголовки авторизации не нужны: подлинность обеспечивает RSA-ключ api.
 
-### `POST /v1/peers`
+Публичная часть ключа апи: `agw_public.pem` (в приложении уже используется для `/v1/config`).
+Готовый образец — `dopamine/test_agw_encryption.py`.
 
-```json
-{ "subscription_id": "…", "device_uid": "…", "device_name": "iPhone",
-  "env": "standard-ru", "proto": "amnezia_peer", "public_key": "…", "label": null }
-```
+## Клиентские ручки (конверт, POST)
 
-`public_key` обязателен при первом вызове с новым `device_uid`; дальше берётся ключ устройства.
-`label` — имя канала у роутера (`ch2`), у телефона пустой.
-
-Ответ: `{ peer: {...}, support_tag, pools: [...] }` — конфиг собирается сразу, без второго запроса.
-
-Идемпотентность: тот же `public_key` в том же env → тот же пир и `200`.
-
-Коды: `400` битый ключ/метка · `402` грант истёк или квота исчерпана · `403` нет права на env ·
-`404` подписка/устройство · `409` лимит (5 на устройство, 50 на подписку) или занятый ключ/метка ·
-`503` нет свободных адресов.
-
-### `POST /v1/peers/list` — тело `{ "subscription_id": "…", "device_uid": "…" }`
-
-`device_uid` необязателен. Живые и недавно отозванные туннели. `revoke_reason`: `user` /
-`expired` / `quota` / `subscription_ended` — по нему приложение отличает «сервер снял» от
-«подписка кончилась».
-
-### `POST /v1/peers/delete` — тело `{ "subscription_id": "…", "peer_id": "…" }`
-
-Снимает туннель (`revoke_reason = user`), адрес возвращается в пул.
-
-### Устройства
-
-* `POST /v1/devices/list` — `{ "subscription_id": "…" }` → `{id, device_uid, device_name, support_tag, peers}`
-* `POST /v1/devices/update` — `{ "subscription_id": "…", "device_id": "…", "device_name": "…" }`
-* `POST /v1/devices/delete` — `{ "subscription_id": "…", "device_id": "…" }`, снимает все туннели устройства
-
-## Активация ключа: две ручки
-
-Тело запроса и ответ — одинаковые. Разница только в том, как выдаётся доступ:
-
-| ручка | модель | тумблер раскатки |
+| ручка | тело | ответ |
 |---|---|---|
-| `POST /v1/key/activate` | старая: каталог продуктов + срок подписки | пока сюда смотрит сайт |
-| `POST /v1/activate` | новая: шард + грант, без отката | сюда переключается сайт, когда тест окончен |
+| `POST /v1/locations` | `{subscription_id}` | `{access: [...], pools: [...]}` |
+| `POST /v1/peers` | `{subscription_id, device_uid, device_name?, env, proto, public_key?, label?}` | `{peer: PeerView, support_tag, pools: [...]}` |
+| `POST /v1/peers/list` | `{subscription_id, device_uid?}` | `{peers: [PeerView]}` |
+| `POST /v1/peers/delete` | `{subscription_id, peer_id}` | `{status: "ok"}` |
+| `POST /v1/devices/list` | `{subscription_id}` | `{devices: [DeviceView]}` |
+| `POST /v1/devices/update` | `{subscription_id, device_id, device_name?}` | `{device: DeviceView}` |
+| `POST /v1/devices/delete` | `{subscription_id, device_id}` | `{status: "ok"}` |
 
-`/v1/activate`:
-
-- выбирает шард (`env_capacity.plan` + живые ноды), пишет `subscription_access`;
-- коннекты v1 создаются **из гранта**, а не из каталога;
-- если для плана не объявлено ни одного шарда или все они без живых нод → `503`, ключ
-  **не расходуется**, попытка пишется в `activation_failures` для поддержки. В ответе
-  `response.error`: `plan_not_configured` (план не объявлен в `env_capacity`) или
-  `no_live_shard` (шарды объявлены, но живых нод нет) — по этому коду приложение показывает
-  «нет серверов, ключ не потрачен»;
-- при успехе в ответе есть `env` и `capacity {used, limit, overflow}`.
-
-Переключение и откат — это URL на сайте, без рестарта api. Когда старая ручка перестанет получать
-трафик, её можно удалить одним коммитом.
-
-## Служебные ручки (Bearer-токен сервиса)
-
-### `GET /v1/access?subscription_id=` — права подписки (для ЛК)
-
-### `POST /v1/access` — upsert права
+`PeerView`:
 
 ```json
-{ "subscription_id": "…", "env": "standard-ru",
-  "protos": ["amnezia_peer", "wireguard_peer"], "source": "payment",
-  "expires_at": "2027-01-01T00:00:00Z", "traffic_limit": null }
+{ "peer_id": "…", "device_id": "…", "env": "standard-eu", "proto": "amnezia_peer",
+  "address": "10.88.0.2/32", "label": null, "created_at": "…",
+  "revoked_at": null, "revoke_reason": null }
 ```
 
-Семантика: `protos` и `sources` объединяются, срок берётся позднее (`NULL` = бессрочно), лимит
-заменяется, если пришёл не `NULL`. Env, которого нет в `env_networks`, отклоняется `403` — так
-опечатка в имени видна сразу, а не у юзера кнопкой «подключиться».
+`PeerCreateResponse` — то же плюс `support_tag` (строка вида `7K2M-9XQ4P`) и `pools[]`
+с `endpoint` / `server_public_key` / `mtu` / `dns` / `keepalive` / `obfuscation`.
 
-### `DELETE /v1/access` — `{subscription_id, env}`
+`DeviceView`: `{id, device_uid, device_name, support_tag, created_at, rotated_at}`.
 
-Отзывает право и сразу снимает все пиры этого env (не ждёт фонового таска).
+## Панель управления (без конверта)
 
-### `GET /v1/admin/support/{support_tag}` — поиск для поддержки
+Эти ручки — для сайта и админки, авторизация `Authorization: Bearer <service token>`,
+обычный JSON. Приложение их не вызывает.
 
-Только чтение: устройство, подписка, туннели, права с расходом. Поддержка получает код от юзера;
-код не даёт доступа к туннелям.
+| ручка | назначение |
+|---|---|
+| `GET /v1/access?subscription_id=…` | гранты подписки |
+| `POST /v1/access` | выдать/продлить грант (`plan` или фиксированный `env`) |
+| `DELETE /v1/access` | отозвать грант |
+| `GET /v1/access/capacity?plan=…` | ёмкость шардов плана |
+| `GET /v1/admin/support/{tag}` | подписка/устройство по `support_tag` |
 
-## Шина
+## Активация
 
-* `peers-update-<env>` — `Vec<PeerMessage>`: `Create`/`Delete` одного туннеля. Слушают все ноды env.
-* `peers-init-<uuid>` — полный набор для конкретной ноды, публикуется при её регистрации. Набор
-  авторитетный: нода применяет его и снимает всё, чего в нём нет.
+`POST /v1/activate` — плейн JSON, как и `/v1/key/activate`: это ручка сайта, у которого
+нет AGW-клиента. Тело то же, что у старой активации.
 
-`PeerMessage = { peer_id, action, tag, public_key, address }` — без приватных ключей и без секретов.
+## Ошибки
+
+Тело ошибки уходит **внутри конверта**, как и успешный ответ:
+
+```json
+{ "error": "quota_exhausted" }
+```
+
+| код | `error` | HTTP |
+|---|---|---|
+| ключ не base64/не X25519 | `bad_public_key` | 400 |
+| нет гранта на env / протокол | `no_grant`, `proto_not_granted` | 403 |
+| env не обслуживается | `env_not_served` | 403 |
+| срок вышел | `grant_expired` | 402 |
+| квота | `quota_exhausted` | 402 |
+| лимиты 5/50 | `device_limit`, `subscription_limit` | 409 |
+| ключ уже занят в env | `key_taken` | 409 |
+| нет свободного адреса | `no_free_address` | 503 |
+| пиры выключены | `peers_disabled` | 404 |
+
+## Идемпотентность
+
+`POST /v1/peers` с тем же `(env, public_key)` возвращает существующий пир — повтор после
+таймаута безопасен.
