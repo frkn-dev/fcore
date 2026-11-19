@@ -1175,9 +1175,9 @@ where
 
     let mut protos = Vec::with_capacity(req.protos.len());
     for name in &req.protos {
-        match fcore::Tag::from_str(name) {
-            Ok(tag) => protos.push(tag),
-            Err(_) => {
+        match peers::tag_from_wire(name) {
+            Some(tag) => protos.push(tag),
+            None => {
                 return json_reply(
                     400,
                     "unknown proto",

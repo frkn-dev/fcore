@@ -173,6 +173,28 @@ impl Refusal {
     }
 }
 
+/// Protocol tag as the panel sends it: `AmneziaWg` (config naming) or the
+/// snake_case form the peers contract documents (`amnezia_peer`,
+/// `vless_xhttp_cdn`, `hysteria2`). Both must reach the same tag — the site and
+/// payment-gw already post CamelCase, the app contract speaks snake_case.
+pub fn tag_from_wire(name: &str) -> Option<Tag> {
+    if let Ok(tag) = name.parse::<Tag>() {
+        return Some(tag);
+    }
+    let camel: String = name
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    camel.parse::<Tag>().ok()
+}
+
 /// A WireGuard/X25519 public key: base64 of exactly 32 bytes.
 pub fn is_valid_public_key(value: &str) -> bool {
     use base64::Engine;
@@ -375,6 +397,18 @@ mod tests {
             limits.check_subscription(50),
             Err(Refusal::SubscriptionLimit(50))
         );
+    }
+
+    #[test]
+    fn tags_are_accepted_in_both_namings() {
+        assert_eq!(tag_from_wire("amnezia_peer"), Some(Tag::AmneziaPeer));
+        assert_eq!(tag_from_wire("wireguard_peer"), Some(Tag::WireguardPeer));
+        assert_eq!(tag_from_wire("vless_xhttp_cdn"), Some(Tag::VlessXhttpCdn));
+        assert_eq!(tag_from_wire("hysteria2"), Some(Tag::Hysteria2));
+        // The CamelCase form the site and payment-gw already post.
+        assert_eq!(tag_from_wire("AmneziaWg"), Some(Tag::AmneziaWg));
+        assert_eq!(tag_from_wire("Wireguard"), Some(Tag::Wireguard));
+        assert_eq!(tag_from_wire("nonsense"), None);
     }
 
     #[test]
