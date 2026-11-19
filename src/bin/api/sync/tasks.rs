@@ -23,6 +23,11 @@ pub const DELETE_REASON_EXPIRED: &str = "expired";
 pub const DELETE_REASON_MANUAL: &str = "manual";
 pub const DELETE_REASON_TRAFFIC_EXHAUSTED: &str = "traffic_exhausted";
 pub const DELETE_REASON_DEVICE_KICK: &str = "device_kick";
+/// The subscription lost the right this connection was issued for (a grant was
+/// revoked, or a migration moved it to another shard). Never restorable: if the
+/// right comes back, `ensure` issues a fresh credential instead of reviving a
+/// deleted one.
+pub const DELETE_REASON_GRANT_CHANGED: &str = "grant_changed";
 
 /// Whether a soft-deleted connection may be revived by the restore flow.
 /// Legacy (NULL) and expired connections revive as before; a lite connection

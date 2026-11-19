@@ -70,7 +70,14 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # max_devices_per_subscription = 15
 # max_per_subscription = 45
 # remember_days = 7
-# subnets = { "standard-01" = ["10.88.0.0/24"] }
+# subnets = { "0001" = ["10.88.0.0/24"] }
+# # Remove v1 connections whose (env, proto) the subscription no longer holds a
+# # grant for: a migration to a shard, a revoked grant, a downgrade. Off until
+# # the client can build peers — a pruned connection otherwise leaves the user
+# # with nothing. Turn on with prune_dry_run first and read the log for a day.
+# prune_legacy_conns = false
+# prune_dry_run = true
+# prune_max_per_tick = 50
 
 # App Store IAP (POST /v1/subscriptions). Without this section the endpoint answers 503.
 # [service.apple]

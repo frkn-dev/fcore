@@ -18,13 +18,15 @@ use uuid::Uuid;
 use warp::http::StatusCode;
 
 use fcore::{
-    http::ResponseMessage, Connection, ConnectionApiOperations, ConnectionBaseOperations, Env,
-    NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations,
+    http::ResponseMessage, Connection, ConnectionApiOperations, ConnectionBaseOperations,
+    ConnectionStorageApiOperations, Env, NodeStorageOperations, Subscription,
+    SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use crate::peers::alloc;
 use crate::peers::{self, Grant, Limits, PeerProto, Refusal};
 use crate::postgres::peers::{AccessRow, Inserted, PeerRow};
+use crate::sync::tasks::{SyncOp, DELETE_REASON_GRANT_CHANGED};
 use crate::sync::MemSync;
 
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -1388,7 +1390,8 @@ where
         + 'static
         + From<Connection>
         + PartialEq,
-    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static + From<Subscription>,
 {
     let env = match Env::from_str(&req.env) {
         Ok(env) => env,
@@ -1432,10 +1435,52 @@ where
             for peer in &live {
                 publish_peer(&memory, fcore::Action::Delete, peer).await;
             }
+
+            // The v1 connections issued for this env go with the right:
+            // leaving them alive until their own term is what a refunded
+            // customer would exploit. The subscription's own env is skipped —
+            // it is a self-hosted server, not something we granted.
+            let conns: Vec<(Uuid, C)> = {
+                let mem = memory.memory.read().await;
+                let scope_env = mem
+                    .subscriptions
+                    .find_by_id(&req.subscription_id)
+                    .and_then(|sub| sub.scope_env().cloned());
+                if scope_env.as_ref() == Some(&env) {
+                    Vec::new()
+                } else {
+                    mem.connections
+                        .get_by_subscription_id(&req.subscription_id)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(|(_, conn)| !conn.get_deleted() && conn.get_env() == env)
+                        .cloned()
+                        .collect()
+                }
+            };
+            let mut conns_revoked = 0usize;
+            for (conn_id, conn) in conns {
+                match SyncOp::delete_connection(
+                    &memory,
+                    &conn_id,
+                    &conn.into(),
+                    Some(DELETE_REASON_GRANT_CHANGED),
+                )
+                .await
+                {
+                    Ok(_) => conns_revoked += 1,
+                    Err(e) => tracing::error!(
+                        "revoke_grant: cannot delete connection {}: {:?}",
+                        conn_id,
+                        e
+                    ),
+                }
+            }
+
             json_reply(
                 200,
                 "grant revoked",
-                serde_json::json!({ "peers_revoked": revoked }),
+                serde_json::json!({ "peers_revoked": revoked, "conns_revoked": conns_revoked }),
             )
         }
         Ok(false) => json_reply(

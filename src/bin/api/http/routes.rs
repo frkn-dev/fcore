@@ -507,6 +507,28 @@ where
             .and(warp::header::optional::<String>("authorization"))
             .and_then(admin_api_extend_subscription_handler);
 
+        // Shards: declare one, or change its plan/title/kind/caps. The plan
+        // cannot be derived from an opaque id, so this is the only place it is
+        // set — no hand-written SQL during provisioning.
+        let admin_api_shards_get = warp::get()
+            .and(warp::path!("admin" / "api" / "shards"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_shards_handler);
+
+        let admin_api_shards_put = warp::put()
+            .and(warp::path!("admin" / "api" / "shards" / String))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(admin_api_put_shard_handler);
+
         // Selfhosted caps of one account (servers / users).
         let admin_api_selfhosted_limits_route = warp::put()
             .and(warp::path!(
@@ -610,6 +632,8 @@ where
             .or(admin_api_assign_premium_route)
             .or(admin_api_create_subscription_route)
             .or(admin_api_extend_subscription_route)
+            .or(admin_api_shards_get)
+            .or(admin_api_shards_put)
             .or(admin_api_selfhosted_limits_route)
             .or(admin_api_alert_chat_put)
             .or(admin_api_alert_chat_get)

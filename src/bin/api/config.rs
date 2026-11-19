@@ -187,6 +187,21 @@ pub struct PeersConfig {
     /// app can say why a tunnel died instead of "no such peer".
     #[serde(default = "default_peers_remember_days")]
     pub remember_days: i64,
+    /// Remove v1 connections whose `(env, proto)` the subscription no longer
+    /// holds a grant for. Off by default: a migration must be deliberate, and
+    /// until the client can build peers a pruned connection leaves the user
+    /// with nothing.
+    #[serde(default)]
+    pub prune_legacy_conns: bool,
+    /// Only log what would be pruned. On by default, so the first window after
+    /// enabling pruning is read-only.
+    #[serde(default = "default_true")]
+    pub prune_dry_run: bool,
+    /// Safety valve: more candidates than this in one tick means the grant is
+    /// wrong, so nothing is deleted for that subscription and a warning is
+    /// logged.
+    #[serde(default = "default_peers_prune_max_per_tick")]
+    pub prune_max_per_tick: usize,
 }
 
 fn default_peers_max_per_device() -> i64 {
@@ -206,6 +221,14 @@ fn default_peers_remember_days() -> i64 {
     7
 }
 
+fn default_peers_prune_max_per_tick() -> usize {
+    50
+}
+
+fn default_true() -> bool {
+    true
+}
+
 impl Default for PeersConfig {
     fn default() -> Self {
         Self {
@@ -215,6 +238,9 @@ impl Default for PeersConfig {
             max_devices_per_subscription: default_peers_max_devices_per_subscription(),
             subnets: HashMap::new(),
             remember_days: default_peers_remember_days(),
+            prune_legacy_conns: false,
+            prune_dry_run: true,
+            prune_max_per_tick: default_peers_prune_max_per_tick(),
         }
     }
 }

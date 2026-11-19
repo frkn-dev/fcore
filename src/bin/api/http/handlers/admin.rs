@@ -1317,6 +1317,199 @@ where
     }
 }
 
+// ---------------------------------------------------------------- shards
+
+/// Body of `PUT /admin/api/shards/{env}`.
+///
+/// `title` and `max_subscriptions` are optional on purpose: `None` keeps the
+/// stored value, so the same call can flip `enabled` or change the plan without
+/// restating a hand-set cap.
+#[derive(Debug, Deserialize)]
+pub struct AdminShardRequest {
+    pub plan: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default = "admin_shard_kind_default")]
+    pub kind: String,
+    #[serde(default)]
+    pub max_subscriptions: Option<i32>,
+    #[serde(default = "admin_shard_enabled_default")]
+    pub enabled: bool,
+}
+
+fn admin_shard_kind_default() -> String {
+    "core".to_string()
+}
+
+fn admin_shard_enabled_default() -> bool {
+    true
+}
+
+/// `GET /admin/api/shards` — every declared shard with its live numbers.
+pub async fn admin_api_shards_handler<N, C, S>(
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    match memory.db.peers().list_shards().await {
+        Ok(rows) => Ok(Box::new(warp::reply::json(
+            &serde_json::json!({ "shards": rows }),
+        ))),
+        Err(e) => {
+            error!("admin: cannot list shards: {}", e);
+            Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({ "status": 500, "message": "cannot list shards" }),
+                ),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )))
+        }
+    }
+}
+
+/// `PUT /admin/api/shards/{env}` — declare a shard or change its policy.
+///
+/// The plan and the human title live here, not in a node config: a shard id is
+/// opaque, so nothing can derive the plan from the name.
+pub async fn admin_api_put_shard_handler<N, C, S>(
+    env_raw: String,
+    req: AdminShardRequest,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let env = match <Env as std::str::FromStr>::from_str(&env_raw) {
+        Ok(env) => env,
+        Err(_) => {
+            return Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({ "status": 400, "message": "bad env", "error": "bad_env" }),
+                ),
+                StatusCode::BAD_REQUEST,
+            )));
+        }
+    };
+
+    // A shard is sold as a plan: an unknown one would be a shard nobody can be
+    // granted, so refuse it here instead of silently writing a dead row.
+    if <fcore::PlanKind as std::str::FromStr>::from_str(&req.plan).is_err() {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "status": 400,
+                "message": "unknown plan",
+                "error": "bad_plan",
+            })),
+            StatusCode::BAD_REQUEST,
+        )));
+    }
+
+    let Some(kind) = crate::peers::ShardKind::parse(&req.kind) else {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "status": 400,
+                "message": "kind must be core, premium or personal",
+                "error": "bad_kind",
+            })),
+            StatusCode::BAD_REQUEST,
+        )));
+    };
+
+    if let Err(e) = memory
+        .db
+        .peers()
+        .upsert_shard(
+            &env,
+            &req.plan,
+            req.title.as_deref(),
+            kind.as_str(),
+            req.max_subscriptions,
+            req.enabled,
+        )
+        .await
+    {
+        error!("admin: cannot upsert shard {}: {}", env, e);
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(
+                &serde_json::json!({ "status": 500, "message": "cannot write the shard" }),
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )));
+    }
+
+    // Write through to the cache: a shard declared now must be assignable on the
+    // next activation, not after a restart.
+    {
+        let mut state = memory.memory.write().await;
+        let stored = state.peers_state.env_capacity.get(&env).cloned();
+        state.peers_state.env_capacity.insert(
+            env.clone(),
+            crate::peers::store::ShardCapacity {
+                plan: req.plan.clone(),
+                max_subscriptions: req
+                    .max_subscriptions
+                    .map(i64::from)
+                    .or(stored.as_ref().and_then(|s| s.max_subscriptions)),
+                enabled: req.enabled,
+                title: req
+                    .title
+                    .clone()
+                    .or(stored.as_ref().and_then(|s| s.title.clone())),
+                kind,
+            },
+        );
+    }
+
+    Ok(Box::new(warp::reply::json(&serde_json::json!({
+        "status": 200,
+        "shard": env.to_string(),
+        "plan": req.plan,
+        "kind": kind.as_str(),
+        "enabled": req.enabled,
+    }))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

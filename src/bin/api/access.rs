@@ -53,6 +53,62 @@ pub fn grants_to_conns_map(
     out
 }
 
+/// Where the conns map came from. Pruning is only allowed on grants: the
+/// catalogue is a plan-wide default and says nothing about a single payer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Grants,
+    Catalogue,
+}
+
+/// A live v1 connection the subscription is no longer entitled to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PruneCandidate {
+    pub conn: Uuid,
+    pub env: Env,
+    pub proto: Tag,
+}
+
+/// Live connections that carry no right any more: `(env, proto)` is absent from
+/// the granted map.
+///
+/// `scope_env` is the subscription's own (self-hosted / personal) env: it is
+/// never granted through `subscription_access`, so pruning it would take a
+/// customer's own server away. `max` caps what is returned; `found` is the real
+/// number of candidates, so the caller can refuse the whole batch when a wrong
+/// grant would delete too much at once.
+pub fn connections_to_prune(
+    live: &[(Uuid, Env, Tag)],
+    granted: &HashMap<Env, Vec<Tag>>,
+    scope_env: Option<&Env>,
+    max: usize,
+) -> (Vec<PruneCandidate>, usize) {
+    let mut out = Vec::new();
+    let mut found = 0usize;
+
+    for (conn, env, proto) in live {
+        if Some(env) == scope_env {
+            continue;
+        }
+        if granted
+            .get(env)
+            .is_some_and(|tags| tags.contains(proto))
+        {
+            continue;
+        }
+        found += 1;
+        if out.len() < max {
+            out.push(PruneCandidate {
+                conn: *conn,
+                env: env.clone(),
+                proto: *proto,
+            });
+        }
+    }
+
+    (out, found)
+}
+
 /// The conns map the provisioning code should use: grants when the
 /// subscription has any, the catalogue otherwise.
 ///
@@ -62,13 +118,16 @@ pub async fn conns_map_for(
     db: &PgContext,
     subscription_id: Uuid,
     catalog: Option<HashMap<Env, Vec<Tag>>>,
-) -> Result<Option<HashMap<Env, Vec<Tag>>>> {
+) -> Result<(Option<HashMap<Env, Vec<Tag>>>, Source)> {
     let grants = db.peers().grants(subscription_id).await?;
     if grants.is_empty() {
-        return Ok(catalog);
+        return Ok((catalog, Source::Catalogue));
     }
 
-    Ok(Some(grants_to_conns_map(&grants, chrono::Utc::now())))
+    Ok((
+        Some(grants_to_conns_map(&grants, chrono::Utc::now())),
+        Source::Grants,
+    ))
 }
 
 #[cfg(test)]
@@ -137,5 +196,41 @@ mod tests {
             now(),
         );
         assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn the_own_env_of_a_subscription_is_never_pruned() {
+        use std::str::FromStr;
+        // A self-hosted subscription has its own env with no grant at all;
+        // a migration must not take the customer's server away.
+        let own = Env::from_str("custompersonalc6831dad").unwrap();
+        let live = vec![(uuid::Uuid::nil(), own.clone(), Tag::Hysteria2)];
+        let (candidates, found) = connections_to_prune(&live, &HashMap::new(), Some(&own), 50);
+        assert!(candidates.is_empty());
+        assert_eq!(found, 0);
+    }
+
+    #[test]
+    fn granted_pairs_survive_and_the_rest_goes() {
+        let granted = grants_to_conns_map(&[grant(Env::Dev, vec![Tag::Hysteria2], None)], now());
+        let live = vec![
+            (uuid::Uuid::nil(), Env::Dev, Tag::Hysteria2),
+            (uuid::Uuid::nil(), Env::Ru, Tag::Wireguard),
+        ];
+        let (candidates, found) = connections_to_prune(&live, &granted, None, 50);
+        assert_eq!(found, 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].env, Env::Ru);
+        assert_eq!(candidates[0].proto, Tag::Wireguard);
+    }
+
+    #[test]
+    fn a_batch_over_the_cap_is_reported_in_full() {
+        let live: Vec<(uuid::Uuid, Env, Tag)> = (0..5)
+            .map(|_| (uuid::Uuid::nil(), Env::Ru, Tag::Hysteria2))
+            .collect();
+        let (candidates, found) = connections_to_prune(&live, &HashMap::new(), None, 2);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(found, 5);
     }
 }

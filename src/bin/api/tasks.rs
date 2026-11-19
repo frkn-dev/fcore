@@ -19,7 +19,7 @@ use super::{
     subscription_audit,
     sync::tasks::{
         publish_conn_delete, SyncOp, DELETE_REASON_DEVICE_KICK, DELETE_REASON_EXPIRED,
-        DELETE_REASON_TRAFFIC_EXHAUSTED,
+        DELETE_REASON_GRANT_CHANGED, DELETE_REASON_TRAFFIC_EXHAUSTED,
     },
     traffic,
 };
@@ -41,6 +41,12 @@ pub trait Tasks {
     async fn enforce_traffic_limits(&self, interval_sec: u64);
     async fn enforce_device_limit(&self, interval_sec: u64, max_ticks: u32);
     async fn reconcile_enabled_connections(&self, interval_sec: u64);
+    /// Drop the v1 connections a subscription no longer holds a grant for.
+    async fn prune_ungranted(
+        &self,
+        sub_id: uuid::Uuid,
+        granted: Option<&std::collections::HashMap<fcore::Env, Vec<fcore::Tag>>>,
+    );
     async fn republish_conn_deletes(&self, interval_sec: u64);
 }
 
@@ -468,11 +474,11 @@ where
                     }
                 };
 
-                let conns_map =
+                let (conns_map, source) =
                     match crate::access::conns_map_for(&self.sync.db, sub_id, conns_map.clone())
                         .await
                     {
-                        Ok(map) => map,
+                        Ok(pair) => pair,
                         Err(e) => {
                             error!("reconcile: cannot read grants for {}: {}", sub_id, e);
                             continue;
@@ -488,7 +494,120 @@ where
                     &self.settings.service.amnezia_wireguard_mobile_network,
                 )
                 .await;
+
+                // After the ensure, so a pair the grants do cover is never a
+                // candidate: only what is left unentitled can go.
+                if source == crate::access::Source::Grants
+                    && self.settings.service.peers.prune_legacy_conns
+                {
+                    self.prune_ungranted(sub_id, conns_map.as_ref()).await;
+                }
             }
+        }
+    }
+
+    /// Remove v1 connections the subscription no longer holds a grant for.
+    ///
+    /// Only called when the rights come from grants: the catalogue is a
+    /// plan-wide default and says nothing about one payer. The subscription's
+    /// own env (`scope_env` — a self-hosted server) is never touched, and a
+    /// batch bigger than the safety valve is reported and skipped whole: a
+    /// wrong grant must not wipe a customer's access in one tick.
+    async fn prune_ungranted(
+        &self,
+        sub_id: uuid::Uuid,
+        granted: Option<&std::collections::HashMap<fcore::Env, Vec<fcore::Tag>>>,
+    ) {
+        let Some(granted) = granted else {
+            return;
+        };
+        let cfg = &self.settings.service.peers;
+
+        let (live, scope_env) = {
+            let mem = self.sync.memory.read().await;
+            let scope_env = mem
+                .subscriptions
+                .find_by_id(&sub_id)
+                .and_then(|sub| sub.scope_env().cloned());
+            let live: Vec<(uuid::Uuid, C)> = mem
+                .connections
+                .get_by_subscription_id(&sub_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, conn)| !conn.get_deleted())
+                .collect();
+            (live, scope_env)
+        };
+
+        if live.is_empty() {
+            return;
+        }
+
+        let triples: Vec<(uuid::Uuid, fcore::Env, fcore::Tag)> = live
+            .iter()
+            .map(|(id, conn)| (*id, conn.get_env(), conn.get_proto().proto()))
+            .collect();
+
+        let (candidates, found) = crate::access::connections_to_prune(
+            &triples,
+            granted,
+            scope_env.as_ref(),
+            cfg.prune_max_per_tick,
+        );
+
+        if found > candidates.len() {
+            warn!(
+                "prune: subscription {} has {} unentitled connections in one tick (limit {}), skipping — check its grants",
+                sub_id, found, cfg.prune_max_per_tick
+            );
+            return;
+        }
+
+        let mut pruned = 0usize;
+        for candidate in candidates {
+            if cfg.prune_dry_run {
+                info!(
+                    "prune(dry): sub={} conn={} env={} proto={}",
+                    sub_id, candidate.conn, candidate.env, candidate.proto
+                );
+                continue;
+            }
+
+            let Some((_, conn)) = live.iter().find(|(id, _)| *id == candidate.conn) else {
+                continue;
+            };
+
+            match SyncOp::delete_connection(
+                &self.sync,
+                &candidate.conn,
+                conn,
+                Some(DELETE_REASON_GRANT_CHANGED),
+            )
+            .await
+            {
+                Ok(Status::Ok(_)) => {
+                    pruned += 1;
+                    info!(
+                        "prune: sub={} conn={} env={} proto={}",
+                        sub_id, candidate.conn, candidate.env, candidate.proto
+                    );
+                }
+                Ok(status) => warn!(
+                    "prune: connection {} not deleted: {:?}",
+                    candidate.conn, status
+                ),
+                Err(e) => error!(
+                    "prune: cannot delete connection {}: {:?}",
+                    candidate.conn, e
+                ),
+            }
+        }
+
+        if pruned > 0 {
+            info!(
+                "pruned {} connection(s) of subscription {} without a grant",
+                pruned, sub_id
+            );
         }
     }
 

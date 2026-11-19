@@ -576,7 +576,7 @@ where
             // behaviour unchanged.
             let conns_map =
                 match crate::access::conns_map_for(&memory.db, sub_id, catalog_map.clone()).await {
-                    Ok(map) => map,
+                    Ok((map, _source)) => map,
                     Err(e) => {
                         error!(
                             "Cannot read grants for {}: {} — using the catalogue",

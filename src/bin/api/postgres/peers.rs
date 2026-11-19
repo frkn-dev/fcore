@@ -31,6 +31,18 @@ pub struct AccessRow {
     pub traffic_limit: Option<i64>,
 }
 
+/// One row of `shard_overview`: a declared shard with its live numbers.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ShardRow {
+    pub shard: String,
+    pub title: Option<String>,
+    pub plan: String,
+    pub pools: i64,
+    pub nodes: i64,
+    pub peers_live: i64,
+    pub address_hosts: i64,
+}
+
 /// One row of `devices`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DeviceRow {
@@ -493,24 +505,83 @@ impl PgPeers {
             .collect())
     }
 
-    /// Creates the capacity row on first sight of a shard (a node announced a
-    /// peer interface for an env nobody registered yet).
-    pub async fn ensure_shard_capacity(&self, env: &Env, plan: &str) -> Result<()> {
+    /// Admin: declare a shard, or update its policy. The plan, the human title
+    /// and the kind live here and never in a node config: a shard id is opaque,
+    /// and policy is the api's decision, not a node's.
+    ///
+    /// `None` leaves the stored value alone (a title, a hand-set cap), so the
+    /// same call can be used to flip `enabled` without restating the rest.
+    pub async fn upsert_shard(
+        &self,
+        env: &Env,
+        plan: &str,
+        title: Option<&str>,
+        kind: &str,
+        max_subscriptions: Option<i32>,
+        enabled: bool,
+    ) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
         client
             .execute(
                 r#"
-                INSERT INTO env_capacity (env, plan, max_subscriptions, enabled)
-                VALUES ($1, $2, NULL, true)
-                ON CONFLICT (env) DO NOTHING
+                INSERT INTO env_capacity (env, plan, max_subscriptions, enabled, title, kind)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (env) DO UPDATE
+                SET plan = EXCLUDED.plan,
+                    max_subscriptions = COALESCE(EXCLUDED.max_subscriptions, env_capacity.max_subscriptions),
+                    enabled = EXCLUDED.enabled,
+                    title = COALESCE(EXCLUDED.title, env_capacity.title),
+                    kind = EXCLUDED.kind
                 "#,
-                &[&env.to_string(), &plan],
+                &[
+                    &env.to_string(),
+                    &plan,
+                    &max_subscriptions,
+                    &enabled,
+                    &title,
+                    &kind,
+                ],
             )
             .await?;
 
         Ok(())
+    }
+
+    /// Admin: every declared shard with its live numbers, straight from the
+    /// `shard_overview` view (migration 0021).
+    pub async fn list_shards(&self) -> Result<Vec<ShardRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT shard, title, plan,
+                       pools::int8 AS pools,
+                       nodes::int8 AS nodes,
+                       peers_live::int8 AS peers_live,
+                       address_hosts::int8 AS address_hosts
+                  FROM shard_overview
+                 ORDER BY shard
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| ShardRow {
+                shard: row.get("shard"),
+                title: row.get("title"),
+                plan: row.get("plan"),
+                pools: row.get("pools"),
+                nodes: row.get("nodes"),
+                peers_live: row.get("peers_live"),
+                address_hosts: row.get("address_hosts"),
+            })
+            .collect())
     }
 
     /// Close the quarantine row when the same key finally activates.
