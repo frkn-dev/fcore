@@ -76,6 +76,22 @@ where
     let node = node_req.clone().as_node();
     let node_id = node_req.uuid;
 
+    // A named shard that has no address block cannot hand out peers: the
+    // registration itself is fine (v1 keeps working), but /v1/locations will
+    // hide the node and POST /v1/peers will answer env_not_served. Say it in
+    // the log instead of leaving the operator with an empty card.
+    if node.env.is_named_shard() {
+        let mem = memory.memory.read().await;
+        if mem.peers_state.block_masks(&node.env).is_empty() {
+            tracing::warn!(
+                "peers: node {} registers in shard {:?} which has no address block \
+                 in env_networks — peers cannot be served until the subnet is seeded",
+                node.uuid,
+                node.env.to_string()
+            );
+        }
+    }
+
     // A mismatch is a diagnosis, not a door lock: the node still registers and
     // still gets connections through /connections/sync. Blocking registration
     // used to leave the pool on a stale snapshot and silently stop handing new
@@ -227,7 +243,18 @@ where
     let mem = memory.memory.read().await;
 
     let nodes = if let Some(env) = node_param.env {
-        mem.nodes.get_by_env(&env.into())
+        let Ok(env) = env.parse::<fcore::Env>() else {
+            let response = ResponseMessage::<Option<Vec<NodeResponse>>> {
+                status: StatusCode::BAD_REQUEST.as_u16(),
+                message: "Unknown env".to_string(),
+                response: None,
+            };
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&response),
+                StatusCode::BAD_REQUEST,
+            ));
+        };
+        mem.nodes.get_by_env(&env)
     } else {
         mem.nodes.all()
     };
@@ -280,6 +307,12 @@ where
 #[derive(Clone, Debug, Serialize)]
 pub struct NodeStatusPublic {
     pub hostname: String,
+    /// The shard this node serves (`0001`). Shown together with `env_title` so
+    /// an operator reading `/status` never sees a bare opaque id.
+    pub env: String,
+    /// Human name of the shard from `env_capacity.title`; `null` for legacy
+    /// regions and for shards without a title.
+    pub env_title: Option<String>,
     pub address: Ipv4Addr,
     pub label: String,
     pub country: String,
@@ -307,6 +340,8 @@ fn node_status_public(node: &fcore::Node) -> NodeStatusPublic {
     ports.dedup();
     NodeStatusPublic {
         hostname: node.hostname.clone(),
+        env: node.env.to_string(),
+        env_title: None,
         address: node.address,
         label: node.label.clone(),
         country: node.country.clone(),
@@ -339,7 +374,7 @@ where
 {
     let mem = memory.memory.read().await;
 
-    let nodes: Vec<NodeStatusPublic> = mem
+    let mut nodes: Vec<NodeStatusPublic> = mem
         .nodes
         .all()
         .unwrap_or_default()
@@ -347,6 +382,13 @@ where
         .filter(|node| status_listed(node))
         .map(node_status_public)
         .collect();
+    // Opaque shard ids are only useful next to their human name.
+    if !nodes.is_empty() {
+        let titles = memory.db.peers().shard_titles().await.unwrap_or_default();
+        for row in &mut nodes {
+            row.env_title = titles.get(&row.env).cloned();
+        }
+    }
 
     let response = ResponseMessage {
         status: StatusCode::OK.as_u16(),

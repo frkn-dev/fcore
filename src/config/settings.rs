@@ -65,6 +65,9 @@ pub struct NodeConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct NodeConfigRaw {
+    /// The shard this node serves. New configs write `shard = "0001"`; `env`
+    /// keeps working as the historical key, so existing files need no edit.
+    #[serde(alias = "shard")]
     pub env: Env,
     pub hostname: Option<String>,
     pub default_interface: String,

@@ -957,7 +957,12 @@ where
         }
 
         for conn in conns {
-            tmp_mem.add_conn(conn).await?;
+            // One row with an env we cannot place (a leftover of an old bug:
+            // env = uuid, `Premium…` in mixed case) must not abort the rebuild:
+            // that would blank every connection in memory and stop the api.
+            if let Err(e) = tmp_mem.add_conn(conn).await {
+                tracing::error!("db rebuild: skipping connection with a bad env: {e}");
+            }
         }
 
         for sub in subscriptions {
@@ -1200,6 +1205,80 @@ where
                     {
                         tracing::error!("alerts: cannot record event: {e}");
                     }
+                }
+            }
+
+            // Правило шарда: ёмкость считается в адресах, и именно они кончаются.
+            // Правило одно на тик, поэтому оно вне цикла по нодам.
+            let shard_fires: Vec<(String, String, u64, u64)> = {
+                let mem = self.sync.memory.read().await;
+                let mut out = Vec::new();
+                for (shard, cap) in &mem.peers_state.env_capacity {
+                    if !cap.enabled {
+                        continue;
+                    }
+                    let budget = crate::peers::alloc::allocatable(&mem.peers_state.block_masks(shard));
+                    if budget == 0 {
+                        continue;
+                    }
+                    let used = mem.peers_state.peers.used_in(shard).len() as u64;
+                    if let Some(crate::alerts::Decision::Fire {
+                        hostname,
+                        env,
+                        ..
+                    }) = engine.observe_shard_fill(&shard.to_string(), cap.title.clone(), used, budget)
+                    {
+                        out.push((hostname, env, used, budget));
+                    }
+                }
+                out
+            };
+
+            for (hostname, shard, used, budget) in shard_fires {
+                let kind = crate::alerts::AlertKind::ShardFillHigh;
+                let detail = format!("{used} из {budget} адресов");
+                let text = crate::alerts::format_message_full(
+                    &kind,
+                    &hostname,
+                    &shard,
+                    &[],
+                    0,
+                    Some(&detail),
+                );
+                let subject = crate::alerts::email_subject_state(
+                    &hostname,
+                    kind.emoji(),
+                    kind.label_ru(),
+                );
+                let delivered =
+                    crate::alerts::notify(&cfg, &client, &subject, &hostname, &text).await;
+                tracing::info!(
+                    "alert {}: {} ({}) used={}/{} delivered={}",
+                    kind.as_str(),
+                    hostname,
+                    shard,
+                    used,
+                    budget,
+                    delivered
+                );
+                let details = serde_json::json!({ "shard": shard, "used": used, "budget": budget });
+                if let Err(e) = self
+                    .sync
+                    .db
+                    .alerts()
+                    .record(
+                        kind.as_str(),
+                        None,
+                        Some(&hostname),
+                        Some(&shard),
+                        0,
+                        delivered,
+                        &details,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    tracing::error!("alerts: cannot record shard event: {e}");
                 }
             }
         }

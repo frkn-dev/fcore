@@ -388,8 +388,15 @@ where
         ));
     }
 
+    // What the shard assignment produced, so the app learns where it landed.
+    let mut granted: Option<(String, i64, i64, bool)> = None;
+
     if flow == ActivationFlow::Peers {
-        let protos: Vec<fcore::Tag> = catalog_map
+        // Rights of the subscription: the v1 protocols from the catalogue **and**
+        // the peer protocols of this plan. Without the peer tags every
+        // `POST /v1/peers` answered `proto_not_granted` right after a successful
+        // shard assignment — the payer got a card they could not connect to.
+        let mut protos: Vec<fcore::Tag> = catalog_map
             .as_ref()
             .map(|map| {
                 map.values()
@@ -401,6 +408,28 @@ where
                     .collect()
             })
             .unwrap_or_default();
+        let mut peer_protos: Vec<fcore::Tag> = catalog_map
+            .as_ref()
+            .map(|map| {
+                map.values()
+                    .flatten()
+                    .copied()
+                    .filter(|tag| tag.is_peer())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if peer_protos.is_empty() {
+            // No product sells peer protocols explicitly yet: a shard serves
+            // both of them, and the runtime filters cards by what nodes expose.
+            peer_protos = vec![fcore::Tag::AmneziaPeer, fcore::Tag::WireguardPeer];
+        }
+        for tag in peer_protos {
+            if !protos.contains(&tag) {
+                protos.push(tag);
+            }
+        }
 
         if !protos.is_empty() {
             let expires_at = memory
@@ -411,9 +440,7 @@ where
                 .ok()
                 .flatten()
                 .and_then(|s| s.expires_at());
-            // TODO: thread `peers.subscriptions_per_node` from settings; until
-            // then the documented default is used here.
-            let shards = crate::http::handlers::peers::live_shards(&memory, &plan, 100).await;
+            let shards = crate::http::handlers::peers::live_shards(&memory, &plan).await;
             match memory
                 .db
                 .peers()
@@ -452,6 +479,7 @@ where
                         used,
                         limit
                     );
+                    granted = Some((row.env.to_string(), used, limit, overflow));
                 }
                 Ok(None) => {
                     let _ = memory
@@ -504,6 +532,42 @@ where
                     "Key activation failed: {}",
                     err
                 )));
+            }
+
+            // A renewal must not leave the grants behind: they carry their own
+            // `expires_at`, and a stale one would kill the tunnels of a payer.
+            if flow == ActivationFlow::Peers {
+                // The new term lives on the subscription row just extended.
+                let new_expiry = memory
+                    .db
+                    .sub()
+                    .find(&sub_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.expires_at());
+                if let Some(expires_at) = new_expiry {
+                    match memory.db.peers().extend_grants(sub_id, expires_at).await {
+                        Ok(rows) if !rows.is_empty() => {
+                            tracing::info!(
+                                "activation: extended {} grant(s) of {} to {}",
+                                rows.len(),
+                                sub_id,
+                                expires_at
+                            );
+                            let mut state = memory.memory.write().await;
+                            for row in rows {
+                                state.peers_state.access.insert(sub_id, row);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::error!(
+                            "activation: cannot extend grants of {}: {}",
+                            sub_id,
+                            e
+                        ),
+                    }
+                }
             }
 
             // Grants win over the catalogue for this subscription: once the
@@ -657,6 +721,32 @@ where
                     }
                     _ => {}
                 }
+            }
+
+            // The peers flow answers with where the payer landed: the app needs
+            // `env` to create its first tunnel and `capacity` to show the load.
+            if flow == ActivationFlow::Peers {
+                let mut response = serde_json::json!({
+                    "subscription_id": sub_id,
+                    "key": serde_json::to_value(&key).unwrap_or(serde_json::Value::Null),
+                });
+                if let Some((env, used, limit, overflow)) = granted {
+                    response["env"] = serde_json::json!(env);
+                    response["capacity"] = serde_json::json!({
+                        "plan": plan,
+                        "used": used,
+                        "limit": limit,
+                        "overflow": overflow,
+                    });
+                }
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status": 200,
+                        "message": format!("Key {} activated", key.id),
+                        "response": response,
+                    })),
+                    warp::http::StatusCode::OK,
+                ));
             }
 
             Ok(http::success_response(

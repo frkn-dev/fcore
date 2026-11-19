@@ -51,6 +51,13 @@ pub struct AlertsConfig {
     /// Через сколько секунд офлайна шлём эскалацию.
     #[serde(default = "default_offline_long")]
     pub offline_long_sec: u64,
+    /// Порог заполнения адресного бюджета шарда, проценты. Пиров больше, чем
+    /// адресов, выдать нельзя — дальше новые юзеры получают `no_free_address`.
+    #[serde(default = "default_shard_fill")]
+    pub shard_fill_pct: f64,
+    /// Ниже этого значения считаем, что шард разгрузился (гистерезис).
+    #[serde(default = "default_shard_fill_reset")]
+    pub shard_fill_reset_pct: f64,
     /// Порог CPU, выше которого копим время.
     #[serde(default = "default_cpu_threshold")]
     pub cpu_threshold_pct: f64,
@@ -159,6 +166,14 @@ fn default_disk_hold() -> u64 {
 fn default_disk_reset() -> f64 {
     85.0
 }
+fn default_shard_fill() -> f64 {
+    85.0
+}
+
+fn default_shard_fill_reset() -> f64 {
+    75.0
+}
+
 fn default_cpu_threshold() -> f64 {
     85.0
 }
@@ -210,6 +225,8 @@ impl Default for AlertsConfig {
             watchcat_switch_throttle_sec: 120,
             watchcat_intercept_throttle_sec: 1800,
             watchcat_no_healthy_throttle_sec: 600,
+            shard_fill_pct: default_shard_fill(),
+            shard_fill_reset_pct: default_shard_fill_reset(),
             cpu_threshold_pct: default_cpu_threshold(),
             cpu_hold_sec: default_cpu_hold(),
             cpu_reset_pct: default_cpu_reset(),
@@ -267,6 +284,8 @@ pub enum AlertKind {
     NodeCpuHigh,
     /// Раздел диска заполнен выше порога дольше заданного времени.
     NodeDiskHigh,
+    /// Адресный бюджет шарда почти исчерпан: скоро новые пиры получат 503.
+    ShardFillHigh,
 }
 
 impl AlertKind {
@@ -280,6 +299,7 @@ impl AlertKind {
             Self::NodeFlapping => "🟠",
             Self::NodeCpuHigh => "🔥",
             Self::NodeDiskHigh => "💾",
+            Self::ShardFillHigh => "📦",
         }
     }
 
@@ -293,6 +313,7 @@ impl AlertKind {
             Self::NodeFlapping => "мигает",
             Self::NodeCpuHigh => "CPU",
             Self::NodeDiskHigh => "диск",
+            Self::ShardFillHigh => "шард",
         }
     }
 
@@ -304,6 +325,7 @@ impl AlertKind {
             Self::NodeFlapping => "node_flapping",
             Self::NodeCpuHigh => "node_cpu_high",
             Self::NodeDiskHigh => "node_disk_high",
+            Self::ShardFillHigh => "shard_fill_high",
         }
     }
 }
@@ -385,6 +407,8 @@ pub struct AlertsEngine {
     disks: HashMap<(Uuid, String), CpuTrack>,
     /// Последний uptime ноды — для обнаружения перезапусков.
     restarts: HashMap<Uuid, RestartTrack>,
+    /// Состояние правила «шард заполнен»: shard → с какого момента выше порога.
+    shards: HashMap<String, CpuTrack>,
 }
 
 /// Перезапуски ноды по метрике sys.uptime (ловит короткие мигания 10–48 с).
@@ -410,7 +434,54 @@ impl AlertsEngine {
             cpu: HashMap::new(),
             disks: HashMap::new(),
             restarts: HashMap::new(),
+            shards: HashMap::new(),
         }
+    }
+
+    /// Правило «адреса шарда кончаются».
+    ///
+    /// Пиры — единственный ресурс, который реально кончается: на 100% бюджета
+    /// новые юзеры получают `no_free_address`. Правило срабатывает один раз на
+    /// эпизод и сбрасывается, когда заполнение падает ниже reset-порога.
+    pub fn observe_shard_fill(
+        &mut self,
+        shard: &str,
+        title: Option<String>,
+        used: u64,
+        budget: u64,
+    ) -> Option<Decision> {
+        if budget == 0 {
+            return None;
+        }
+        let pct = 100.0 * used as f64 / budget as f64;
+        let threshold = self.cfg.shard_fill_pct;
+        let reset = self.cfg.shard_fill_reset_pct.min(threshold - 1.0);
+        let now = Instant::now();
+
+        let track = self.shards.entry(shard.to_string()).or_insert(CpuTrack {
+            high_since: now,
+            alerted: false,
+        });
+        if pct >= threshold {
+            if track.alerted {
+                return None;
+            }
+            track.alerted = true;
+            return Some(Decision::Fire {
+                kind: AlertKind::ShardFillHigh,
+                // A shard is not a node: the id is only used for dedupe keys
+                // elsewhere, and the message is routed by `env`.
+                node_id: Uuid::nil(),
+                hostname: title.unwrap_or_else(|| shard.to_string()),
+                env: shard.to_string(),
+                duration_sec: 0,
+                detail: Some(format!("{used} из {budget} адресов ({pct:.0}%)")),
+            });
+        }
+        if pct < reset {
+            self.shards.remove(shard);
+        }
+        None
     }
 
     /// Один тик по одной ноде.
@@ -1128,6 +1199,10 @@ pub fn format_message_full(
             "{ips}🔥 Высокая нагрузка CPU\n{hostname} ({env})\nдержится: {human}\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ),
+        AlertKind::ShardFillHigh => format!(
+            "{ips}📦 Шард на пределе адресов\n{hostname} ({env}){extra}\nвремя: {}",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ),
         AlertKind::NodeFlapping => format!(
             "{ips}🟠 Нода мигает\n{hostname} ({env})\n{duration_sec} перехода за окно\nвремя: {}",
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
@@ -1151,6 +1226,41 @@ pub fn human_duration(sec: i64) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shard_fill_fires_once_and_resets() {
+        let mut engine = AlertsEngine::new(cfg());
+        let title = Some("Standard NL".to_string());
+
+        // below the threshold (85%) — silence
+        assert!(engine.observe_shard_fill("0001", title.clone(), 180, 227).is_none());
+
+        // above — fires once, with the human name and the numbers
+        match engine.observe_shard_fill("0001", title.clone(), 195, 227) {
+            Some(Decision::Fire {
+                kind,
+                hostname,
+                env,
+                detail,
+                ..
+            }) => {
+                assert_eq!(kind, AlertKind::ShardFillHigh);
+                assert_eq!(hostname, "Standard NL");
+                assert_eq!(env, "0001");
+                assert!(detail.unwrap_or_default().contains("195"));
+            }
+            other => panic!("expected a fire, got {other:?}"),
+        }
+        // same episode — no repeat
+        assert!(engine.observe_shard_fill("0001", title.clone(), 200, 227).is_none());
+        // dropped below the reset threshold — the episode is over
+        assert!(engine.observe_shard_fill("0001", title, 100, 227).is_none());
+        // and it can fire again
+        assert!(engine.observe_shard_fill("0001", None, 200, 227).is_some());
+
+        // an empty budget is not an alert
+        assert!(engine.observe_shard_fill("0002", None, 0, 0).is_none());
+    }
+
     fn cfg() -> AlertsConfig {
         AlertsConfig {
             enabled: true,
@@ -1167,6 +1277,8 @@ mod tests {
             watchcat_switch_throttle_sec: 120,
             watchcat_intercept_throttle_sec: 1800,
             watchcat_no_healthy_throttle_sec: 600,
+            shard_fill_pct: 85.0,
+            shard_fill_reset_pct: 75.0,
             cpu_threshold_pct: 85.0,
             cpu_hold_sec: 600,
             cpu_reset_pct: 70.0,

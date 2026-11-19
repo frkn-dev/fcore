@@ -410,6 +410,12 @@ impl PgNode {
             let node_id: uuid::Uuid = row.get("node_id");
             let uuid: uuid::Uuid = row.get("uuid");
             let env: String = row.get("env");
+            // An unparsable env is a broken row, not a region: skip it loudly
+            // instead of silently filing the node under `experimental`.
+            let Ok(env) = env.parse::<fcore::Env>() else {
+                warn!("Skipping node row with unparseable env {:?}", env);
+                continue;
+            };
             let hostname: String = row.get("hostname");
             let address: IpAddr = row.get("address");
             let status: NodeStatus = row.get("status");
@@ -489,7 +495,7 @@ impl PgNode {
             if let IpAddr::V4(ipv4) = address {
                 let node_entry = nodes_map.entry(node_id).or_insert_with(|| Node {
                     uuid,
-                    env: env.into(),
+                    env: env.clone(),
                     hostname: hostname.clone(),
                     address: ipv4,
                     interface: interface.clone(),

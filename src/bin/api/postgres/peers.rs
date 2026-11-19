@@ -129,7 +129,15 @@ impl PgPeers {
             .await?;
 
         let capacity_rows = client
-            .query("SELECT env, plan, max_subscriptions, enabled FROM env_capacity", &[])
+            .query(
+                r#"
+                SELECT env, plan, max_subscriptions, enabled,
+                       to_jsonb(c) ->> 'kind'  AS kind,
+                       to_jsonb(c) ->> 'title' AS title
+                FROM env_capacity c
+                "#,
+                &[],
+            )
             .await?;
 
         let limit_rows = client
@@ -174,13 +182,20 @@ impl PgPeers {
         for row in capacity_rows {
             let env = Env::from_str(&row.get::<_, String>("env"))
                 .unwrap_or_else(|_| Env::Custom(row.get::<_, String>("env")));
+            let kind = row
+                .get::<_, Option<String>>("kind")
+                .as_deref()
+                .and_then(crate::peers::ShardKind::parse)
+                .unwrap_or_default();
             state.env_capacity.insert(
                 env,
-                (
-                    row.get::<_, String>("plan"),
-                    row.get::<_, Option<i32>>("max_subscriptions").map(i64::from),
-                    row.get::<_, bool>("enabled"),
-                ),
+                crate::peers::store::ShardCapacity {
+                    plan: row.get("plan"),
+                    max_subscriptions: row.get::<_, Option<i32>>("max_subscriptions").map(i64::from),
+                    enabled: row.get("enabled"),
+                    title: row.get("title"),
+                    kind,
+                },
             );
         }
 
@@ -551,8 +566,36 @@ impl PgPeers {
         Ok(())
     }
 
+    /// Human titles of the shards (`env → title`). Read through `to_jsonb` so
+    /// an api that starts before migration 0021 ran still serves /status
+    /// instead of failing the whole query on a missing column.
+    pub async fn shard_titles(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT env, to_jsonb(c) ->> 'title' AS title
+                FROM env_capacity c
+                WHERE to_jsonb(c) ->> 'title' IS NOT NULL
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let env: String = r.get("env");
+                let title: Option<String> = r.get("title");
+                title.map(|t| (env, t))
+            })
+            .collect())
+    }
+
     /// Per-shard load of a plan: `(env, used, limit)`.
-    pub async fn capacity_for_plan(&self, plan: &str) -> Result<Vec<(String, i64, i64)>> {
+    pub async fn capacity_for_plan(&self, plan: &str) -> Result<Vec<(String, i64, Option<i64>)>> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
@@ -578,10 +621,39 @@ impl PgPeers {
                 (
                     r.get::<_, String>("env"),
                     r.get::<_, i64>("used"),
-                    r.get::<_, i32>("lim") as i64,
+                    r.get::<_, Option<i32>>("lim").map(i64::from),
                 )
             })
             .collect())
+    }
+
+    /// Renewal: a grant keeps its own `expires_at` (each shard right has its own
+    /// term), so extending the subscription must move the grants too —
+    /// otherwise a paying user loses their tunnels the day the old term ends.
+    pub async fn extend_grants(
+        &self,
+        subscription_id: Uuid,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<Vec<AccessRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                UPDATE subscription_access
+                   SET expires_at = $2, updated_at = now()
+                 WHERE subscription_id = $1
+                   AND revoked_at IS NULL
+                   AND expires_at IS NOT NULL
+                   AND expires_at < $2
+                RETURNING *
+                "#,
+                &[&subscription_id, &expires_at],
+            )
+            .await?;
+
+        Ok(rows.iter().map(access_from_row).collect())
     }
 
     pub async fn revoke_grant(&self, subscription_id: Uuid, env: &Env) -> Result<bool> {

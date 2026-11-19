@@ -170,3 +170,34 @@ curl -s -X POST -H 'Content-Type: application/json' -d '{}' \
 Живой прогон клиентом: приложение делает `POST /v1/locations` через `GatewayController` и
 получает `access[]` + `pools[]`; в логах api видно расшифрованное `subscription_id`, в логах
 nginx — только base64-блоки.
+
+## 7. Проверка на проде 2026-11-19 (api v0.7.2)
+
+Проверено не по диффу, а живым запросом с тем же конвертом, что собирает клиент
+(RSA PKCS#1v1.5 по `client/agw_public.pem` + AES-256-CBC, iv режется до 16 байт):
+
+```
+POST /v1/locations   {subscription_id}          -> 200 {"access":[],"pools":[]}
+POST /v1/peers/list  {subscription_id,device_uid} -> 404 {"error":"device_not_found"}
+POST /v1/devices/list{subscription_id}          -> 200 {"devices":[]}
+POST /v1/peers       {…,"env":"dev"}            -> 404 {"error":"no_subscription"}
+POST /v1/peers       {…,"env":"standard-ru"}    -> 400 {"error":"bad_env"}
+GET  /v1/locations|peers|devices                 -> 405 (plain-вариантов больше нет)
+POST /v1/locations   {} (plain)                  -> 400 {"error":"keyPayload missing"}
+```
+
+Выводы:
+
+1. Конверт работает в обе стороны: ответ расшифровывается тем же AES-ключом, HTTP-статусы и
+   `response.error` доходят как задумано (§3). Пиры на проде **включены**.
+2. Plain-роуты закрыты — 405, дыры в логах нет.
+3. **Инфра для запуска не готова.** `Env::from_str` знает только `dev`; `standard-eu`,
+   `standard-ru`, `super-duper-eu`, `lite-eu` → `400 bad_env`, потому что строк в
+   `env_networks` нет. Пока их нет: `/v1/locations` не отдаст ни одной карточки (пулы строятся
+   из живых нод env), `POST /v1/peers` не создаст пир, и на телефоне тестировать нечего.
+   Нужно: `env_networks` (env + подсеть + plan) → `env_capacity` → ноды с `awg_peers`/`wg_peers`
+   в этом env → грант (`subscription_access` либо `/v1/activate`).
+
+Коды, которых нет в §3 и которые клиент тоже должен пережить: `bad_env`, `unknown_proto`
+(400), `peers_disabled` (404), `address_taken` (409, ретрай со следующего адреса),
+`support_tag_taken` (409), `assign_failed` (503 при активации).

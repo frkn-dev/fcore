@@ -59,17 +59,24 @@ impl PgInstallToken {
         Ok(())
     }
 
-    fn map_row(row: tokio_postgres::Row) -> InstallTokenRow {
+    fn map_row(row: tokio_postgres::Row) -> Option<InstallTokenRow> {
         let scope_env: String = row.get("scope_env");
-        InstallTokenRow {
+        let scope_env = match scope_env.parse::<Env>() {
+            Ok(env) => env,
+            Err(err) => {
+                tracing::warn!("install_token: unparsable scope_env {scope_env:?}: {err}");
+                return None;
+            }
+        };
+        Some(InstallTokenRow {
             token: row.get("token"),
             subscription_id: row.get("subscription_id"),
-            scope_env: Env::from(scope_env.as_str()),
+            scope_env,
             created_at: row.get("created_at"),
             expires_at: row.get("expires_at"),
             used_at: row.get("used_at"),
             revoked_at: row.get("revoked_at"),
-        }
+        })
     }
 
     pub async fn count_active(&self, subscription_id: &uuid::Uuid) -> Result<i64> {
@@ -117,7 +124,8 @@ impl PgInstallToken {
             )
             .await?;
 
-        Ok(Self::map_row(row))
+        Self::map_row(row)
+            .ok_or_else(|| fcore::Error::Custom("install token has an unparsable env".into()))
     }
 
     pub async fn find_usable(&self, token: &str) -> Result<Option<InstallTokenRow>> {
@@ -139,7 +147,7 @@ impl PgInstallToken {
             )
             .await?;
 
-        Ok(row.map(Self::map_row))
+        Ok(row.and_then(Self::map_row))
     }
 
     pub async fn mark_used(&self, token: &str) -> Result<bool> {

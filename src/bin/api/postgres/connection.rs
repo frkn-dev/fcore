@@ -128,7 +128,9 @@ impl TryFrom<ConnRow> for Connection {
         };
 
         Ok(Self {
-            env: row.env.into(),
+            env: row.env.parse::<fcore::Env>().map_err(|e| {
+                Error::Custom(format!("connection row has unparseable env {:?}: {e}", row.env))
+            })?,
             proto,
             subscription_id: row.subscription_id,
             created_at: row.created_at,

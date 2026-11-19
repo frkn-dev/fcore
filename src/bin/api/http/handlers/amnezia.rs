@@ -780,7 +780,13 @@ where
         }
     }
     for ((_, tag, pool), idx) in &pool_index {
-        let env = fcore::Env::from(result[*idx].env.as_str());
+        let env = match result[*idx].env.parse::<fcore::Env>() {
+            Ok(env) => env,
+            Err(err) => {
+                tracing::warn!("amnezia: unparsable node env {:?}: {err}", result[*idx].env);
+                continue;
+            }
+        };
         // Одна карта на оба поля: `node_ips` — её ключи, `node_ports` — она сама.
         let ports = pooled_node_ports(nodes, &env, pool, *tag);
         if !ports.is_empty() {
@@ -2568,7 +2574,7 @@ mod tests {
             country_code: "EU".into(),
             country_name: "EU".into(),
             service_protocol: "wireguard".into(),
-            env: "production".into(),
+            env: "production".parse().expect("env"),
             connection_label: "EU Рилзопровод · WireGuard".into(),
             node_ips: Some(ports.keys().cloned().collect()),
             node_ports: Some(ports.clone()),
@@ -2686,7 +2692,7 @@ mod tests {
             country_code: "RU".into(),
             country_name: "Russia".into(),
             service_protocol: "awg-mobile".into(),
-            env: "production".into(),
+            env: "production".parse().expect("env"),
             connection_label: "RU Рилзопровод · AmneziaWG".into(),
             node_ips: Some(ports.keys().cloned().collect()),
             node_ports: Some(ports.clone()),
@@ -2705,7 +2711,7 @@ mod tests {
             country_code: "NL".into(),
             country_name: "Netherlands".into(),
             service_protocol: "awg-mobile".into(),
-            env: "production".into(),
+            env: "production".parse().expect("env"),
             connection_label: "NL777 · AmneziaWG".into(),
             node_ips: None,
             node_ports: None,
@@ -2865,7 +2871,7 @@ mod tests {
             country_code: "RU".into(),
             country_name: "RU".into(),
             service_protocol: "awg-mobile".into(),
-            env: "ru".into(),
+            env: "ru".parse().expect("env"),
             connection_label: "Russia · AmneziaWG".into(),
             node_ips: Some(vec!["93.89.220.48".into(), "77.221.152.88".into()]),
             node_ports: Some(BTreeMap::from([
@@ -2902,7 +2908,7 @@ mod tests {
             country_code: "RU".into(),
             country_name: "RU".into(),
             service_protocol: "awg-mobile".into(),
-            env: "ru".into(),
+            env: "ru".parse().expect("env"),
             connection_label: "Moscow · AmneziaWG".into(),
             node_ips: None,
             node_ports: None,

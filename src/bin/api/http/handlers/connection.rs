@@ -345,7 +345,8 @@ where
 
     // An env is servable only when at least one node lives in it and at least
     // one of those nodes exposes this protocol's inbound.
-    if let Err(msg) = validate_env_served(mem.nodes.get_by_env(env), env, proto) {
+    let shard_kind = mem.peers_state.shard_kind(env);
+    if let Err(msg) = validate_env_served(mem.nodes.get_by_env(env), env, proto, shard_kind) {
         return Err(msg);
     }
 
@@ -567,16 +568,20 @@ pub(crate) fn validate_env_served(
     nodes: Option<Vec<fcore::Node>>,
     env: &fcore::Env,
     proto: Tag,
+    shard_kind: Option<crate::peers::ShardKind>,
 ) -> Result<(), String> {
-    // Only custom envs (personal / premium nodes) are gated. Built-in shared
-    // envs are regions we operate: `ru` or `bs-prem` can be retired and hold no
-    // nodes while the ensure step keeps running over their entitlements, and
-    // failing there would turn telemetry into noise (and stop the reissue of
-    // connections those regions may get back). A custom env, by contrast, only
-    // exists because a specific node was registered, so a name no node carries
-    // is a typo (the `custom` + `custompersonal…` double-prefix case) and must
-    // not mint a connection that nothing can serve.
-    if env.is_frkn_shared() {
+    // The declared kind of the shard decides whether an empty env is legal:
+    // `core` is a region we operate (may be empty while nodes are added),
+    // `premium`/`personal` exist together with their node. For an env with no
+    // `env_capacity` row — a legacy region or a typo — fall back to the old
+    // whitelist, so a custom env that no node carries still fails instead of
+    // minting a connection nothing can serve.
+    let gated = match shard_kind {
+        Some(crate::peers::ShardKind::Core) => false,
+        Some(_) => true,
+        None => !env.is_frkn_shared(),
+    };
+    if !gated {
         return Ok(());
     }
     let Some(nodes) = nodes.filter(|n| !n.is_empty()) else {
@@ -1663,15 +1668,15 @@ mod tests {
         // The env is unknown to memory — the `customcustom…` double-prefix case
         // and plain typos land here.
         assert_eq!(
-            validate_env_served(None, &env, Tag::Wireguard),
+            validate_env_served(None, &env, Tag::Wireguard, None),
             Err(format!("Env not served: {} has no nodes", env))
         );
-        assert!(validate_env_served(Some(Vec::new()), &env, Tag::Wireguard).is_err());
+        assert!(validate_env_served(Some(Vec::new()), &env, Tag::Wireguard, None).is_err());
 
         // Nodes exist, but none exposes the requested protocol.
         let nodes = vec![test_node(env.clone(), HashMap::new())];
         assert_eq!(
-            validate_env_served(Some(nodes), &env, Tag::Hysteria2),
+            validate_env_served(Some(nodes), &env, Tag::Hysteria2, None),
             Err(format!(
                 "Env not served: no node in {} exposes Hysteria2",
                 env
@@ -1684,13 +1689,31 @@ mod tests {
         inbounds.insert(Tag::Wireguard, wg_inbound());
         let mut offline = test_node(env.clone(), inbounds);
         offline.status = NodeStatus::Offline;
-        assert!(validate_env_served(Some(vec![offline]), &env, Tag::Wireguard).is_ok());
+        assert!(validate_env_served(Some(vec![offline]), &env, Tag::Wireguard, None).is_ok());
 
         // Built-in shared envs are regions we operate: an empty one must not
         // fail the ensure step (ru/bs-prem can be retired while entitlements
         // still reference them).
-        assert!(validate_env_served(None, &Env::Ru, Tag::Wireguard).is_ok());
-        assert!(validate_env_served(None, &Env::Dev, Tag::Hysteria2).is_ok());
+        assert!(validate_env_served(None, &Env::Ru, Tag::Wireguard, None).is_ok());
+        assert!(validate_env_served(None, &Env::Dev, Tag::Hysteria2, None).is_ok());
+
+        // A shard declared as `core` is ours: empty is legal, no node needed.
+        let shard: Env = "0001".parse().expect("shard");
+        assert!(validate_env_served(
+            None,
+            &shard,
+            Tag::Wireguard,
+            Some(crate::peers::ShardKind::Core)
+        )
+        .is_ok());
+        // A personal shard needs its node behind it.
+        assert!(validate_env_served(
+            None,
+            &env,
+            Tag::Wireguard,
+            Some(crate::peers::ShardKind::Personal)
+        )
+        .is_err());
     }
 
     // /connections/sync guard: a self-hosted node's `node_` token must not

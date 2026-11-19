@@ -59,6 +59,19 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # the node registers and serves, with status `degraded`.
 # pool_strict_inbounds = true
 
+# Peers: the client owns the key pair, the api hands out the address.
+# `subnets` is the address space of one shard (env); overlapping blocks are
+# refused by the database. Every node of an env carries all peers of that env,
+# so the block size is the real capacity: /24 = 253 peers, and 10% of the budget
+# stays reserved so a burst of re-issues never hits the last host.
+# [service.peers]
+# enabled = false
+# max_per_device = 3
+# max_devices_per_subscription = 15
+# max_per_subscription = 45
+# remember_days = 7
+# subnets = { "standard-01" = ["10.88.0.0/24"] }
+
 # App Store IAP (POST /v1/subscriptions). Without this section the endpoint answers 503.
 # [service.apple]
 # key_id = "ABCDEF1234"

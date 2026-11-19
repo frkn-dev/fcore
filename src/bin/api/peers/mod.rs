@@ -17,10 +17,44 @@ use serde::{Deserialize, Serialize};
 
 use fcore::{Env, Tag};
 
-/// Capacity of one peer node, in subscriptions, until the value is threaded
-/// from `[service.peers]` into every call site. One node ≈ one /24
-/// (100 subs × ~2.5 peers ≈ 250 addresses).
-pub const SUBSCRIPTIONS_PER_NODE: i64 = 100;
+/// What a shard is for. Declared in `env_capacity.kind` and **never derived
+/// from the name**: a shard called `premium-eu` must not become a premium slot
+/// by accident, and a renamed one must not lose its meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShardKind {
+    /// A region we operate: may be empty for a while while nodes are added.
+    Core,
+    /// A premium slot of one account.
+    Premium,
+    /// A user's own machine (self-hosted node).
+    Personal,
+}
+
+impl Default for ShardKind {
+    fn default() -> Self {
+        Self::Core
+    }
+}
+
+impl ShardKind {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "core" => Some(Self::Core),
+            "premium" => Some(Self::Premium),
+            "personal" => Some(Self::Personal),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Premium => "premium",
+            Self::Personal => "personal",
+        }
+    }
+}
 
 /// Protocol of a peer tunnel. Separate from `Proto` on purpose: `Proto`
 /// carries per-connection parameters (a server-side key, an address), while a
@@ -69,13 +103,19 @@ impl PeerProto {
 /// override rows of `subscription_limits`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
+    /// Tunnels of one installation (a phone keeps one per shard it uses).
     pub per_device: i64,
+    /// Tunnels of the whole subscription — the hard cap on the address budget.
     pub per_subscription: i64,
+    /// Installations of the whole subscription.
+    pub devices_per_subscription: i64,
 }
 
 impl Limits {
-    pub const DEFAULT_PER_DEVICE: i64 = 5;
-    pub const DEFAULT_PER_SUBSCRIPTION: i64 = 50;
+    pub const DEFAULT_PER_DEVICE: i64 = 3;
+    /// 15 devices × 3 tunnels: the peer cap must not bind before the device cap.
+    pub const DEFAULT_PER_SUBSCRIPTION: i64 = 45;
+    pub const DEFAULT_DEVICES_PER_SUBSCRIPTION: i64 = 15;
 
     /// Overrides from `subscription_limits` win over the deployment defaults;
     /// a zero or missing override means "use the default".
@@ -89,6 +129,7 @@ impl Limits {
             per_subscription: per_subscription
                 .filter(|v| *v > 0)
                 .unwrap_or(defaults.per_subscription),
+            devices_per_subscription: defaults.devices_per_subscription,
         }
     }
 
@@ -102,6 +143,15 @@ impl Limits {
     pub fn check_subscription(&self, live: i64) -> Result<(), Refusal> {
         if live >= self.per_subscription {
             return Err(Refusal::SubscriptionLimit(self.per_subscription));
+        }
+        Ok(())
+    }
+
+    /// Checked only when a NEW installation registers: an existing device
+    /// creating another tunnel must not be counted twice.
+    pub fn check_devices(&self, live: i64) -> Result<(), Refusal> {
+        if live >= self.devices_per_subscription {
+            return Err(Refusal::DevicesLimit(self.devices_per_subscription));
         }
         Ok(())
     }
@@ -122,6 +172,8 @@ pub enum Refusal {
     QuotaExhausted,
     DeviceLimit(i64),
     SubscriptionLimit(i64),
+    /// Too many installations on one subscription.
+    DevicesLimit(i64),
     /// Zero live peers free in this env's blocks.
     NoFreeAddress,
     /// Address or key is already live in this env — the caller may retry with
@@ -144,6 +196,7 @@ impl Refusal {
             Refusal::GrantExpired | Refusal::QuotaExhausted => 402,
             Refusal::DeviceLimit(_)
             | Refusal::SubscriptionLimit(_)
+            | Refusal::DevicesLimit(_)
             | Refusal::AddressTaken
             | Refusal::KeyTaken
             | Refusal::LabelTaken => 409,
@@ -162,6 +215,7 @@ impl Refusal {
             Refusal::QuotaExhausted => "quota_exhausted",
             Refusal::DeviceLimit(_) => "device_limit",
             Refusal::SubscriptionLimit(_) => "subscription_limit",
+            Refusal::DevicesLimit(_) => "devices_limit",
             Refusal::NoFreeAddress => "no_free_address",
             Refusal::AddressTaken => "address_taken",
             Refusal::KeyTaken => "key_taken",
@@ -270,6 +324,17 @@ pub fn check_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shard_kind_parses_and_round_trips() {
+        for kind in [ShardKind::Core, ShardKind::Premium, ShardKind::Personal] {
+            assert_eq!(ShardKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ShardKind::parse(" CORE "), Some(ShardKind::Core));
+        assert_eq!(ShardKind::parse("other"), None);
+        // A shard without a declared kind is a region we operate.
+        assert_eq!(ShardKind::default(), ShardKind::Core);
+    }
     use chrono::TimeZone;
 
     fn now() -> DateTime<Utc> {
@@ -360,8 +425,9 @@ mod tests {
     #[test]
     fn limits_resolve_defaults_and_overrides() {
         let defaults = Limits {
-            per_device: 5,
-            per_subscription: 50,
+            per_device: 3,
+            per_subscription: 45,
+            devices_per_subscription: 15,
         };
         assert_eq!(Limits::resolve(defaults, None, None), defaults);
         assert_eq!(Limits::resolve(defaults, Some(0), Some(0)), defaults);
@@ -369,13 +435,15 @@ mod tests {
             Limits::resolve(defaults, Some(10), Some(200)),
             Limits {
                 per_device: 10,
-                per_subscription: 200
+                per_subscription: 200,
+                devices_per_subscription: 15
             }
         );
         // Deployment-wide defaults are honoured when there is no override.
         let wide = Limits {
             per_device: 10,
             per_subscription: 500,
+            devices_per_subscription: 15,
         };
         assert_eq!(Limits::resolve(wide, None, None), wide);
     }
@@ -384,18 +452,19 @@ mod tests {
     fn limit_checks_count_live_only() {
         let limits = Limits::resolve(
             Limits {
-                per_device: 5,
-                per_subscription: 50,
+                per_device: 3,
+                per_subscription: 45,
+                devices_per_subscription: 15,
             },
             None,
             None,
         );
-        assert!(limits.check_device(4).is_ok());
-        assert_eq!(limits.check_device(5), Err(Refusal::DeviceLimit(5)));
-        assert!(limits.check_subscription(49).is_ok());
+        assert!(limits.check_device(2).is_ok());
+        assert_eq!(limits.check_device(3), Err(Refusal::DeviceLimit(3)));
+        assert!(limits.check_subscription(44).is_ok());
         assert_eq!(
-            limits.check_subscription(50),
-            Err(Refusal::SubscriptionLimit(50))
+            limits.check_subscription(45),
+            Err(Refusal::SubscriptionLimit(45))
         );
     }
 
@@ -412,8 +481,27 @@ mod tests {
     }
 
     #[test]
+    fn limits_cap_peers_and_devices() {
+        let limits = Limits {
+            per_device: 3,
+            per_subscription: 45,
+            devices_per_subscription: 15,
+        };
+        assert!(limits.check_device(2).is_ok());
+        assert_eq!(limits.check_device(3), Err(Refusal::DeviceLimit(3)));
+        assert!(limits.check_subscription(44).is_ok());
+        assert_eq!(
+            limits.check_subscription(45),
+            Err(Refusal::SubscriptionLimit(45))
+        );
+        assert!(limits.check_devices(14).is_ok());
+        assert_eq!(limits.check_devices(15), Err(Refusal::DevicesLimit(15)));
+    }
+
+    #[test]
     fn refusal_codes_are_stable() {
         assert_eq!(Refusal::DeviceLimit(5).status(), 409);
+        assert_eq!(Refusal::DevicesLimit(15).code(), "devices_limit");
         assert_eq!(Refusal::GrantExpired.status(), 402);
         assert_eq!(Refusal::NoGrant.status(), 403);
         assert_eq!(Refusal::NoFreeAddress.status(), 503);

@@ -637,9 +637,9 @@ where
     let mut env_traffic_map: HashMap<Env, EnvTrafficInfo> = traffic
         .by_env
         .into_iter()
-        .map(|(env_str, env_traffic)| {
-            let env = traffic::parse_env(&env_str);
-            (
+        .filter_map(|(env_str, env_traffic)| {
+            let env = traffic::parse_env(&env_str)?;
+            Some((
                 env.clone(),
                 EnvTrafficInfo {
                     env,
@@ -650,7 +650,7 @@ where
                     monthly_uplink: env_traffic.monthly.uplink as i64,
                     monthly_downlink: env_traffic.monthly.downlink as i64,
                 },
-            )
+            ))
         })
         .collect();
 
@@ -1387,11 +1387,13 @@ where
         let down = down.max(0);
         current_up += up;
         current_down += down;
-        current_envs.push(EnvTrafficHistoryBucket {
-            env: traffic::parse_env(&env_str),
-            uplink: up,
-            downlink: down,
-        });
+        if let Some(env) = traffic::parse_env(&env_str) {
+            current_envs.push(EnvTrafficHistoryBucket {
+                env,
+                uplink: up,
+                downlink: down,
+            });
+        }
     }
 
     if let Some(b) = current_bucket {

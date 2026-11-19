@@ -167,10 +167,14 @@ fn default_metered_conns() -> Vec<String> {
 pub struct PeersConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Default cap of live tunnels per device. A per-subscription override in
-    /// `subscription_limits` wins over this.
+    /// Default cap of live tunnels per installation (a phone keeps one per
+    /// shard it uses). A per-subscription override in `subscription_limits`
+    /// wins over this.
     #[serde(default = "default_peers_max_per_device")]
     pub max_per_device: i64,
+    /// Default cap of live devices (installations) per subscription.
+    #[serde(default = "default_peers_max_devices_per_subscription")]
+    pub max_devices_per_subscription: i64,
     /// Default cap of live tunnels per subscription (the guard that keeps one
     /// account from occupying a whole /20).
     #[serde(default = "default_peers_max_per_subscription")]
@@ -183,27 +187,23 @@ pub struct PeersConfig {
     /// app can say why a tunnel died instead of "no such peer".
     #[serde(default = "default_peers_remember_days")]
     pub remember_days: i64,
-    /// Capacity of one peer node, in subscriptions. A shard's limit is
-    /// `live_nodes * this` unless `env_capacity` sets an explicit override;
-    /// one node ≈ one /24 (100 subs × ~2.5 peers ≈ 250 addresses).
-    #[serde(default = "default_peers_subscriptions_per_node")]
-    pub subscriptions_per_node: i64,
 }
 
 fn default_peers_max_per_device() -> i64 {
-    5
+    3
 }
 
 fn default_peers_max_per_subscription() -> i64 {
-    50
+    // 15 devices x 3 tunnels: the peer cap must not bind before the device cap.
+    45
+}
+
+fn default_peers_max_devices_per_subscription() -> i64 {
+    15
 }
 
 fn default_peers_remember_days() -> i64 {
     7
-}
-
-fn default_peers_subscriptions_per_node() -> i64 {
-    100
 }
 
 impl Default for PeersConfig {
@@ -212,9 +212,9 @@ impl Default for PeersConfig {
             enabled: false,
             max_per_device: default_peers_max_per_device(),
             max_per_subscription: default_peers_max_per_subscription(),
+            max_devices_per_subscription: default_peers_max_devices_per_subscription(),
             subnets: HashMap::new(),
             remember_days: default_peers_remember_days(),
-            subscriptions_per_node: default_peers_subscriptions_per_node(),
         }
     }
 }

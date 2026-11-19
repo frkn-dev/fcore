@@ -292,15 +292,32 @@ pub struct PeersState {
     pub access: AccessStore,
     /// env → subnet blocks, as stored in `env_networks` ("10.88.0.0/24").
     pub env_networks: HashMap<Env, Vec<String>>,
-    /// env → (plan, explicit limit, enabled).
-    pub env_capacity: HashMap<Env, (String, Option<i64>, bool)>,
+    /// env → what the api declared about this shard.
+    pub env_capacity: HashMap<Env, ShardCapacity>,
     /// Per-subscription overrides of `subscription_limits`:
     /// `(peers_per_device, peers_per_subscription)`. Absent row → deployment
     /// defaults from the config.
     pub limits: HashMap<Uuid, (Option<i64>, Option<i64>)>,
 }
 
+/// One `env_capacity` row as the api remembers it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardCapacity {
+    pub plan: String,
+    pub max_subscriptions: Option<i64>,
+    pub enabled: bool,
+    /// Human name from `env_capacity.title`; `null` for legacy rows.
+    pub title: Option<String>,
+    pub kind: crate::peers::ShardKind,
+}
+
 impl PeersState {
+    /// Declared kind of a shard, `None` when the shard has no `env_capacity`
+    /// row (legacy regions and envs created before shards existed).
+    pub fn shard_kind(&self, env: &Env) -> Option<crate::peers::ShardKind> {
+        self.env_capacity.get(env).map(|row| row.kind)
+    }
+
     pub fn blocks_for(&self, env: &Env) -> Vec<&str> {
         self.env_networks
             .get(env)
@@ -521,8 +538,9 @@ mod tests {
         // A limit of one makes the next create fail before it touches the DB.
         let limits = Limits::resolve(
             Limits {
-                per_device: 5,
-                per_subscription: 50,
+                per_device: 3,
+                per_subscription: 45,
+                devices_per_subscription: 15,
             },
             Some(1),
             None,

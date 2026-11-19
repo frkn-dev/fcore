@@ -190,9 +190,17 @@ pub fn connection_deltas_between(
     result
 }
 
-/// Parse an env string; falls back to `Env::Experimental` on failure.
-pub fn parse_env(env: &str) -> Env {
-    Env::from(env)
+/// Parse an env string. There is no fallback on purpose: booking traffic to
+/// `experimental` because of a typo silently corrupts another region's quota,
+/// so an unparsable env is dropped at the call site.
+pub fn parse_env(env: &str) -> Option<Env> {
+    match env.parse::<Env>() {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            tracing::warn!("traffic: unparsable env {env:?} dropped: {err}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

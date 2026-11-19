@@ -437,12 +437,9 @@ pub fn plan_of_env(env: &str) -> Option<String> {
 /// Only envs with at least one **serving** node announcing a peer interface are
 /// returned: assigning into an env whose machines are gone hands out a tunnel
 /// nobody serves. The limit is the `env_capacity` override when set, otherwise
-/// `nodes * subscriptions_per_node`.
-pub(crate) async fn live_shards<N, C, S>(
-    memory: &MemSync<N, C, S>,
-    plan: &str,
-    subscriptions_per_node: i64,
-) -> Vec<(String, i64)>
+/// the **address budget** of the env (blocks minus the 10% reserve): peers are
+/// the resource that actually runs out, not subscription rows.
+pub(crate) async fn live_shards<N, C, S>(memory: &MemSync<N, C, S>, plan: &str) -> Vec<(String, i64)>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -455,7 +452,7 @@ where
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
-    let node_counts: HashMap<String, i64> = {
+    let (envs_with_nodes, address_limits): (HashMap<String, i64>, HashMap<String, i64>) = {
         let mem = memory.memory.read().await;
         let mut counts: HashMap<String, i64> = HashMap::new();
         for (_, node) in mem.nodes.iter_nodes() {
@@ -467,7 +464,15 @@ where
             }
             *counts.entry(node.env.to_string()).or_default() += 1;
         }
-        counts
+        let mut limits: HashMap<String, i64> = HashMap::new();
+        for env_name in counts.keys() {
+            let Ok(env) = env_name.parse::<Env>() else {
+                continue;
+            };
+            let budget = alloc::allocatable(&mem.peers_state.block_masks(&env));
+            limits.insert(env_name.clone(), budget as i64);
+        }
+        (counts, limits)
     };
 
     let overrides = memory
@@ -478,7 +483,7 @@ where
         .unwrap_or_default();
 
     let mut shards: Vec<(String, i64)> = Vec::new();
-    for (env, count) in node_counts {
+    for (env, _serving_nodes) in envs_with_nodes {
         // `env_capacity` is the mapping plan → shard: an env that is not
         // declared for THIS plan must never take its users, even when it has
         // live nodes (otherwise a `super-duper` shard serves `standard`
@@ -490,9 +495,13 @@ where
         if !*enabled {
             continue; // switched off by the admin
         }
+        let budget = *address_limits.get(&env).unwrap_or(&0);
+        if budget == 0 {
+            continue; // no address space: a peer here could never be created
+        }
         let limit = match max {
             Some(max) => *max,
-            None => (count * subscriptions_per_node).max(1),
+            None => budget,
         };
         shards.push((env, limit));
     }
@@ -673,6 +682,18 @@ where
     };
 
     if device.is_none() {
+        // A new installation counts against the subscription's device cap; an
+        // existing one creating another tunnel must not be counted twice.
+        let devices_live = {
+            let mem = memory.memory.read().await;
+            mem.peers_state
+                .devices
+                .of_sub(&req.subscription_id)
+                .len() as i64
+        };
+        if let Err(refusal) = default_limits.check_devices(devices_live) {
+            return refusal_reply(refusal);
+        }
         let Some(key) = req.public_key.as_deref() else {
             return refusal_reply(Refusal::BadPublicKey);
         };
@@ -804,6 +825,19 @@ where
     };
     if blocks.is_empty() {
         return refusal_reply(Refusal::EnvNotServed);
+    }
+    // Keep the reserve of the env's blocks free: an address freed by a revoke
+    // goes to the next request, but a burst of re-issues (card switch,
+    // reinstall) must not eat the last host of the block.
+    let budget = alloc::allocatable(&blocks);
+    if used.len() as u64 >= budget {
+        tracing::warn!(
+            "peers: env {} is at its address budget ({}/{}), refusing a new peer",
+            env,
+            used.len(),
+            budget
+        );
+        return refusal_reply(Refusal::NoFreeAddress);
     }
 
     let mut created: Option<PeerRow> = None;
@@ -1191,7 +1225,6 @@ where
 pub async fn post_access_handler<N, C, S>(
     req: AccessUpsertRequest,
     memory: MemSync<N, C, S>,
-    subscriptions_per_node: i64,
 ) -> Box<dyn warp::Reply>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1248,7 +1281,7 @@ where
                 serde_json::json!({ "error": "env_or_plan_required" }),
             );
         };
-        let shards = live_shards(&memory, &plan, subscriptions_per_node).await;
+        let shards = live_shards(&memory, &plan).await;
         return match db
             .assign_grant(
                 req.subscription_id,
@@ -1431,27 +1464,44 @@ where
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
-    match memory.db.peers().capacity_for_plan(&plan).await {
-        Ok(rows) => {
-            let shards: Vec<serde_json::Value> = rows
-                .into_iter()
-                .map(|(env, used, limit)| {
-                    serde_json::json!({
-                        "env": env,
-                        "used": used,
-                        "limit": limit,
-                        "overflow": limit > 0 && used > limit,
-                    })
-                })
-                .collect();
-            json_reply(
-                200,
-                "ok",
-                serde_json::json!({ "plan": plan, "shards": shards }),
-            )
-        }
-        Err(e) => db_error("capacity_for_plan", e),
-    }
+    let rows = match memory.db.peers().capacity_for_plan(&plan).await {
+        Ok(rows) => rows,
+        Err(e) => return db_error("capacity_for_plan", e),
+    };
+
+    // `max_subscriptions` is an admin override; the real limit is the address
+    // budget of the env, counted the same way `live_shards` does.
+    let budgets: HashMap<String, i64> = {
+        let mem = memory.memory.read().await;
+        rows.iter()
+            .filter_map(|(env, _, _)| {
+                let parsed = env.parse::<Env>().ok()?;
+                Some((
+                    env.clone(),
+                    alloc::allocatable(&mem.peers_state.block_masks(&parsed)) as i64,
+                ))
+            })
+            .collect()
+    };
+
+    let shards: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(env, used, override_limit)| {
+            let limit = override_limit.unwrap_or_else(|| *budgets.get(&env).unwrap_or(&0));
+            serde_json::json!({
+                "env": env,
+                "used": used,
+                "limit": limit,
+                "overflow": limit > 0 && used > limit,
+            })
+        })
+        .collect();
+
+    json_reply(
+        200,
+        "ok",
+        serde_json::json!({ "plan": plan, "shards": shards }),
+    )
 }
 
 /// GET /v1/admin/support/{support_tag} (service token, read-only).

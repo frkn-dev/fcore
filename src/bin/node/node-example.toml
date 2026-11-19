@@ -64,6 +64,10 @@ enabled = false
 path = "/opt/teleproxy/config.toml"
 
 [node]
+# The shard this node serves. The id is opaque and immutable (`0001`): the plan,
+# the human title and the locations inside it live in the api
+# (`SELECT * FROM shard_overview`). `shard = "0001"` is accepted as an alias of
+# `env`, so new configs read naturally and old files keep working.
 env = "experimental"
 hostname = "node.local"
 default_interface = "eth0"

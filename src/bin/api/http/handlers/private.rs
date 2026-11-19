@@ -711,7 +711,17 @@ where
         Err(_) => return Ok(http::internal_error("db error").into_response()),
     };
 
-    if !row.scope_env.is_personal() || row.scope_env.is_frkn_shared() {
+    // A private node may only live in a personal shard. The declared kind wins;
+    // legacy `custompersonal…` envs have no `env_capacity` row and fall back to
+    // the name.
+    let scope_is_personal = {
+        let mem = memory.memory.read().await;
+        match mem.peers_state.shard_kind(&row.scope_env) {
+            Some(kind) => kind == crate::peers::ShardKind::Personal,
+            None => row.scope_env.is_personal(),
+        }
+    };
+    if !scope_is_personal {
         return Ok(http::bad_request("invalid personal scope").into_response());
     }
 
@@ -730,7 +740,14 @@ where
     node_req.pool = None;
 
     let node = node_req.clone().as_node();
-    if node.env.is_frkn_shared() || !node.env.is_personal() {
+    let node_is_personal = {
+        let mem = memory.memory.read().await;
+        match mem.peers_state.shard_kind(&node.env) {
+            Some(kind) => kind == crate::peers::ShardKind::Personal,
+            None => node.env.is_personal(),
+        }
+    };
+    if !node_is_personal {
         return Ok(http::bad_request("refusing shared env for private node").into_response());
     }
 

@@ -82,21 +82,53 @@
 | env не обслуживается | `env_not_served` | 403 |
 | срок вышел | `grant_expired` | 402 |
 | квота | `quota_exhausted` | 402 |
-| лимиты 5/50 | `device_limit`, `subscription_limit` | 409 |
+| туннелей на устройство больше 3 | `device_limit` | 409 |
+| туннелей на подписку больше 45 | `subscription_limit` | 409 |
+| устройств на подписку больше 15 | `devices_limit` | 409 |
 | ключ уже занят в env | `key_taken` | 409 |
 | нет свободного адреса | `no_free_address` | 503 |
 | пиры выключены | `peers_disabled` | 404 |
+
+Ёмкость шарда считается **в адресах**, а не в подписках: лимит шарда = сумма блоков env из
+`env_networks` минус резерв 10% (`no_free_address` приходит на 90% блока, а не на последнем
+адресе). `/v1/capacity?plan=` отдаёт `used`/`limit` в адресах; `max_subscriptions` в
+`env_capacity` — админский override, если нужно ограничить шард жёстче. Один `/24` = 253 пира,
+из них раздаются 227.
 
 ## Идемпотентность
 
 `POST /v1/peers` с тем же `(env, public_key)` возвращает существующий пир — повтор после
 таймаута безопасен.
 
-## Шарды: имя env на проводе
+## Шарды: `env` — непрозрачный id
 
-`Env` в api знает фиксированный список (`dev`, `ru`, `wl`, `gaming`, `bs`, `bs-prem`,
-`experimental`, `production`); всё остальное — `Env::Custom`, который печатается с префиксом.
-Поэтому шард `standard-01` приходит в JSON **`customstandard-01`** и точно так же лежит в
-`env_networks`, `env_capacity` и `subscription_access`. В `access[].env` и в `peer.env` клиент
-видит именно это имя; в `POST /v1/peers` его надо вернуть дословно. Пользователю имя не
-показывается — карточка рисуется по `pool` + `pool_translation`.
+`env` — идентификатор шарда, а не описание: `0001`, `0002`, а не `standard-ru`. Имя несётся
+**дословно** везде — в конфиге ноды, в `env_networks` / `env_capacity` / `subscription_access`,
+в `access[].env`, `peer.env` и в топике `peers-update-<env>`. Никакого префикса `custom` больше
+нет: раньше неизвестное имя превращалось в `Env::Custom` и в базу уезжало `customstandard-01` —
+шард, которого не обслуживает ни одна нода.
+
+План живёт в `env_capacity.plan`, локации — в `pools`, человеческое имя — в `env_capacity.title`.
+Вид шарда — `env_capacity.kind`: `core` (наш регион, может быть пустым, пока ноды не заведены),
+`premium` (слот аккаунта), `personal` (своя машина юзера). Вид **не выводится из имени**: шард
+`premium-eu` не становится премиум-слотом сам по себе. Пустой `core`-шард имеет право минтить
+коннекты v1, `premium`/`personal` — только вместе со своей нодой.
+Ключ иммутабелен: переименование ломает гранты, пиры, подсеть и конфиги нод.
+
+Понять, что такое `0001`, без чтения ключа:
+
+```sql
+SELECT * FROM shard_overview;
+-- shard | title          | plan     | pools   | nodes | peers_live | address_hosts
+-- 0001  | Standard NL/DE | standard | {de,nl} | 3     | 210        | 506
+```
+
+`GET /status` отдаёт у каждой ноды `env` и `env_title`:
+
+```bash
+curl -s https://api.frkn.org/status | jq '.response[] | {hostname, env, env_title, pool}'
+```
+
+В конфиге ноды `shard = "0001"` — алиас `env`, оба ключа равнозначны.
+Пользователю имя шарда не показывается никогда: карточка рисуется по `pool_translation`,
+заголовок группы — по `plan_title`.

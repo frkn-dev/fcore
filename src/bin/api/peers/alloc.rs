@@ -60,6 +60,40 @@ pub fn first_free(blocks: &[IpAddrMask], used: &HashSet<Ipv4Addr>) -> Option<Ipv
     None
 }
 
+/// Share of the address budget we refuse to hand out. A revoke frees its
+/// address for the next request, but a burst of re-issues (card switch,
+/// reinstall) must not race into the last host of the block.
+pub const RESERVE_PERCENT: u64 = 10;
+
+/// Hosts of one block that can carry a peer: network and broadcast are not
+/// peers, and `.1` is the node's own interface (`awg0-peer`).
+pub fn block_hosts(block: &IpAddrMask) -> u64 {
+    let Some(base) = network_of(block) else {
+        return 0;
+    };
+    let Some(last) = last_host(base, block.cidr) else {
+        return 0;
+    };
+    let Some(first) = base.checked_add(FIRST_HOST_OFFSET) else {
+        return 0;
+    };
+    if first > last {
+        return 0;
+    }
+    u64::from(last - first) + 1
+}
+
+/// Every usable host of every block of an env.
+pub fn total_hosts(blocks: &[IpAddrMask]) -> u64 {
+    usable_blocks(blocks).iter().map(block_hosts).sum()
+}
+
+/// The address budget of an env: all hosts minus the reserve. This is the real
+/// capacity of a shard — peers are what runs out, not subscription rows.
+pub fn allocatable(blocks: &[IpAddrMask]) -> u64 {
+    total_hosts(blocks) * (100 - RESERVE_PERCENT) / 100
+}
+
 /// Blocks that a peer of this env may use, given everything already stored.
 /// Kept separate so the handler can log a precise reason when nothing is free.
 pub fn usable_blocks(blocks: &[IpAddrMask]) -> Vec<IpAddrMask> {
@@ -77,6 +111,21 @@ mod tests {
 
     fn block(cidr: &str) -> IpAddrMask {
         IpAddrMask::from_str(cidr).expect("valid block")
+    }
+
+    #[test]
+    fn test_block_budget_and_reserve() {
+        let blocks = vec![block("10.88.0.0/24")];
+        // 256 addresses - network - broadcast - the node's own .1
+        assert_eq!(block_hosts(&blocks[0]), 253);
+        assert_eq!(total_hosts(&blocks), 253);
+        // 10% stays reserved for re-issues
+        assert_eq!(allocatable(&blocks), 227);
+
+        // Two blocks add up, a /32 carries nothing.
+        let two = vec![block("10.88.0.0/24"), block("10.89.0.0/24"), block("10.90.0.5/32")];
+        assert_eq!(total_hosts(&two), 506);
+        assert_eq!(allocatable(&two), 455);
     }
 
     fn used(ips: &[&str]) -> HashSet<Ipv4Addr> {

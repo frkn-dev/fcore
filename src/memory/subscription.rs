@@ -362,7 +362,13 @@ impl From<tokio_postgres::Row> for Subscription {
                 if s.is_empty() {
                     None
                 } else {
-                    Some(Env::from(s.as_str()))
+                    match s.parse::<Env>() {
+                        Ok(env) => Some(env),
+                        Err(err) => {
+                            tracing::warn!("subscription: unparsable scope_env {s:?}: {err}");
+                            None
+                        }
+                    }
                 }
             }),
             premium_token: row.get("premium_token"),

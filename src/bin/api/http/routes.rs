@@ -1647,7 +1647,7 @@ where
         let peers_remember_days = peers_cfg.remember_days as u64;
         let peers_per_device = peers_cfg.max_per_device as u64;
         let peers_per_subscription = peers_cfg.max_per_subscription as u64;
-        let peers_subscriptions_per_node = peers_cfg.subscriptions_per_node.max(1) as u64;
+        let peers_devices_per_subscription = peers_cfg.max_devices_per_subscription as u64;
 
         // Client peer routes speak the AGW envelope only: every one of them is a
         // POST with an encrypted body, so `subscription_id` never lands in a
@@ -1663,13 +1663,15 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_param_u64(peers_per_device))
             .and(with_param_u64(peers_per_subscription))
+            .and(with_param_u64(peers_devices_per_subscription))
             .and_then(
                 |enabled: bool,
                  req: peers_handlers::PeerCreateRequest,
                  ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
                  per_device: u64,
-                 per_subscription: u64| async move {
+                 per_subscription: u64,
+                 devices_per_subscription: u64| async move {
                     if !enabled {
                         return crypto::encrypt_gateway_reply(
                             peers_handlers::not_enabled().into_response(),
@@ -1680,6 +1682,7 @@ where
                     let limits = crate::peers::Limits {
                         per_device: per_device as i64,
                         per_subscription: per_subscription as i64,
+                        devices_per_subscription: devices_per_subscription as i64,
                     };
                     let reply = peers_handlers::post_peers_handler(req, sync, limits).await;
                     crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
@@ -1871,18 +1874,16 @@ where
             .and(mgmt_auth.clone())
             .and(warp::body::json::<peers_handlers::AccessUpsertRequest>())
             .and(with_sync(self.sync.clone()))
-            .and(with_param_u64(peers_subscriptions_per_node))
             .and_then(
                 |enabled: bool,
                  req: peers_handlers::AccessUpsertRequest,
-                 sync: MemSync<N, C, S>,
-                 per_node: u64| async move {
+                 sync: MemSync<N, C, S>| async move {
                     if !enabled {
                         return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
                             peers_handlers::not_enabled(),
                         );
                     }
-                    Ok(peers_handlers::post_access_handler(req, sync, per_node as i64).await)
+                    Ok(peers_handlers::post_access_handler(req, sync).await)
                 },
             );
 
