@@ -183,6 +183,12 @@ pub struct PeersConfig {
     /// stays authoritative; overlapping blocks are refused by the DB).
     #[serde(default)]
     pub subnets: HashMap<Env, Vec<String>>,
+    /// Shards declared here are applied at startup: plan, title, kind and caps
+    /// are written to `env_capacity`, so provisioning is a config edit instead
+    /// of hand-written SQL. The admin endpoint writes the same row for changes
+    /// that must not wait for a restart.
+    #[serde(default)]
+    pub shards: HashMap<Env, ShardDecl>,
     /// Revoked peers stay listed in `GET /peers` for this many days, so the
     /// app can say why a tunnel died instead of "no such peer".
     #[serde(default = "default_peers_remember_days")]
@@ -237,12 +243,35 @@ impl Default for PeersConfig {
             max_per_subscription: default_peers_max_per_subscription(),
             max_devices_per_subscription: default_peers_max_devices_per_subscription(),
             subnets: HashMap::new(),
+            shards: HashMap::new(),
             remember_days: default_peers_remember_days(),
             prune_legacy_conns: false,
             prune_dry_run: true,
             prune_max_per_tick: default_peers_prune_max_per_tick(),
         }
     }
+}
+
+/// One shard as declared in the api config (`[service.peers.shards."0001"]`).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ShardDecl {
+    /// Plan whose subscribers are assigned to this shard
+    /// (`standard|lite|premium|selfhosted`).
+    pub plan: String,
+    /// Human name shown as the group header in the app.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `core|premium|personal`; gates which endpoints may target the shard.
+    #[serde(default = "default_shard_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub max_subscriptions: Option<i32>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_shard_kind() -> String {
+    "core".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -510,5 +539,34 @@ mod tests {
         ok.insert(Env::Dev, vec![Tag::Hysteria2]);
         ok.insert(Env::Wl, vec![Tag::VlessXhttpCdn]);
         assert!(validate_entitlements(Some(&ok), &templates()).is_ok());
+    }
+
+    #[test]
+    fn a_declared_shard_parses_and_keeps_its_policy() {
+        let cfg: PeersConfig = toml::from_str(
+            r#"
+            enabled = true
+            [subnets]
+            "0001" = ["10.88.0.0/24"]
+
+            [shards."0001"]
+            plan = "standard"
+            title = "Standard"
+            kind = "core"
+
+            [shards."1001"]
+            plan = "lite"
+            title = "Super Duper"
+            "#,
+        )
+        .expect("shard declarations must parse");
+
+        let first = cfg.shards.get(&Env::Named("0001".into())).expect("0001");
+        assert_eq!(first.plan, "standard");
+        assert_eq!(first.kind, "core");
+        assert!(first.enabled);
+        let second = cfg.shards.get(&Env::Named("1001".into())).expect("1001");
+        assert_eq!(second.plan, "lite");
+        assert_eq!(second.title.as_deref(), Some("Super Duper"));
     }
 }

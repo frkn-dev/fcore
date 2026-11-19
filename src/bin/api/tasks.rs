@@ -47,6 +47,9 @@ pub trait Tasks {
         sub_id: uuid::Uuid,
         granted: Option<&std::collections::HashMap<fcore::Env, Vec<fcore::Tag>>>,
     );
+    /// End grants whose term is over or whose traffic limit is reached, taking
+    /// their peers and v1 connections down with them.
+    async fn expire_grants(&self, interval_sec: u64);
     async fn republish_conn_deletes(&self, interval_sec: u64);
 }
 
@@ -608,6 +611,62 @@ where
                 "pruned {} connection(s) of subscription {} without a grant",
                 pruned, sub_id
             );
+        }
+    }
+
+    /// End grants whose term is over or whose traffic limit is spent, and take
+    /// their tunnels down with them.
+    ///
+    /// Nothing else in the api ever revokes a grant: without this, an expired
+    /// payer — or one who burned the quota — keeps a working tunnel forever,
+    /// because the peer stays programmed in the node's kernel.
+    async fn expire_grants(&self, interval_sec: u64) {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            debug!("Run expire grants task");
+
+            let db = self.sync.db.peers();
+            let mut victims: Vec<(uuid::Uuid, fcore::Env, &'static str)> = Vec::new();
+
+            match db.expired_grants(Utc::now()).await {
+                Ok(rows) => victims.extend(rows.into_iter().map(|(sub, env)| (sub, env, "expired"))),
+                Err(e) => error!("expire_grants: cannot list expired grants: {}", e),
+            }
+
+            match db.over_quota_grants().await {
+                Ok(rows) => {
+                    for (sub, env) in rows {
+                        if !victims.iter().any(|(s, e, _)| *s == sub && *e == env) {
+                            victims.push((sub, env, "quota"));
+                        }
+                    }
+                }
+                Err(e) => error!("expire_grants: cannot list over-quota grants: {}", e),
+            }
+
+            if victims.is_empty() {
+                continue;
+            }
+
+            for (sub_id, env, reason) in victims {
+                match crate::http::handlers::peers::revoke_env_access(
+                    &self.sync, sub_id, &env, reason,
+                )
+                .await
+                {
+                    Ok(Some((peers, conns))) => info!(
+                        "expire_grants: {} closed env {} of {} ({} peer(s), {} connection(s))",
+                        reason, env, sub_id, peers, conns
+                    ),
+                    Ok(None) => {}
+                    Err(e) => error!(
+                        "expire_grants: cannot revoke {} of {}: {}",
+                        env, sub_id, e
+                    ),
+                }
+            }
         }
     }
 

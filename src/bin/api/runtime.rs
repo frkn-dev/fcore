@@ -223,6 +223,17 @@ where
                     service.persist_peer_traffic(interval).await;
                 }
             });
+
+            // Expired terms and spent quotas: nothing else revokes a grant, so a
+            // payer who ran out keeps a working tunnel until this runs.
+            spawn_task("expire_grants", {
+                let interval = self.settings.tasks.traffic_limit_interval_sec;
+                let service = Arc::clone(&self);
+
+                async move {
+                    service.expire_grants(interval).await;
+                }
+            });
         }
 
         spawn_task("enforce_traffic_limits", {

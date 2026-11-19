@@ -92,6 +92,48 @@ where
             }
         }
 
+        // Shards declared in the config: the same row the admin endpoint
+        // writes. Declaring a shard must never need SQL, and a typo in the
+        // plan must be loud rather than a shard nobody can be granted.
+        for (env, decl) in &settings.service.peers.shards {
+            let Some(kind) = crate::peers::ShardKind::parse(&decl.kind) else {
+                tracing::error!(
+                    "peers: shard {} has an unknown kind '{}' — skipped (core|premium|personal)",
+                    env,
+                    decl.kind
+                );
+                continue;
+            };
+            if <fcore::PlanKind as std::str::FromStr>::from_str(&decl.plan).is_err() {
+                tracing::error!(
+                    "peers: shard {} has an unknown plan '{}' — skipped (standard|lite|premium|selfhosted)",
+                    env,
+                    decl.plan
+                );
+                continue;
+            }
+            match db
+                .peers()
+                .upsert_shard(
+                    env,
+                    &decl.plan,
+                    decl.title.as_deref(),
+                    kind.as_str(),
+                    decl.max_subscriptions,
+                    decl.enabled,
+                )
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    "peers: shard {} declared (plan {}, kind {})",
+                    env,
+                    decl.plan,
+                    kind.as_str()
+                ),
+                Err(e) => tracing::error!("peers: cannot declare shard {}: {}", env, e),
+            }
+        }
+
         // Share tokens: idempotent DDL (own table + connections.issued_via).
         db.share().ensure_table().await?;
         db.conn().ensure_schema().await?;

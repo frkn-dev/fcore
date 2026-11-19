@@ -1271,8 +1271,83 @@ impl PgPeers {
         Ok(done as i64)
     }
 
-    // --------------------------------------------------------------- traffic
+    // --------------------------------------------------------------- expiry
 
+    /// Live grants whose term is already over but which were never revoked.
+    ///
+    /// Nothing else removes them: their peers stay programmed on the nodes and
+    /// keep the tunnel up forever, so this list is what the expiry task eats.
+    pub async fn expired_grants(&self, now: DateTime<Utc>) -> Result<Vec<(Uuid, Env)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT subscription_id, env
+                  FROM subscription_access
+                 WHERE revoked_at IS NULL
+                   AND expires_at IS NOT NULL
+                   AND expires_at <= $1
+                "#,
+                &[&now],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let raw: String = row.get("env");
+                match Env::from_str(&raw) {
+                    Ok(env) => Some((row.get::<_, Uuid>("subscription_id"), env)),
+                    Err(_) => {
+                        tracing::warn!("peers: grant of a bad env {raw:?} is not expirable");
+                        None
+                    }
+                }
+            })
+            .collect())
+    }
+
+    /// Live grants whose traffic limit is already reached. The aggregate is the
+    /// same one `used_bytes` reports (daily rows), so a peer tunnel is cut at
+    /// exactly the number the client was shown.
+    pub async fn over_quota_grants(&self) -> Result<Vec<(Uuid, Env)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT g.subscription_id, g.env
+                  FROM subscription_access g
+                 WHERE g.revoked_at IS NULL
+                   AND g.traffic_limit IS NOT NULL
+                   AND COALESCE((
+                        SELECT SUM(t.uplink_bytes + t.downlink_bytes)
+                          FROM subscription_traffic t
+                         WHERE t.subscription_id = g.subscription_id
+                           AND t.env = g.env
+                           AND t.period = 'day'
+                       ), 0) >= g.traffic_limit
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let raw: String = row.get("env");
+                match Env::from_str(&raw) {
+                    Ok(env) => Some((row.get::<_, Uuid>("subscription_id"), env)),
+                    Err(_) => None,
+                }
+            })
+            .collect())
+    }
+
+    // --------------------------------------------------------------- traffic
     /// Lifetime traffic of the subscription in one env (daily rows only;
     /// monthly rows are a separate aggregate and would double count).
     pub async fn used_bytes(&self, subscription_id: Uuid, env: &Env) -> Result<i64> {

@@ -1398,98 +1398,132 @@ where
         Err(_) => return json_reply(400, "bad env", serde_json::json!({ "error": "bad_env" })),
     };
 
-    let db = memory.db.peers();
-    match db.revoke_grant(req.subscription_id, &env).await {
-        Ok(true) => {
-            memory
-                .memory
-                .write()
-                .await
-                .peers_state
-                .access
-                .remove(&req.subscription_id, &env);
-            // Rights removed means the tunnels go too, immediately: leaving
-            // them up until the cleanup task runs would keep a revoked
-            // subscription connected.
-            let live: Vec<PeerRow> = {
-                let mem = memory.memory.read().await;
-                mem.peers_state
-                    .peers
-                    .live_of_sub(&req.subscription_id)
-                    .into_iter()
-                    .filter(|peer| peer.env == env)
-                    .cloned()
-                    .collect()
-            };
-            let revoked = db
-                .revoke_env_peers(req.subscription_id, &env, "subscription_ended")
-                .await
-                .unwrap_or(0);
-            memory
-                .memory
-                .write()
-                .await
-                .peers_state
-                .peers
-                .remove_env_of_sub(&req.subscription_id, &env);
-            for peer in &live {
-                publish_peer(&memory, fcore::Action::Delete, peer).await;
-            }
-
-            // The v1 connections issued for this env go with the right:
-            // leaving them alive until their own term is what a refunded
-            // customer would exploit. The subscription's own env is skipped —
-            // it is a self-hosted server, not something we granted.
-            let conns: Vec<(Uuid, C)> = {
-                let mem = memory.memory.read().await;
-                let scope_env = mem
-                    .subscriptions
-                    .find_by_id(&req.subscription_id)
-                    .and_then(|sub| sub.scope_env().cloned());
-                if scope_env.as_ref() == Some(&env) {
-                    Vec::new()
-                } else {
-                    mem.connections
-                        .get_by_subscription_id(&req.subscription_id)
-                        .unwrap_or_default()
-                        .iter()
-                        .filter(|(_, conn)| !conn.get_deleted() && conn.get_env() == env)
-                        .cloned()
-                        .collect()
-                }
-            };
-            let mut conns_revoked = 0usize;
-            for (conn_id, conn) in conns {
-                match SyncOp::delete_connection(
-                    &memory,
-                    &conn_id,
-                    &conn.into(),
-                    Some(DELETE_REASON_GRANT_CHANGED),
-                )
-                .await
-                {
-                    Ok(_) => conns_revoked += 1,
-                    Err(e) => tracing::error!(
-                        "revoke_grant: cannot delete connection {}: {:?}",
-                        conn_id,
-                        e
-                    ),
-                }
-            }
-
-            json_reply(
-                200,
-                "grant revoked",
-                serde_json::json!({ "peers_revoked": revoked, "conns_revoked": conns_revoked }),
-            )
-        }
-        Ok(false) => json_reply(
+    match revoke_env_access(&memory, req.subscription_id, &env, "subscription_ended").await {
+        Ok(Some((peers_revoked, conns_revoked))) => json_reply(
+            200,
+            "grant revoked",
+            serde_json::json!({ "peers_revoked": peers_revoked, "conns_revoked": conns_revoked }),
+        ),
+        Ok(None) => json_reply(
             404,
             "no live grant",
             serde_json::json!({ "error": "no_grant" }),
         ),
-        Err(e) => db_error("revoke_grant", e),
+        Err(e) => json_reply(
+            500,
+            "revoke failed",
+            serde_json::json!({ "error": "db", "message": e }),
+        ),
     }
+}
+
+/// Take a grant away along with everything issued from it: the peers programmed
+/// on the nodes and the v1 connections of that env.
+///
+/// Shared by `DELETE /v1/access` and the expiry task, so an expired term and a
+/// refund end the same way. `Ok(None)` means the grant was already gone.
+pub(crate) async fn revoke_env_access<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: Uuid,
+    env: &Env,
+    reason: &str,
+) -> Result<Option<(i64, usize)>, String>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static + From<Subscription>,
+{
+    let db = memory.db.peers();
+    let had_grant = db
+        .revoke_grant(subscription_id, env)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !had_grant {
+        return Ok(None);
+    }
+
+    memory
+        .memory
+        .write()
+        .await
+        .peers_state
+        .access
+        .remove(&subscription_id, env);
+
+    let live: Vec<PeerRow> = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .peers
+            .live_of_sub(&subscription_id)
+            .into_iter()
+            .filter(|peer| &peer.env == env)
+            .cloned()
+            .collect()
+    };
+    let peers_revoked = db
+        .revoke_env_peers(subscription_id, env, reason)
+        .await
+        .unwrap_or(0);
+    memory
+        .memory
+        .write()
+        .await
+        .peers_state
+        .peers
+        .remove_env_of_sub(&subscription_id, env);
+    for peer in &live {
+        publish_peer(memory, fcore::Action::Delete, peer).await;
+    }
+
+    // The v1 connections issued for this env go with the right: leaving them
+    // alive until their own term is what a refunded customer would exploit. The
+    // subscription's own env is skipped — it is a self-hosted server, not
+    // something we granted.
+    let conns: Vec<(Uuid, C)> = {
+        let mem = memory.memory.read().await;
+        let scope_env = mem
+            .subscriptions
+            .find_by_id(&subscription_id)
+            .and_then(|sub| sub.scope_env().cloned());
+        if scope_env.as_ref() == Some(env) {
+            Vec::new()
+        } else {
+            mem.connections
+                .get_by_subscription_id(&subscription_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, conn)| !conn.get_deleted() && conn.get_env() == *env)
+                .collect()
+        }
+    };
+    let mut conns_revoked = 0usize;
+    for (conn_id, conn) in conns {
+        match SyncOp::delete_connection(
+            memory,
+            &conn_id,
+            &conn.into(),
+            Some(DELETE_REASON_GRANT_CHANGED),
+        )
+        .await
+        {
+            Ok(_) => conns_revoked += 1,
+            Err(e) => tracing::error!(
+                "revoke_env_access: cannot delete connection {}: {:?}",
+                conn_id,
+                e
+            ),
+        }
+    }
+
+    Ok(Some((peers_revoked, conns_revoked)))
 }
 
 /// GET /v1/access/capacity?plan=… (service token): per-shard load.
