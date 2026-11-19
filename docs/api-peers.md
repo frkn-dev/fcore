@@ -15,7 +15,18 @@
 
 ## Клиентские ручки (секрет — uuid подписки)
 
-### `GET /v1/locations?subscription_id=<uuid>`
+Все клиентские ручки — **POST с AGW-конвертом** (`{keyPayload, apiPayload}`, тот же, что у
+`/v1/services`): тело только зашифрованное, `subscription_id` не попадает в query, логи и
+крэш-репорты. Id, которые раньше были в пути (`/v1/peers/{id}`), переехали в тело.
+Причина и детали — `peers-envelope.md`.
+
+Ошибки: HTTP-статус = `Refusal::status()` (400/402/403/404/409/503), плюс стабильный код в
+`response.error` (`quota_exhausted`, `grant_expired`, `no_grant`, `proto_not_granted`,
+`env_not_served`, `device_limit`, `subscription_limit`, `key_taken`, `label_taken`,
+`no_free_address`, `device_not_found`, `peer_not_found`). 402 различается только по коду:
+`quota_exhausted` — трафик, `grant_expired` — срок.
+
+### `POST /v1/locations` — тело `{ "subscription_id": "<uuid>" }`
 
 Что доступно и куда подключаться.
 
@@ -57,20 +68,21 @@
 `404` подписка/устройство · `409` лимит (5 на устройство, 50 на подписку) или занятый ключ/метка ·
 `503` нет свободных адресов.
 
-### `GET /v1/peers?subscription_id=<uuid>&device_uid=<uuid>`
+### `POST /v1/peers/list` — тело `{ "subscription_id": "…", "device_uid": "…" }`
 
-Живые и недавно отозванные туннели. `revoke_reason`: `user` / `expired` / `quota` /
-`subscription_ended` — по нему приложение отличает «сервер снял» от «подписка кончилась».
+`device_uid` необязателен. Живые и недавно отозванные туннели. `revoke_reason`: `user` /
+`expired` / `quota` / `subscription_ended` — по нему приложение отличает «сервер снял» от
+«подписка кончилась».
 
-### `DELETE /v1/peers/{peer_id}` — тело `{ "subscription_id": "…" }`
+### `POST /v1/peers/delete` — тело `{ "subscription_id": "…", "peer_id": "…" }`
 
 Снимает туннель (`revoke_reason = user`), адрес возвращается в пул.
 
 ### Устройства
 
-* `GET /v1/devices?subscription_id=` — `{id, device_uid, device_name, support_tag, peers}`
-* `PATCH /v1/devices/{id}` — `{subscription_id, device_name}`
-* `DELETE /v1/devices/{id}` — `{subscription_id}`, снимает все туннели устройства
+* `POST /v1/devices/list` — `{ "subscription_id": "…" }` → `{id, device_uid, device_name, support_tag, peers}`
+* `POST /v1/devices/update` — `{ "subscription_id": "…", "device_id": "…", "device_name": "…" }`
+* `POST /v1/devices/delete` — `{ "subscription_id": "…", "device_id": "…" }`, снимает все туннели устройства
 
 ## Активация ключа: две ручки
 
@@ -86,7 +98,10 @@
 - выбирает шард (`env_capacity.plan` + живые ноды), пишет `subscription_access`;
 - коннекты v1 создаются **из гранта**, а не из каталога;
 - если для плана не объявлено ни одного шарда или все они без живых нод → `503`, ключ
-  **не расходуется**, попытка пишется в `activation_failures` для поддержки;
+  **не расходуется**, попытка пишется в `activation_failures` для поддержки. В ответе
+  `response.error`: `plan_not_configured` (план не объявлен в `env_capacity`) или
+  `no_live_shard` (шарды объявлены, но живых нод нет) — по этому коду приложение показывает
+  «нет серверов, ключ не потрачен»;
 - при успехе в ответе есть `env` и `capacity {used, limit, overflow}`.
 
 Переключение и откат — это URL на сайте, без рестарта api. Когда старая ручка перестанет получать

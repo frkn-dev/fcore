@@ -377,11 +377,12 @@ where
             plan, key.code
         );
         return Ok(warp::reply::with_status(
-            warp::reply::json(&fcore::http::ResponseMessage::<Option<uuid::Uuid>> {
+            warp::reply::json(&fcore::http::ResponseMessage::<Option<serde_json::Value>> {
                 status: 503,
                 message: "Сейчас нет доступных серверов. Напишите в поддержку — ключ не потрачен."
                     .to_string(),
-                response: None,
+                // Stable code the app maps to «нет серверов, ключ не потрачен».
+                response: Some(serde_json::json!({ "error": "plan_not_configured" })),
             }),
             warp::http::StatusCode::SERVICE_UNAVAILABLE,
         ));
@@ -470,10 +471,10 @@ where
                         plan, key.code
                     );
                     return Ok(warp::reply::with_status(
-                        warp::reply::json(&fcore::http::ResponseMessage::<Option<uuid::Uuid>> {
+                        warp::reply::json(&fcore::http::ResponseMessage::<Option<serde_json::Value>> {
                             status: 503,
                             message: "Сейчас нет доступных серверов. Напишите в поддержку — ключ не потрачен.".to_string(),
-                            response: None,
+                            response: Some(serde_json::json!({ "error": "no_live_shard" })),
                         }),
                         warp::http::StatusCode::SERVICE_UNAVAILABLE,
                     ));
@@ -481,12 +482,12 @@ where
                 Err(e) => {
                     error!("activation: cannot assign shard for {}: {}", sub_id, e);
                     return Ok(warp::reply::with_status(
-                        warp::reply::json(&fcore::http::ResponseMessage::<Option<uuid::Uuid>> {
+                        warp::reply::json(&fcore::http::ResponseMessage::<Option<serde_json::Value>> {
                             status: 503,
                             message:
                                 "Не удалось выдать доступ. Напишите в поддержку — ключ не потрачен."
                                     .to_string(),
-                            response: None,
+                            response: Some(serde_json::json!({ "error": "assign_failed" })),
                         }),
                         warp::http::StatusCode::SERVICE_UNAVAILABLE,
                     ));

@@ -54,7 +54,7 @@
 
 Приложение уже имеет старый `.conf` с приватным ключом:
 
-1. При старте: `GET /v1/locations`. Есть `access[]` → показываем карточки.
+1. При старте: `POST /v1/locations` (конверт). Есть `access[]` → показываем карточки.
 2. Нет ни одного пира для этого env → `POST /v1/peers` с **публичным ключом, выведенным из
    старого приватника** (приватник не меняется).
 3. Новый `.conf` пишем рядом со старым, старый не удаляем до успешного рукопожатия.
@@ -65,7 +65,8 @@
 
 ## 3. Экран локаций
 
-Источник: `GET /v1/locations?subscription_id=<uuid>`.
+Источник: `POST /v1/locations` с телом `{ "subscription_id": "<uuid>" }` (AGW-конверт, как у
+`/v1/services`: `subscription_id` в query не ходит).
 
 ```json
 {
@@ -170,7 +171,7 @@ PersistentKeepalive = <keepalive или 25>
 | `403 env_not_served` | «Локация временно недоступна» |
 | `409 device_limit` | «На этом устройстве уже 5 туннелей — удалите лишний» |
 | `409 subscription_limit` | «Достигнут лимит туннелей» + поддержка |
-| `409 key_taken` | Считать это «пир уже есть»: перейти к `GET /v1/peers` |
+| `409 key_taken` | Считать это «пир уже есть»: перейти к `POST /v1/peers/list` |
 | `503 no_free_address` | «Нет свободных мест в локации» + поддержка |
 | сеть/таймаут | повтор `POST /v1/peers` (идемпотентно), 3 попытки с бэкоффом |
 
@@ -180,8 +181,8 @@ PersistentKeepalive = <keepalive или 25>
 
 Кнопка в настройках туннеля и автотриггер при ошибке рукопожатия:
 
-1. `GET /v1/peers?subscription_id=…&device_uid=…`;
-2. пир живой → берём `address` и пересобираем `.conf` из `GET /v1/locations`;
+1. `POST /v1/peers/list` с `{subscription_id, device_uid}`;
+2. пир живой → берём `address` и пересобираем `.conf` из `POST /v1/locations`;
 3. пира нет или он `revoked` → `POST /v1/peers` с **тем же** публичным ключом → новый адрес,
    `.conf` перезаписывается (приватник тот же);
 4. `revoke_reason` показываем человеческим текстом:
@@ -197,8 +198,9 @@ PersistentKeepalive = <keepalive или 25>
 
 ## 8. Устройства и каналы
 
-* `GET /v1/devices` → список устройств с `support_tag` и числом туннелей; переименование
-  `PATCH /v1/devices/{id}`, удаление `DELETE /v1/devices/{id}` (снимает все туннели).
+* `POST /v1/devices/list` (`{subscription_id}`) → список устройств с `support_tag` и числом
+  туннелей; переименование — `POST /v1/devices/update` (`{subscription_id, device_id, device_name}`),
+  удаление — `POST /v1/devices/delete` (`{subscription_id, device_id}`, снимает все туннели).
 * Роутер/Linux: несколько туннелей на одном устройстве. Второй канал **в том же env** требует
   своего `public_key` (ядро держит пиров по ключу) и `label` («ch2»); в разных env — один ключ.
 * Лимиты: 5 туннелей на устройство, 50 на подписку. Числа приходят только как ошибки `409`, в UI

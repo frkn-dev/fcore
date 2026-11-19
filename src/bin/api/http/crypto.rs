@@ -17,8 +17,12 @@ pub struct AesContext {
 pub struct AgwCryptoError(pub String);
 impl warp::reject::Reject for AgwCryptoError {}
 
-/// Decrypts an encrypted request. If the body is plain JSON, returns it as-is
-/// with an empty AES context.
+/// Decrypts an encrypted request: `keyPayload` is the RSA-PKCS#1 wrapped
+/// `{aes_key, aes_iv}`, `apiPayload` is the AES-256-CBC body.
+///
+/// There is no plain-JSON mode: a body without `keyPayload` is rejected with
+/// `keyPayload missing` (`400`), which is what the app treats as "this is not
+/// our api". Client routes therefore take the envelope only.
 pub fn decrypt_request(
     private_key: &PKey<Private>,
     body: serde_json::Value,
@@ -175,5 +179,104 @@ pub async fn encrypt_gateway_reply(
             Ok(response)
         }
         None => Ok(response),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use openssl::rsa::Rsa;
+    use serde_json::json;
+    use warp::Reply;
+
+    /// What the app's GatewayController puts on the wire: an RSA-wrapped
+    /// `{aes_key, aes_iv}` plus the AES-256-CBC body.
+    fn envelope(
+        plaintext: serde_json::Value,
+    ) -> (PKey<Private>, serde_json::Value, AesContext) {
+        let key = PKey::from_rsa(Rsa::generate(2048).expect("rsa")).expect("pkey");
+        let aes_key = vec![7u8; 32];
+        // The client sends a 32-byte IV; AES-256-CBC uses the first 16 bytes.
+        let aes_iv = vec![9u8; 32];
+        let ctx = AesContext {
+            key: aes_key.clone(),
+            iv: aes_iv[..16].to_vec(),
+        };
+
+        let cipher = encrypt_response(&ctx, plaintext.to_string().as_bytes()).expect("aes");
+        let key_json = json!({
+            "aes_key": B64.encode(&aes_key),
+            "aes_iv": B64.encode(&aes_iv),
+            "aes_salt": B64.encode([1u8; 8]),
+        });
+        let rsa = key.rsa().expect("rsa half");
+        let mut wrapped = vec![0u8; rsa.size() as usize];
+        let written = rsa
+            .public_encrypt(key_json.to_string().as_bytes(), &mut wrapped, Padding::PKCS1)
+            .expect("rsa encrypt");
+        wrapped.truncate(written);
+
+        let body = json!({
+            "keyPayload": B64.encode(&wrapped),
+            "apiPayload": B64.encode(&cipher),
+        });
+        (key, body, ctx)
+    }
+
+    #[test]
+    fn a_locations_request_travels_in_the_envelope() {
+        let sub = uuid::Uuid::new_v4();
+        let (key, body, _) = envelope(json!({ "subscription_id": sub.to_string() }));
+
+        let (plaintext, ctx) = decrypt_request(&key, body).expect("decrypt");
+        assert!(ctx.is_some(), "an envelope always yields an AES context");
+
+        let req: crate::http::handlers::peers::LocationsRequest =
+            serde_json::from_value(plaintext).expect("typed request");
+        assert_eq!(req.subscription_id, sub);
+    }
+
+    #[test]
+    fn a_peer_delete_request_carries_both_ids() {
+        let sub = uuid::Uuid::new_v4();
+        let peer = uuid::Uuid::new_v4();
+        let (key, body, _) = envelope(json!({
+            "subscription_id": sub.to_string(),
+            "peer_id": peer.to_string(),
+        }));
+
+        let (plaintext, _) = decrypt_request(&key, body).expect("decrypt");
+        let req: crate::http::handlers::peers::PeerDeleteRequest =
+            serde_json::from_value(plaintext).expect("typed request");
+        assert_eq!(req.subscription_id, sub);
+        assert_eq!(req.peer_id, peer);
+    }
+
+    #[test]
+    fn plain_json_is_rejected_not_passed_through() {
+        // Pins the contract the app relies on: there is no plain mode, so a
+        // route can never be mounted without the envelope "just in case".
+        let key = PKey::from_rsa(Rsa::generate(2048).expect("rsa")).expect("pkey");
+        let err = decrypt_request(&key, json!({ "subscription_id": "anything" }))
+            .expect_err("plain JSON must not be accepted");
+        assert!(err.0.contains("keyPayload missing"), "got {}", err.0);
+    }
+
+    #[tokio::test]
+    async fn the_encrypted_reply_keeps_the_http_status() {
+        // 402 is the one status the app distinguishes by the body
+        // (`quota_exhausted` vs `grant_expired`), so it must survive wrapping.
+        let (_, _, ctx) = envelope(json!({}));
+        let reply = warp::reply::with_status(
+            warp::reply::json(&json!({ "error": "quota_exhausted" })),
+            warp::http::StatusCode::PAYMENT_REQUIRED,
+        )
+        .into_response();
+
+        let encrypted = encrypt_gateway_reply(reply, Some(ctx))
+            .await
+            .expect("encrypt");
+        assert_eq!(encrypted.status(), 402);
     }
 }

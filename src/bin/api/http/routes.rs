@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
-use warp::Filter;
+use warp::{Filter, Reply};
 
 use fcore::{
     http::filters::{with_param_bool, with_param_string, with_param_u64},
@@ -1716,184 +1716,193 @@ where
         let peers_per_subscription = peers_cfg.max_per_subscription as u64;
         let peers_subscriptions_per_node = peers_cfg.subscriptions_per_node.max(1) as u64;
 
+        // Client peer routes speak the AGW envelope only: every one of them is a
+        // POST with an encrypted body, so `subscription_id` never lands in a
+        // query string, an access log or a crash report. Ids that used to sit
+        // in the path ride inside the body for the same reason.
         let post_peers_route = warp::post()
             .and(warp::path!("v1" / "peers"))
             .and(warp::path::end())
             .and(with_param_bool(peers_enabled))
-            .and(warp::body::json::<peers_handlers::PeerCreateRequest>())
+            .and(crypto::with_agw_decryption::<
+                peers_handlers::PeerCreateRequest,
+            >(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
             .and(with_param_u64(peers_per_device))
             .and(with_param_u64(peers_per_subscription))
             .and_then(
                 |enabled: bool,
                  req: peers_handlers::PeerCreateRequest,
+                 ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
                  per_device: u64,
                  per_subscription: u64| async move {
                     if !enabled {
-                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
-                            peers_handlers::not_enabled(),
-                        );
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
                     }
                     let limits = crate::peers::Limits {
                         per_device: per_device as i64,
                         per_subscription: per_subscription as i64,
                     };
-                    Ok(
-                        peers_handlers::post_peers_handler(req, sync, limits).await,
-                    )
+                    let reply = peers_handlers::post_peers_handler(req, sync, limits).await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
                 },
             );
 
-        let get_peers_route = warp::get()
-            .and(warp::path!("v1" / "peers"))
+        let post_peers_list_route = warp::post()
+            .and(warp::path!("v1" / "peers" / "list"))
             .and(warp::path::end())
             .and(with_param_bool(peers_enabled))
-            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(crypto::with_agw_decryption::<peers_handlers::PeerListRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and(with_param_u64(peers_remember_days))
             .and_then(
                 |enabled: bool,
-                 q: std::collections::HashMap<String, String>,
+                 req: peers_handlers::PeerListRequest,
+                 ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
                  remember_days: u64| async move {
                     if !enabled {
-                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
-                            peers_handlers::not_enabled(),
-                        );
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
                     }
-                    let Some(subscription_id) = q
-                        .get("subscription_id")
-                        .and_then(|v| uuid::Uuid::from_str(v).ok())
-                    else {
-                        return Ok(peers_handlers::not_enabled());
-                    };
-                    let device_uid = q
-                        .get("device_uid")
-                        .and_then(|v| uuid::Uuid::from_str(v).ok());
-                    Ok(peers_handlers::get_peers_handler(
-                        subscription_id,
-                        device_uid,
-                        sync,
-                        remember_days as i64,
-                    )
-                    .await)
+                    let reply =
+                        peers_handlers::get_peers_handler(req, sync, remember_days as i64).await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
                 },
             );
 
-        let delete_peer_route = warp::delete()
-            .and(warp::path("v1"))
-            .and(warp::path("peers"))
-            .and(warp::path::param::<uuid::Uuid>())
+        let post_peers_delete_route = warp::post()
+            .and(warp::path!("v1" / "peers" / "delete"))
             .and(warp::path::end())
             .and(with_param_bool(peers_enabled))
-            .and(warp::body::json::<peers_handlers::DeletePeerRequest>())
-            .and(with_sync(self.sync.clone()))
-            .and_then(
-                |peer_id: uuid::Uuid,
-                 enabled: bool,
-                 req: peers_handlers::DeletePeerRequest,
-                 sync: MemSync<N, C, S>| async move {
-                    if !enabled {
-                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
-                            peers_handlers::not_enabled(),
-                        );
-                    }
-                    Ok(peers_handlers::delete_peer_handler(peer_id, req, sync).await)
-                },
-            );
-
-        let get_devices_route = warp::get()
-            .and(warp::path!("v1" / "devices"))
-            .and(warp::path::end())
-            .and(with_param_bool(peers_enabled))
-            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(crypto::with_agw_decryption::<
+                peers_handlers::PeerDeleteRequest,
+            >(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
             .and_then(
                 |enabled: bool,
-                 q: std::collections::HashMap<String, String>,
+                 req: peers_handlers::PeerDeleteRequest,
+                 ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>| async move {
                     if !enabled {
-                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
-                            peers_handlers::not_enabled(),
-                        );
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
                     }
-                    let Some(subscription_id) = q
-                        .get("subscription_id")
-                        .and_then(|v| uuid::Uuid::from_str(v).ok())
-                    else {
-                        return Ok(peers_handlers::not_enabled());
-                    };
-                    Ok(peers_handlers::get_devices_handler(subscription_id, sync).await)
+                    let reply = peers_handlers::delete_peer_handler(req, sync).await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
                 },
             );
 
-        let patch_device_route = warp::patch()
-            .and(warp::path("v1"))
-            .and(warp::path("devices"))
-            .and(warp::path::param::<uuid::Uuid>())
+        let post_devices_list_route = warp::post()
+            .and(warp::path!("v1" / "devices" / "list"))
             .and(warp::path::end())
             .and(with_param_bool(peers_enabled))
-            .and(warp::body::json::<peers_handlers::DevicePatchRequest>())
+            .and(crypto::with_agw_decryption::<
+                peers_handlers::DeviceListRequest,
+            >(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
             .and_then(
-                |device_id: uuid::Uuid,
-                 enabled: bool,
-                 req: peers_handlers::DevicePatchRequest,
+                |enabled: bool,
+                 req: peers_handlers::DeviceListRequest,
+                 ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>| async move {
                     if !enabled {
-                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
-                            peers_handlers::not_enabled(),
-                        );
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
                     }
-                    Ok(peers_handlers::patch_device_handler(device_id, req, sync).await)
+                    let reply = peers_handlers::get_devices_handler(req, sync).await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
                 },
             );
 
-        let delete_device_route = warp::delete()
-            .and(warp::path("v1"))
-            .and(warp::path("devices"))
-            .and(warp::path::param::<uuid::Uuid>())
+        let post_devices_update_route = warp::post()
+            .and(warp::path!("v1" / "devices" / "update"))
             .and(warp::path::end())
             .and(with_param_bool(peers_enabled))
-            .and(warp::body::json::<peers_handlers::DeletePeerRequest>())
+            .and(crypto::with_agw_decryption::<
+                peers_handlers::DeviceUpdateRequest,
+            >(agw_key.clone()))
             .and(with_sync(self.sync.clone()))
             .and_then(
-                |device_id: uuid::Uuid,
-                 enabled: bool,
-                 req: peers_handlers::DeletePeerRequest,
+                |enabled: bool,
+                 req: peers_handlers::DeviceUpdateRequest,
+                 ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>| async move {
                     if !enabled {
-                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
-                            peers_handlers::not_enabled(),
-                        );
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
                     }
-                    Ok(peers_handlers::delete_device_handler(device_id, req, sync).await)
+                    let reply = peers_handlers::patch_device_handler(req, sync).await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
                 },
             );
 
-        let get_locations_route = warp::get()
+        let post_devices_delete_route = warp::post()
+            .and(warp::path!("v1" / "devices" / "delete"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(crypto::with_agw_decryption::<
+                peers_handlers::DeviceDeleteRequest,
+            >(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |enabled: bool,
+                 req: peers_handlers::DeviceDeleteRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
+                    }
+                    let reply = peers_handlers::delete_device_handler(req, sync).await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
+                },
+            );
+
+        let post_locations_route = warp::post()
             .and(warp::path!("v1" / "locations"))
             .and(warp::path::end())
             .and(with_param_bool(peers_enabled))
-            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(crypto::with_agw_decryption::<peers_handlers::LocationsRequest>(
+                agw_key.clone(),
+            ))
             .and(with_sync(self.sync.clone()))
             .and_then(
                 |enabled: bool,
-                 q: std::collections::HashMap<String, String>,
+                 req: peers_handlers::LocationsRequest,
+                 ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>| async move {
                     if !enabled {
-                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
-                            peers_handlers::not_enabled(),
-                        );
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
                     }
-                    let Some(subscription_id) = q
-                        .get("subscription_id")
-                        .and_then(|v| uuid::Uuid::from_str(v).ok())
-                    else {
-                        return Ok(peers_handlers::not_enabled());
-                    };
-                    Ok(peers_handlers::get_locations_handler(subscription_id, sync).await)
+                    let reply = peers_handlers::get_locations_handler(req, sync).await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
                 },
             );
 
@@ -2020,12 +2029,12 @@ where
                 );
 
         let peers_routes = post_peers_route
-            .or(get_peers_route)
-            .or(delete_peer_route)
-            .or(get_devices_route)
-            .or(patch_device_route)
-            .or(delete_device_route)
-            .or(get_locations_route)
+            .or(post_peers_list_route)
+            .or(post_peers_delete_route)
+            .or(post_devices_list_route)
+            .or(post_devices_update_route)
+            .or(post_devices_delete_route)
+            .or(post_locations_route)
             .or(get_access_route)
             .or(get_capacity_route)
             .or(post_access_route)

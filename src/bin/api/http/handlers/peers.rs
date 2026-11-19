@@ -98,15 +98,44 @@ pub struct PeerCreateRequest {
     pub label: Option<String>,
 }
 
+/// `POST /v1/peers/list` — the reconnect case: which tunnels exist.
 #[derive(Clone, Debug, Deserialize)]
-pub struct DeletePeerRequest {
+pub struct PeerListRequest {
+    pub subscription_id: Uuid,
+    #[serde(default)]
+    pub device_uid: Option<Uuid>,
+}
+
+/// `POST /v1/peers/delete` — the id rides in the body, not in the path, so the
+/// whole request fits one encrypted envelope.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PeerDeleteRequest {
+    pub subscription_id: Uuid,
+    pub peer_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DeviceListRequest {
     pub subscription_id: Uuid,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct DevicePatchRequest {
+pub struct DeviceUpdateRequest {
     pub subscription_id: Uuid,
+    pub device_id: Uuid,
     pub device_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DeviceDeleteRequest {
+    pub subscription_id: Uuid,
+    pub device_id: Uuid,
+}
+
+/// `POST /v1/locations` — what the subscription may use and where.
+#[derive(Clone, Debug, Deserialize)]
+pub struct LocationsRequest {
+    pub subscription_id: Uuid,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -795,10 +824,9 @@ where
     )
 }
 
-/// GET /v1/peers?subscription_id=…&device_uid=…
+/// `POST /v1/peers/list`
 pub async fn get_peers_handler<N, C, S>(
-    subscription_id: Uuid,
-    device_uid: Option<Uuid>,
+    req: PeerListRequest,
     memory: MemSync<N, C, S>,
     remember_days: i64,
 ) -> Box<dyn warp::Reply>
@@ -815,7 +843,8 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
     let db = memory.db.peers();
-    let device_filter = match device_uid {
+    let subscription_id = req.subscription_id;
+    let device_filter = match req.device_uid {
         Some(uid) => match db.device_by_uid(subscription_id, uid).await {
             Ok(Some(device)) => Some(device.id),
             Ok(None) => return refusal_reply(Refusal::DeviceNotFound),
@@ -836,10 +865,9 @@ where
     }
 }
 
-/// DELETE /v1/peers/{id}
+/// `POST /v1/peers/delete`
 pub async fn delete_peer_handler<N, C, S>(
-    peer_id: Uuid,
-    req: DeletePeerRequest,
+    req: PeerDeleteRequest,
     memory: MemSync<N, C, S>,
 ) -> Box<dyn warp::Reply>
 where
@@ -855,6 +883,7 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
     let db = memory.db.peers();
+    let peer_id = req.peer_id;
     let peer = {
         let mem = memory.memory.read().await;
         mem.peers_state.peers.get(&peer_id).cloned()
@@ -886,9 +915,9 @@ where
     }
 }
 
-/// GET /v1/devices?subscription_id=…
+/// `POST /v1/devices/list`
 pub async fn get_devices_handler<N, C, S>(
-    subscription_id: Uuid,
+    req: DeviceListRequest,
     memory: MemSync<N, C, S>,
 ) -> Box<dyn warp::Reply>
 where
@@ -903,7 +932,7 @@ where
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
-    match memory.db.peers().devices(subscription_id).await {
+    match memory.db.peers().devices(req.subscription_id).await {
         Ok(rows) => {
             let devices: Vec<DeviceView> = rows
                 .into_iter()
@@ -921,10 +950,9 @@ where
     }
 }
 
-/// PATCH /v1/devices/{id}
+/// `POST /v1/devices/update`
 pub async fn patch_device_handler<N, C, S>(
-    device_id: Uuid,
-    req: DevicePatchRequest,
+    req: DeviceUpdateRequest,
     memory: MemSync<N, C, S>,
 ) -> Box<dyn warp::Reply>
 where
@@ -940,6 +968,7 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
     let db = memory.db.peers();
+    let device_id = req.device_id;
     match db.device_by_id(device_id).await {
         Ok(Some(device)) if device.subscription_id == req.subscription_id => {
             match db
@@ -959,10 +988,9 @@ where
     }
 }
 
-/// DELETE /v1/devices/{id}
+/// `POST /v1/devices/delete`
 pub async fn delete_device_handler<N, C, S>(
-    device_id: Uuid,
-    req: DeletePeerRequest,
+    req: DeviceDeleteRequest,
     memory: MemSync<N, C, S>,
 ) -> Box<dyn warp::Reply>
 where
@@ -978,6 +1006,7 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
     let db = memory.db.peers();
+    let device_id = req.device_id;
     match db.device_by_id(device_id).await {
         Ok(Some(device)) if device.subscription_id == req.subscription_id => {
             // Revoke before deleting: the FK cascade drops the rows without
@@ -1017,9 +1046,9 @@ where
     }
 }
 
-/// GET /v1/locations?subscription_id=…
+/// `POST /v1/locations`
 pub async fn get_locations_handler<N, C, S>(
-    subscription_id: Uuid,
+    req: LocationsRequest,
     memory: MemSync<N, C, S>,
 ) -> Box<dyn warp::Reply>
 where
@@ -1034,6 +1063,7 @@ where
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
+    let subscription_id = req.subscription_id;
     let db = memory.db.peers();
     let grants: Vec<AccessRow> = {
         let mem = memory.memory.read().await;
