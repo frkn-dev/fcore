@@ -42,6 +42,8 @@ pub struct DeviceRow {
     pub platform: Option<String>,
     pub support_tag: String,
     pub created_at: DateTime<Utc>,
+    /// Set when the device's default key was replaced (the app shows it).
+    pub rotated_at: Option<DateTime<Utc>>,
 }
 
 /// One row of `peers`.
@@ -99,7 +101,7 @@ impl PgPeers {
             .query(
                 r#"
                 SELECT id, subscription_id, device_uid, device_name, public_key, platform,
-                       support_tag, created_at
+                       support_tag, created_at, rotated_at
                 FROM devices
                 "#,
                 &[],
@@ -661,7 +663,7 @@ impl PgPeers {
             .execute(
                 r#"
                 INSERT INTO env_networks (env, subnet)
-                VALUES ($1, $2::cidr)
+                VALUES ($1, $2::text::cidr)
                 ON CONFLICT DO NOTHING
                 "#,
                 &[&env.to_string(), &block.to_string()],
@@ -738,7 +740,7 @@ impl PgPeers {
             .query(
                 r#"
                 SELECT id, subscription_id, device_uid, device_name, public_key, platform,
-                       support_tag, created_at
+                       support_tag, created_at, rotated_at
                 FROM devices
                 WHERE subscription_id = $1 AND device_uid = $2
                 "#,
@@ -757,7 +759,7 @@ impl PgPeers {
             .query(
                 r#"
                 SELECT id, subscription_id, device_uid, device_name, public_key, platform,
-                       support_tag, created_at
+                       support_tag, created_at, rotated_at
                 FROM devices
                 WHERE id = $1
                 "#,
@@ -776,7 +778,7 @@ impl PgPeers {
             .query(
                 r#"
                 SELECT id, subscription_id, device_uid, device_name, public_key, platform,
-                       support_tag, created_at
+                       support_tag, created_at, rotated_at
                 FROM devices
                 WHERE upper(support_tag) = upper($1)
                 "#,
@@ -796,7 +798,7 @@ impl PgPeers {
             .query(
                 r#"
                 SELECT d.id, d.subscription_id, d.device_uid, d.device_name, d.public_key,
-                       d.platform, d.support_tag, d.created_at,
+                       d.platform, d.support_tag, d.created_at, d.rotated_at,
                        (SELECT count(*) FROM peers p
                          WHERE p.device_id = d.id AND p.revoked_at IS NULL) AS live
                 FROM devices d
@@ -1063,7 +1065,7 @@ impl PgPeers {
                     r#"
                     INSERT INTO peers
                         (device_id, subscription_id, env, proto, public_key, address, label)
-                    VALUES ($1, $2, $3, $4, $5, $6::cidr, $7)
+                    VALUES ($1, $2, $3, $4, $5, $6::text::cidr, $7)
                     ON CONFLICT DO NOTHING
                     RETURNING {PEER_COLUMNS}
                     "#
@@ -1175,6 +1177,7 @@ fn device_from_row(row: &tokio_postgres::Row) -> DeviceRow {
         platform: row.get("platform"),
         support_tag: row.get("support_tag"),
         created_at: row.get("created_at"),
+        rotated_at: row.get("rotated_at"),
     }
 }
 

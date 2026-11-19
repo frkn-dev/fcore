@@ -91,3 +91,12 @@
 
 `POST /v1/peers` с тем же `(env, public_key)` возвращает существующий пир — повтор после
 таймаута безопасен.
+
+## Шарды: имя env на проводе
+
+`Env` в api знает фиксированный список (`dev`, `ru`, `wl`, `gaming`, `bs`, `bs-prem`,
+`experimental`, `production`); всё остальное — `Env::Custom`, который печатается с префиксом.
+Поэтому шард `standard-01` приходит в JSON **`customstandard-01`** и точно так же лежит в
+`env_networks`, `env_capacity` и `subscription_access`. В `access[].env` и в `peer.env` клиент
+видит именно это имя; в `POST /v1/peers` его надо вернуть дословно. Пользователю имя не
+показывается — карточка рисуется по `pool` + `pool_translation`.

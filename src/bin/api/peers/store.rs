@@ -421,6 +421,7 @@ mod tests {
             platform: None,
             support_tag: "7K2M-9XQ4P".into(),
             created_at: Utc::now(),
+            rotated_at: None,
         }]);
         assert!(store.by_uid(&sub, &uid).is_some());
         assert!(store.by_support_tag("7k2m-9xq4p").is_some());

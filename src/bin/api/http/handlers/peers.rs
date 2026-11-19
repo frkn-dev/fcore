@@ -200,7 +200,21 @@ pub struct DeviceView {
     pub device_uid: Uuid,
     pub device_name: Option<String>,
     pub support_tag: String,
-    pub peers: i64,
+    pub created_at: DateTime<Utc>,
+    pub rotated_at: Option<DateTime<Utc>>,
+    pub peers: usize,
+}
+
+fn device_view(row: &crate::postgres::peers::DeviceRow, live_peers: usize) -> DeviceView {
+    DeviceView {
+        id: row.id,
+        device_uid: row.device_uid,
+        device_name: row.device_name.clone(),
+        support_tag: row.support_tag.clone(),
+        created_at: row.created_at,
+        rotated_at: row.rotated_at,
+        peers: live_peers,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -900,11 +914,7 @@ where
                         .peers
                         .remove_live(peer_id);
                     publish_peer(&memory, fcore::Action::Delete, &peer).await;
-                    json_reply(
-                        200,
-                        "peer revoked",
-                        serde_json::json!({ "peer_id": peer_id }),
-                    )
+                    json_reply(200, "peer revoked", serde_json::json!({ "status": "ok" }))
                 }
                 Ok(false) => refusal_reply(Refusal::PeerNotFound),
                 Err(e) => db_error("revoke_peer", e),
@@ -936,13 +946,7 @@ where
         Ok(rows) => {
             let devices: Vec<DeviceView> = rows
                 .into_iter()
-                .map(|(row, live)| DeviceView {
-                    id: row.id,
-                    device_uid: row.device_uid,
-                    device_name: row.device_name,
-                    support_tag: row.support_tag,
-                    peers: live,
-                })
+                .map(|(row, live)| device_view(&row, live.max(0) as usize))
                 .collect();
             json_reply(200, "ok", serde_json::json!({ "devices": devices }))
         }
@@ -975,11 +979,24 @@ where
                 .rename_device(device_id, req.device_name.as_deref())
                 .await
             {
-                Ok(_) => json_reply(
-                    200,
-                    "renamed",
-                    serde_json::json!({ "device_id": device_id }),
-                ),
+                Ok(true) => {
+                    // Answer with the row as it now stands, live peers
+                    // included: the app re-renders the device list from it.
+                    let renamed = match db.device_by_id(device_id).await {
+                        Ok(Some(row)) => row,
+                        _ => device,
+                    };
+                    let live = {
+                        let mem = memory.memory.read().await;
+                        mem.peers_state.peers.live_of_device(&device_id).len()
+                    };
+                    json_reply(
+                        200,
+                        "renamed",
+                        serde_json::json!({ "device": device_view(&renamed, live) }),
+                    )
+                }
+                Ok(false) => refusal_reply(Refusal::DeviceNotFound),
                 Err(e) => db_error("rename_device", e),
             }
         }
@@ -1033,11 +1050,7 @@ where
                 }
             }
             match db.delete_device(device_id).await {
-                Ok(_) => json_reply(
-                    200,
-                    "device deleted",
-                    serde_json::json!({ "device_id": device_id }),
-                ),
+                Ok(_) => json_reply(200, "device deleted", serde_json::json!({ "status": "ok" })),
                 Err(e) => db_error("delete_device", e),
             }
         }
