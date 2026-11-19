@@ -931,9 +931,28 @@ where
         let (nodes, conns, subscriptions) =
             tokio::try_join!(node_repo.all(), conn_repo.all(), sub_repo.all())?;
 
+        // Inbounds and the live status are runtime state — Postgres keeps
+        // neither. A rebuild that took only the DB rows would blank every
+        // node's interfaces until its next heartbeat, and /v1/locations would
+        // answer `pools: []` in that window (a card needs the announced
+        // interface to be built at all).
+        let live_nodes: std::collections::HashMap<uuid::Uuid, (NodeStatus, std::collections::HashMap<fcore::Tag, fcore::Inbound>)> = {
+            let mem = self.sync.memory.read().await;
+            mem.nodes
+                .iter_nodes()
+                .map(|(id, node)| (*id, (node.status, node.inbounds.clone())))
+                .collect()
+        };
+
         let mut tmp_mem: Cache<N, C, S> = Cache::new();
 
-        for node in nodes {
+        for mut node in nodes {
+            if node.inbounds.is_empty() {
+                if let Some((status, inbounds)) = live_nodes.get(&node.uuid) {
+                    node.inbounds = inbounds.clone();
+                    node.status = *status;
+                }
+            }
             tmp_mem.add_node(node).await?;
         }
 
