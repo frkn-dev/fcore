@@ -18,6 +18,52 @@ use super::connection::operation::base::Operations as ConnectionBaseOperations;
 use super::connection::Connections;
 use super::tag::ProtoTag as Tag;
 
+/// One peer of the peers plane, as written into the snapshot.
+///
+/// The node writes what the api told it (key + address + owner), so a restart
+/// can program the interfaces before the api answers. It is a seed, not the
+/// truth: `peers-init` prunes whatever died while the node was down.
+#[derive(Archive, Deserialize, Serialize, SerdeDeserialize, SerdeSerialize, Debug, Clone)]
+#[archive(check_bytes)]
+pub struct SnapshotPeer {
+    pub peer_id: uuid::Uuid,
+    pub subscription_id: Option<uuid::Uuid>,
+    pub tag: crate::memory::tag::ProtoTag,
+    pub public_key: String,
+    pub address: String,
+}
+
+/// Magic + version prefix in front of the rkyv payload.
+///
+/// `archived_root` is unchecked: a file written by a different layout would
+/// not necessarily fail to deserialize — it could read garbage and apply it to
+/// the interfaces. The header is the cheap guard that makes a format change
+/// loud (file moved to `.incompatible`) instead of silent.
+pub const SNAPSHOT_MAGIC: &[u8; 8] = b"FRKNSNAP";
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+
+fn snapshot_header() -> Vec<u8> {
+    let mut header = Vec::with_capacity(12);
+    header.extend_from_slice(SNAPSHOT_MAGIC);
+    header.extend_from_slice(&SNAPSHOT_FORMAT_VERSION.to_le_bytes());
+    header
+}
+
+fn split_header(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 12 || &bytes[..8] != SNAPSHOT_MAGIC {
+        return None;
+    }
+    let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    if version != SNAPSHOT_FORMAT_VERSION {
+        return None;
+    }
+    Some(&bytes[12..])
+}
+
+/// The peer mirror keyed by public key. Same map the node keeps in memory and
+/// the snapshot persists — one structure, no conversion.
+pub type PeerMirror = std::collections::HashMap<String, SnapshotPeer>;
+
 #[derive(Archive, Deserialize, Serialize, SerdeDeserialize, SerdeSerialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub struct SnapshotData<C>
@@ -26,7 +72,10 @@ where
 {
     pub timestamp: u64,
     pub memory: Connections<C>,
-    /// 2 since the file carries its identity (host/env/pool) and per-tag counts.
+    /// 3 since the file also carries the peers plane. Older files fail to
+    /// deserialize and are moved to `.incompatible` — the node then starts
+    /// empty and gets the full set from the api, which is exactly what a
+    /// version bump is allowed to cost.
     pub version: u32,
     /// Host that wrote the file — diagnostics only, never fatal.
     pub hostname: String,
@@ -36,6 +85,8 @@ where
     /// these with the api's count so a stale file is rejected before it can
     /// touch the interfaces.
     pub counts: BTreeMap<String, u64>,
+    /// Peers plane state.
+    pub peers: Vec<SnapshotPeer>,
 }
 
 /// Who the node is, for validating a snapshot before it is applied.
@@ -78,6 +129,9 @@ pub struct SnapshotMeta {
     pub env: String,
     pub pool: Option<String>,
     pub counts: BTreeMap<String, u64>,
+    /// How many peers the file carried (diagnostics; the peers themselves are
+    /// restored into the node's mirror by `load_snapshot`).
+    pub peers: usize,
 }
 
 pub struct SnapshotManager<C>
@@ -91,6 +145,8 @@ where
     /// Wakes the write-through task: the snapshot must reflect an applied
     /// Create/Update/Delete immediately, not at the next interval tick.
     pub wake: Arc<tokio::sync::Notify>,
+    /// Peers plane mirror, persisted in the same file as the connections.
+    pub peers: Arc<RwLock<PeerMirror>>,
 }
 
 impl<C> Clone for SnapshotManager<C>
@@ -117,6 +173,7 @@ where
             memory: self.memory.clone(),
             identity: self.identity.clone(),
             wake: self.wake.clone(),
+            peers: self.peers.clone(),
         }
     }
 }
@@ -147,6 +204,7 @@ where
             memory,
             identity: SnapshotIdentity::default(),
             wake: Arc::new(tokio::sync::Notify::new()),
+            peers: Arc::new(RwLock::new(PeerMirror::new())),
         }
     }
 
@@ -158,6 +216,13 @@ where
 
     /// Share the wake handle with the node, so applying a message can request a
     /// write-through save from anywhere.
+    /// Same mirror the node programs from: the snapshot writes it and the
+    /// restore reads it back, so there is exactly one copy of the truth.
+    pub fn with_peers(mut self, peers: Arc<RwLock<PeerMirror>>) -> Self {
+        self.peers = peers;
+        self
+    }
+
     pub fn with_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
         self.wake = wake;
         self
@@ -195,17 +260,25 @@ where
         let counts = self.counts(&memory);
         drop(memory_guard);
 
+        let peers: Vec<SnapshotPeer> = {
+            let mirror = self.peers.read().await;
+            mirror.values().cloned().collect()
+        };
+
         let snapshot = SnapshotData {
             timestamp,
             memory,
-            version: 2,
+            version: 3,
             hostname: self.identity.hostname.clone(),
             env: self.identity.env.clone(),
             pool: self.identity.pool.clone(),
             counts,
+            peers,
         };
 
-        let bytes = to_bytes::<_, 256>(&snapshot)?;
+        let payload = to_bytes::<_, 256>(&snapshot)?;
+        let mut bytes = snapshot_header();
+        bytes.extend_from_slice(&payload);
 
         let temp_path = format!("{}.tmp", self.snapshot_path);
         async_fs::write(&temp_path, &bytes).await?;
@@ -224,9 +297,25 @@ where
 
         let path = self.snapshot_path.clone();
         let snapshot = tokio::task::spawn_blocking(move || -> Result<Option<SnapshotData<C>>> {
-            let bytes = std::fs::read(&path)?;
+            let raw = std::fs::read(&path)?;
+            let Some(bytes) = split_header(&raw) else {
+                // Written by another snapshot format (e.g. pre-peers 0.6.x) or
+                // truncated: refuse it loudly rather than deserialize garbage.
+                let backup = format!("{}.incompatible", path);
+                tracing::warn!(
+                    "Snapshot {} has an unknown format, moving to {} (the node starts empty and resyncs from the api)",
+                    path,
+                    backup
+                );
+                std::fs::rename(&path, &backup).ok();
+                return Ok(None);
+            };
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let archived = unsafe { rkyv::archived_root::<SnapshotData<C>>(&bytes) };
+                // Unchecked on purpose: `check_archived_root` would require
+                // `C::Archived: CheckBytes`, which the generic connections map
+                // does not promise. The header above is what guarantees the
+                // layout is the one this build wrote.
+                let archived = unsafe { rkyv::archived_root::<SnapshotData<C>>(bytes) };
                 let with: With<SnapshotData<C>, AsOwned> = archived.deserialize(&mut Infallible)?;
                 let snapshot: SnapshotData<C> = with.into_inner();
                 Ok::<_, Error>(snapshot)
@@ -259,7 +348,17 @@ where
                     env: snapshot.env.clone(),
                     pool: snapshot.pool.clone(),
                     counts: snapshot.counts.clone(),
+                    peers: snapshot.peers.len(),
                 };
+                // Old files (version < 3) never reach this line: the archived
+                // root fails to deserialize and the file is moved aside.
+                {
+                    let mut mirror = self.peers.write().await;
+                    mirror.clear();
+                    for peer in &snapshot.peers {
+                        mirror.insert(peer.public_key.clone(), peer.clone());
+                    }
+                }
                 // The identity check happens before the state is applied: a file
                 // from another env/pool must not touch the interfaces at all.
                 if let Some(reason) = self.identity.mismatch(&meta) {
@@ -400,6 +499,7 @@ mod identity_tests {
 
     fn meta(env: &str, pool: Option<&str>) -> SnapshotMeta {
         SnapshotMeta {
+            peers: 0,
             version: 2,
             timestamp: 1,
             hostname: "msk-tw.frkn.org".to_string(),
@@ -416,7 +516,9 @@ mod identity_tests {
             env: "dev".to_string(),
             pool: Some("RU Рилзопровод".to_string()),
         };
-        assert!(identity.mismatch(&meta("dev", Some("RU Рилзопровод"))).is_none());
+        assert!(identity
+            .mismatch(&meta("dev", Some("RU Рилзопровод")))
+            .is_none());
     }
 
     #[test]

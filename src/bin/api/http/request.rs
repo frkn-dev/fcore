@@ -139,7 +139,11 @@ impl TagReq {
             Tag::Vmess | Tag::Shadowsocks => TagReq::Xray,
             Tag::Hysteria2 => TagReq::Hysteria2,
             Tag::Wireguard => TagReq::Wireguard,
-            Tag::AmneziaWg | Tag::AmneziaWgMobile => TagReq::AmneziaWg,
+            Tag::AmneziaWg | Tag::AmneziaWgMobile | Tag::AmneziaPeer => TagReq::AmneziaWg,
+            // Peers are never served by a feed: they are created by the api
+            // per device, and the family selector only keeps this mapping
+            // total for callers that group tags.
+            Tag::WireguardPeer => TagReq::Wireguard,
             Tag::Mtproto => TagReq::Mtproto,
         }
     }
@@ -1001,7 +1005,10 @@ mod tests {
             .find(|d| d.field == "public_key")
             .expect("key difference must be reported");
         let rendered = serde_json::to_string(&conflict).unwrap();
-        assert!(!rendered.contains("super-secret"), "keys must never be echoed");
+        assert!(
+            !rendered.contains("super-secret"),
+            "keys must never be echoed"
+        );
         assert!(key.peer.as_str().unwrap().starts_with("sha256:"));
     }
 

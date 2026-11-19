@@ -374,13 +374,11 @@ impl From<tokio_postgres::Row> for Subscription {
                 .unwrap_or_default(),
             // Rights, not plan: missing columns on an older schema fall back
             // to the historical meaning (selfhosted = no shared configs).
-            shared_access: row
-                .try_get::<_, bool>("shared_access")
-                .unwrap_or_else(|_| {
-                    row.try_get::<_, String>("plan_kind")
-                        .map(|k| k != "selfhosted")
-                        .unwrap_or(true)
-                }),
+            shared_access: row.try_get::<_, bool>("shared_access").unwrap_or_else(|_| {
+                row.try_get::<_, String>("plan_kind")
+                    .map(|k| k != "selfhosted")
+                    .unwrap_or(true)
+            }),
             own_nodes_limit: row
                 .try_get::<_, i32>("own_nodes_limit")
                 .map(i64::from)
@@ -1047,10 +1045,16 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let env = Env::personal_for(id);
         let sub = Subscription::new_selfhosted(id, "ref".into(), env.clone());
-        assert!(!sub.has_shared_access(), "selfhosted takes no shared configs");
+        assert!(
+            !sub.has_shared_access(),
+            "selfhosted takes no shared configs"
+        );
         assert!(sub.can_own_nodes(), "selfhosted may register its own nodes");
         assert!(sub.can_resell(), "selfhosted may create child users");
-        assert!(sub.owns_env(&env), "its own env is served regardless of term");
+        assert!(
+            sub.owns_env(&env),
+            "its own env is served regardless of term"
+        );
     }
 
     #[test]
@@ -1075,5 +1079,4 @@ mod tests {
         assert!(!sub.owns_env(&Env::personal_for(other)));
         assert!(!sub.owns_env(&Env::Dev));
     }
-
 }

@@ -8,7 +8,7 @@ use fcore::{
     http::{IdResponse, ResponseMessage},
     Connection, ConnectionApiOperations, ConnectionBaseOperations, MetricStorage, NodeMetricInfo,
     NodeResponse, NodeStatus, NodeStorageOperations, NodeType, Status, Subscription,
-    SubscriptionOperations,
+    SubscriptionOperations, Tag,
 };
 
 use super::super::{
@@ -110,6 +110,47 @@ where
                 NodeStatus::Online
             };
             let _ = SyncOp::update_node_status(&memory, &node_id, &node.env, node_status).await;
+
+            // The node subscribed to `peers-init-<uuid>` before registering;
+            // this push is what actually fills its interfaces. Nodes that do
+            // not serve a peer protocol get nothing (and prune nothing).
+            let peer_tags: Vec<Tag> = node_req
+                .inbounds
+                .keys()
+                .copied()
+                .filter(|tag| tag.is_peer())
+                .collect();
+            if !peer_tags.is_empty() {
+                // Registry upkeep: this shard and this pool exist and were
+                // alive now. Assignment never reads `pools` — it reads live
+                // nodes — but the admin needs the list.
+                let pool = node.pool.clone().unwrap_or_else(|| "default".to_string());
+                let translation = node
+                    .pool_translation
+                    .as_ref()
+                    .and_then(|t| serde_json::to_value(t).ok());
+                let node_count = {
+                    let mem = memory.memory.read().await;
+                    mem.nodes
+                        .iter_nodes()
+                        .filter(|(_, n)| {
+                            n.env == node.env
+                                && n.status.is_serving()
+                                && n.pool.clone().unwrap_or_else(|| "default".to_string()) == pool
+                        })
+                        .count() as i64
+                };
+                let _ = memory
+                    .db
+                    .peers()
+                    .note_pool(&node.env, &pool, translation, node_count)
+                    .await;
+
+                crate::http::handlers::peers::publish_peers_init(
+                    &memory, node_id, &node.env, &peer_tags,
+                )
+                .await;
+            }
 
             ResponseMessage::<Option<IdResponse>> {
                 status: StatusCode::OK.as_u16(),
@@ -514,7 +555,11 @@ mod tests {
     // translations; a node without a pool reports null, never a missing key.
     #[test]
     fn status_row_carries_pool_and_translation() {
-        let n = node(Env::Dev, Some("EU Рилзопровод"), Some(("ru", "EU Рилзопровод")));
+        let n = node(
+            Env::Dev,
+            Some("EU Рилзопровод"),
+            Some(("ru", "EU Рилзопровод")),
+        );
         let row = node_status_public(&n);
         assert_eq!(row.pool.as_deref(), Some("EU Рилзопровод"));
         assert_eq!(
@@ -534,7 +579,10 @@ mod tests {
     fn status_row_without_pool_is_null_not_missing() {
         let n = node(Env::Dev, None, None);
         let json = serde_json::to_value(node_status_public(&n)).unwrap();
-        assert!(json.get("pool").is_some(), "pool key must always be present");
+        assert!(
+            json.get("pool").is_some(),
+            "pool key must always be present"
+        );
         assert!(json["pool"].is_null());
         assert!(json.get("pool_translation").is_some());
         assert!(json["pool_translation"].is_null());

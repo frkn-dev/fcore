@@ -13,6 +13,10 @@ pub enum Topic {
     Entries,
     Updates(Env),
     Init(uuid::Uuid),
+    /// Live peer stream of one env: every node of the env applies it.
+    PeersUpdates(Env),
+    /// Authoritative full set for one node: apply everything, then prune.
+    PeersInit(uuid::Uuid),
 }
 
 impl fmt::Display for Topic {
@@ -23,6 +27,8 @@ impl fmt::Display for Topic {
             Self::Entries => write!(f, "entries",),
             Self::Updates(env) => write!(f, "updates-{}", env),
             Self::Init(uuid) => write!(f, "init-{}", uuid),
+            Self::PeersUpdates(env) => write!(f, "peers-update-{}", env),
+            Self::PeersInit(uuid) => write!(f, "peers-init-{}", uuid),
         }
     }
 }
@@ -48,6 +54,17 @@ impl FromStr for Topic {
         if let Some(env_str) = s.strip_prefix("updates-") {
             let env = Env::from_str(env_str)?;
             return Ok(Topic::Updates(env));
+        }
+
+        if let Some(env_str) = s.strip_prefix("peers-update-") {
+            let env = Env::from_str(env_str)?;
+            return Ok(Topic::PeersUpdates(env));
+        }
+
+        if let Some(uuid_str) = s.strip_prefix("peers-init-") {
+            let id = uuid::Uuid::parse_str(uuid_str)
+                .map_err(|_| Error::Custom("Invalid UUID in peers-init topic".into()))?;
+            return Ok(Topic::PeersInit(id));
         }
 
         if let Some(uuid_str) = s.strip_prefix("init-") {
@@ -94,6 +111,8 @@ impl Topic {
             Topic::Entries => "entries".to_string(),
             Topic::Updates(s) => format!("updates-{}", s),
             Topic::Init(s) => format!("init-{}", s),
+            Topic::PeersUpdates(s) => format!("peers-update-{}", s),
+            Topic::PeersInit(s) => format!("peers-init-{}", s),
         }
     }
 
@@ -104,6 +123,8 @@ impl Topic {
             Topic::Entries => Cow::Borrowed("entries"),
             Topic::Updates(env) => format!("updates-{}", env).into(),
             Topic::Init(uuid) => Cow::Owned(format!("init-{}", uuid)),
+            Topic::PeersUpdates(env) => Cow::Owned(format!("peers-update-{}", env)),
+            Topic::PeersInit(uuid) => Cow::Owned(format!("peers-init-{}", uuid)),
         }
     }
     pub fn as_bytes(&self) -> Vec<u8> {

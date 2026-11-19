@@ -16,8 +16,8 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, catalog::*, cluster::*, connection::*, healthcheck_handler, iap::*,
-        key::*, mesh::*, metrics::*, node::*, premium::*, premium_inventory::*, private::*,
-        score::*, share::*, subscription::*,
+        key::*, mesh::*, metrics::*, node::*, peers as peers_handlers, premium::*,
+        premium_inventory::*, private::*, score::*, share::*, subscription::*,
     },
     param::*,
     rejection,
@@ -801,11 +801,15 @@ where
             .and_then(crate::http::handlers::watchcat::snapshot_drift_handler);
 
         let post_watchcat_event_route = warp::post()
-            .and(warp::path("v1")).and(warp::path("node")).and(warp::path!("watchcat" / "event"))
+            .and(warp::path("v1"))
+            .and(warp::path("node"))
+            .and(warp::path!("watchcat" / "event"))
             .and(warp::path::end())
             .and(node_sync_auth.clone())
             .and(warp::body::content_length_limit(16 * 1024))
-            .and(warp::body::json::<crate::http::handlers::watchcat::WatchcatReport>())
+            .and(warp::body::json::<
+                crate::http::handlers::watchcat::WatchcatReport,
+            >())
             .and(with_sync(self.sync.clone()))
             .and(warp::any().map({
                 let cfg = alerts_cfg.clone();
@@ -828,12 +832,11 @@ where
         // POST /connections/count — how many connections of a tag a node would
         // receive. fnode asks at startup to decide whether its snapshot is
         // still valid; the answer must come from the same predicate as /sync.
-        let connections_count_limiter = Arc::new(
-            crate::http::handlers::report::SubRateLimiter::new(
+        let connections_count_limiter =
+            Arc::new(crate::http::handlers::report::SubRateLimiter::new(
                 1,
                 std::time::Duration::from_secs(10),
-            ),
-        );
+            ));
         let with_connections_count_limiter = {
             let limiter = connections_count_limiter.clone();
             warp::any().map(move || limiter.clone())
@@ -976,6 +979,35 @@ where
             }))
             .and(warp::any().map(move || activate_conn_resolver.clone()))
             .and(warp::any().map(move || mrkting_config.clone()))
+            .and(warp::any().map(|| crate::http::handlers::key::ActivationFlow::Legacy))
+            .and_then(post_activate_key_handler);
+
+        // New flow: same body as /v1/key/activate, but access is granted from
+        // shards and grants. The site points here when testing is over; there
+        // is no fallback — a payer without a live shard is quarantined.
+        let post_activate_peers_route = warp::post()
+            .and(warp::path!("v1" / "activate"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(warp::header::optional::<String>("x-trace-id"))
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_ipaddrmask(params.wireguard_network.clone()))
+            .and(with_param_ipaddrmask(
+                params.amnezia_wireguard_network.clone(),
+            ))
+            .and(warp::any().map({
+                let net = params.amnezia_wireguard_mobile_network.clone();
+                move || net.clone()
+            }))
+            .and(warp::any().map({
+                let resolver = params.conn_resolver();
+                move || resolver.clone()
+            }))
+            .and(warp::any().map({
+                let mrk = params.mrkting.clone();
+                move || mrk.clone()
+            }))
+            .and(warp::any().map(|| crate::http::handlers::key::ActivationFlow::Peers))
             .and_then(post_activate_key_handler);
 
         // Amnezia gateway routes
@@ -1179,10 +1211,10 @@ where
             .and(with_nodes_load_limiter)
             .and_then(
                 move |req: crate::http::handlers::amnezia::GatewayNodesLoadRequest,
-                 ctx: Option<AesContext>,
-                 sync: MemSync<N, C, S>,
-                 metrics: Arc<MetricStorage>,
-                 limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
+                      ctx: Option<AesContext>,
+                      sync: MemSync<N, C, S>,
+                      metrics: Arc<MetricStorage>,
+                      limiter: Arc<crate::http::handlers::report::SubRateLimiter>| async move {
                     let response = crate::http::handlers::amnezia::gateway_nodes_load_handler(
                         req,
                         sync,
@@ -1293,7 +1325,9 @@ where
             .and(warp::path("report"))
             .and(warp::path("connect-stats"))
             .and(warp::path::end())
-            .and(warp::query::<crate::http::handlers::report::ConnectStatsQuery>())
+            .and(warp::query::<
+                crate::http::handlers::report::ConnectStatsQuery,
+            >())
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
@@ -1322,7 +1356,9 @@ where
             .and(warp::path("report"))
             .and(warp::path("observations"))
             .and(warp::path::end())
-            .and(warp::query::<crate::http::handlers::report::ObservationsQuery>())
+            .and(warp::query::<
+                crate::http::handlers::report::ObservationsQuery,
+            >())
             .and(with_sync(self.sync.clone()))
             .and(with_param_bool(admin_enabled))
             .and(with_param_string(admin_token.clone()))
@@ -1670,6 +1706,335 @@ where
             .or(post_mesh_send_route)
             .or(post_mesh_pull_route);
 
+        // Peers: the client owns the key pair, the api hands out the address.
+        // Mounted even when disabled — the handlers answer 404 in that case,
+        // so a half-configured deployment is visible instead of silent.
+        let peers_cfg = self.settings.service.peers.clone();
+        let peers_enabled = peers_cfg.enabled;
+        let peers_remember_days = peers_cfg.remember_days as u64;
+        let peers_per_device = peers_cfg.max_per_device as u64;
+        let peers_per_subscription = peers_cfg.max_per_subscription as u64;
+        let peers_subscriptions_per_node = peers_cfg.subscriptions_per_node.max(1) as u64;
+
+        let post_peers_route = warp::post()
+            .and(warp::path!("v1" / "peers"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::body::json::<peers_handlers::PeerCreateRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_u64(peers_remember_days))
+            .and(with_param_u64(peers_per_device))
+            .and(with_param_u64(peers_per_subscription))
+            .and_then(
+                |enabled: bool,
+                 req: peers_handlers::PeerCreateRequest,
+                 sync: MemSync<N, C, S>,
+                 remember_days: u64,
+                 per_device: u64,
+                 per_subscription: u64| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    let limits = crate::peers::Limits {
+                        per_device: per_device as i64,
+                        per_subscription: per_subscription as i64,
+                    };
+                    Ok(
+                        peers_handlers::post_peers_handler(req, sync, remember_days as i64, limits)
+                            .await,
+                    )
+                },
+            );
+
+        let get_peers_route = warp::get()
+            .and(warp::path!("v1" / "peers"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_u64(peers_remember_days))
+            .and_then(
+                |enabled: bool,
+                 q: std::collections::HashMap<String, String>,
+                 sync: MemSync<N, C, S>,
+                 remember_days: u64| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    let Some(subscription_id) = q
+                        .get("subscription_id")
+                        .and_then(|v| uuid::Uuid::from_str(v).ok())
+                    else {
+                        return Ok(peers_handlers::not_enabled());
+                    };
+                    let device_uid = q
+                        .get("device_uid")
+                        .and_then(|v| uuid::Uuid::from_str(v).ok());
+                    Ok(peers_handlers::get_peers_handler(
+                        subscription_id,
+                        device_uid,
+                        sync,
+                        remember_days as i64,
+                    )
+                    .await)
+                },
+            );
+
+        let delete_peer_route = warp::delete()
+            .and(warp::path("v1"))
+            .and(warp::path("peers"))
+            .and(warp::path::param::<uuid::Uuid>())
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::body::json::<peers_handlers::DeletePeerRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |peer_id: uuid::Uuid,
+                 enabled: bool,
+                 req: peers_handlers::DeletePeerRequest,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(peers_handlers::delete_peer_handler(peer_id, req, sync).await)
+                },
+            );
+
+        let get_devices_route = warp::get()
+            .and(warp::path!("v1" / "devices"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |enabled: bool,
+                 q: std::collections::HashMap<String, String>,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    let Some(subscription_id) = q
+                        .get("subscription_id")
+                        .and_then(|v| uuid::Uuid::from_str(v).ok())
+                    else {
+                        return Ok(peers_handlers::not_enabled());
+                    };
+                    Ok(peers_handlers::get_devices_handler(subscription_id, sync).await)
+                },
+            );
+
+        let patch_device_route = warp::patch()
+            .and(warp::path("v1"))
+            .and(warp::path("devices"))
+            .and(warp::path::param::<uuid::Uuid>())
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::body::json::<peers_handlers::DevicePatchRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |device_id: uuid::Uuid,
+                 enabled: bool,
+                 req: peers_handlers::DevicePatchRequest,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(peers_handlers::patch_device_handler(device_id, req, sync).await)
+                },
+            );
+
+        let delete_device_route = warp::delete()
+            .and(warp::path("v1"))
+            .and(warp::path("devices"))
+            .and(warp::path::param::<uuid::Uuid>())
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::body::json::<peers_handlers::DeletePeerRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |device_id: uuid::Uuid,
+                 enabled: bool,
+                 req: peers_handlers::DeletePeerRequest,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(peers_handlers::delete_device_handler(device_id, req, sync).await)
+                },
+            );
+
+        let get_locations_route = warp::get()
+            .and(warp::path!("v1" / "locations"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |enabled: bool,
+                 q: std::collections::HashMap<String, String>,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    let Some(subscription_id) = q
+                        .get("subscription_id")
+                        .and_then(|v| uuid::Uuid::from_str(v).ok())
+                    else {
+                        return Ok(peers_handlers::not_enabled());
+                    };
+                    Ok(peers_handlers::get_locations_handler(subscription_id, sync).await)
+                },
+            );
+
+        let get_access_route = warp::get()
+            .and(warp::path!("v1" / "access"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |enabled: bool,
+                 q: std::collections::HashMap<String, String>,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    let Some(subscription_id) = q
+                        .get("subscription_id")
+                        .and_then(|v| uuid::Uuid::from_str(v).ok())
+                    else {
+                        return Ok(peers_handlers::not_enabled());
+                    };
+                    Ok(peers_handlers::get_access_handler(subscription_id, sync).await)
+                },
+            );
+
+        let post_access_route = warp::post()
+            .and(warp::path!("v1" / "access"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<peers_handlers::AccessUpsertRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_u64(peers_subscriptions_per_node))
+            .and_then(
+                |enabled: bool,
+                 req: peers_handlers::AccessUpsertRequest,
+                 sync: MemSync<N, C, S>,
+                 per_node: u64| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(peers_handlers::post_access_handler(req, sync, per_node as i64).await)
+                },
+            );
+
+        let get_capacity_route = warp::get()
+            .and(warp::path("v1"))
+            .and(warp::path("access"))
+            .and(warp::path("capacity"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(mgmt_auth.clone())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |enabled: bool,
+                 q: std::collections::HashMap<String, String>,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    let Some(plan) = q.get("plan").cloned() else {
+                        return Ok(peers_handlers::not_enabled());
+                    };
+                    Ok(peers_handlers::get_capacity_handler(plan, sync).await)
+                },
+            );
+
+        let delete_access_route = warp::delete()
+            .and(warp::path!("v1" / "access"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<peers_handlers::AccessRevokeRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |enabled: bool,
+                 req: peers_handlers::AccessRevokeRequest,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(peers_handlers::delete_access_handler(req, sync).await)
+                },
+            );
+
+        let get_support_route =
+            warp::get()
+                .and(warp::path("v1"))
+                .and(warp::path("admin"))
+                .and(warp::path("support"))
+                .and(warp::path::param::<String>())
+                .and(warp::path::end())
+                .and(with_param_bool(peers_enabled))
+                .and(mgmt_auth.clone())
+                .and(with_sync(self.sync.clone()))
+                .and(with_param_u64(peers_remember_days))
+                .and_then(
+                    |support_tag: String,
+                     enabled: bool,
+                     sync: MemSync<N, C, S>,
+                     remember_days: u64| async move {
+                        if !enabled {
+                            return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                                peers_handlers::not_enabled(),
+                            );
+                        }
+                        Ok(peers_handlers::get_support_handler(
+                            support_tag,
+                            sync,
+                            remember_days as i64,
+                        )
+                        .await)
+                    },
+                );
+
+        let peers_routes = post_peers_route
+            .or(get_peers_route)
+            .or(delete_peer_route)
+            .or(get_devices_route)
+            .or(patch_device_route)
+            .or(delete_device_route)
+            .or(get_locations_route)
+            .or(get_access_route)
+            .or(get_capacity_route)
+            .or(post_access_route)
+            .or(delete_access_route)
+            .or(get_support_route);
+
         // App Store IAP: the client is optional — without [service.apple] the
         // route stays mounted and answers 503.
         let apple_iap = params
@@ -1790,6 +2155,7 @@ where
             .or(get_key_validation_route)
             .or(post_key_route)
             .or(post_activate_key_route)
+            .or(post_activate_peers_route)
             // Amnezia
             .or(post_amnezia_services_route)
             .or(post_amnezia_account_route)
@@ -1813,6 +2179,8 @@ where
             .or(post_admin_alerts_test_route)
             .or(post_admin_alerts_send_route)
             .or(admin_digest_route)
+            // Peers
+            .or(peers_routes)
             // Mesh
             .or(mesh_routes)
             // Admin

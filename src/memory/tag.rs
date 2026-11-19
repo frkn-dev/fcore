@@ -49,6 +49,13 @@ pub enum ProtoTag {
     // for all pre-existing protocols.
     #[serde(rename = "AmneziaWgMobile")]
     AmneziaWgMobile,
+    // Peers: the client owns the key pair and the api assigns the address,
+    // so these carry no per-connection parameters. Appended for the same
+    // rkyv-discriminant reason as AmneziaWgMobile above.
+    #[serde(rename = "AmneziaPeer")]
+    AmneziaPeer,
+    #[serde(rename = "WireguardPeer")]
+    WireguardPeer,
 }
 
 impl fmt::Display for ProtoTag {
@@ -65,6 +72,8 @@ impl fmt::Display for ProtoTag {
             ProtoTag::Hysteria2 => write!(f, "Hysteria2"),
             ProtoTag::Mtproto => write!(f, "Mtproto"),
             ProtoTag::AmneziaWgMobile => write!(f, "AmneziaWgMobile"),
+            ProtoTag::AmneziaPeer => write!(f, "AmneziaPeer"),
+            ProtoTag::WireguardPeer => write!(f, "WireguardPeer"),
         }
     }
 }
@@ -80,6 +89,20 @@ impl ProtoTag {
 
     pub fn is_amneziawg_mobile(&self) -> bool {
         *self == ProtoTag::AmneziaWgMobile
+    }
+
+    pub fn is_amnezia_peer(&self) -> bool {
+        *self == ProtoTag::AmneziaPeer
+    }
+
+    pub fn is_wireguard_peer(&self) -> bool {
+        *self == ProtoTag::WireguardPeer
+    }
+
+    /// The peer protocols: the client brings the key, the api brings the
+    /// address. Their state lives in `peers`, not in `connections`.
+    pub fn is_peer(&self) -> bool {
+        matches!(self, ProtoTag::AmneziaPeer | ProtoTag::WireguardPeer)
     }
 
     pub fn is_shadowsocks(&self) -> bool {
@@ -115,6 +138,8 @@ impl std::str::FromStr for ProtoTag {
             "Wireguard" => Ok(ProtoTag::Wireguard),
             "AmneziaWg" => Ok(ProtoTag::AmneziaWg),
             "AmneziaWgMobile" => Ok(ProtoTag::AmneziaWgMobile),
+            "AmneziaPeer" => Ok(ProtoTag::AmneziaPeer),
+            "WireguardPeer" => Ok(ProtoTag::WireguardPeer),
             "Hysteria2" => Ok(ProtoTag::Hysteria2),
             "Mtproto" => Ok(ProtoTag::Mtproto),
             _ => Err(()),

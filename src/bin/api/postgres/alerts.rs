@@ -270,10 +270,7 @@ impl PgAlerts {
     }
 
     /// Одна привязка — для ответа админ-ручки.
-    pub async fn alert_chat(
-        &self,
-        subscription_id: uuid::Uuid,
-    ) -> Result<Option<(String, bool)>> {
+    pub async fn alert_chat(&self, subscription_id: uuid::Uuid) -> Result<Option<(String, bool)>> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
@@ -284,9 +281,12 @@ impl PgAlerts {
             )
             .await?;
 
-        Ok(rows
-            .first()
-            .map(|r| (r.get::<_, String>("telegram_chat_id"), r.get::<_, bool>("enabled"))))
+        Ok(rows.first().map(|r| {
+            (
+                r.get::<_, String>("telegram_chat_id"),
+                r.get::<_, bool>("enabled"),
+            )
+        }))
     }
 
     /// Все включённые привязки: подписка → чат. Читается на каждом тике

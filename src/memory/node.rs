@@ -263,6 +263,8 @@ impl Node {
         #[cfg(feature = "wireguard")] wg_config: Option<WireguardSettings>,
         #[cfg(feature = "amnezia-wg")] awg_config: Option<AmneziaWgSettings>,
         #[cfg(feature = "amnezia-wg")] awg_mobile_config: Option<AmneziaWgSettings>,
+        #[cfg(feature = "amnezia-wg")] awg_peers_config: Option<AmneziaWgSettings>,
+        #[cfg(feature = "wireguard")] wg_peers_config: Option<WireguardSettings>,
         h2_config: Option<H2Settings>,
         mtproto_config: Option<MtprotoSettings>,
     ) -> Self {
@@ -323,6 +325,42 @@ impl Node {
                         stream_settings: None,
                         awg: awg_mobile_config,
                         wg: None,
+                        h2: None,
+                        mtproto_secret: None,
+                    },
+                );
+            }
+
+            // Peers plane. Same shape as the legacy inbounds, different tag:
+            // the api serves peers from these and never creates connections
+            // for them. A node that cannot bring the interface up does not
+            // announce the tag, so /v1/locations never shows a dead card.
+            #[cfg(feature = "amnezia-wg")]
+            if let Some(ref config) = awg_peers_config {
+                inbounds.insert(
+                    Tag::AmneziaPeer,
+                    Inbound {
+                        port: config.interface.listen_port,
+                        tag: Tag::AmneziaPeer,
+                        stream_settings: None,
+                        awg: awg_peers_config,
+                        wg: None,
+                        h2: None,
+                        mtproto_secret: None,
+                    },
+                );
+            }
+
+            #[cfg(feature = "wireguard")]
+            if let Some(ref config) = wg_peers_config {
+                inbounds.insert(
+                    Tag::WireguardPeer,
+                    Inbound {
+                        port: config.port,
+                        tag: Tag::WireguardPeer,
+                        stream_settings: None,
+                        awg: None,
+                        wg: wg_peers_config,
                         h2: None,
                         mtproto_secret: None,
                     },

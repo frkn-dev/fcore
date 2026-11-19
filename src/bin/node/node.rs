@@ -39,6 +39,9 @@ where
     C: ConnectionBaseOperations + Send + Sync + Clone + 'static,
 {
     pub memory: Arc<RwLock<Connections<C>>>,
+    /// Tunnels of the peers plane, keyed by public key. The same map the
+    /// snapshot persists, so there is one copy of the truth.
+    pub peers: Arc<RwLock<fcore::PeerMirror>>,
     pub node: MemNode,
     pub metrics: Arc<MetricBuffer>,
     pub subscriber: Subscriber,
@@ -52,6 +55,12 @@ where
     pub awg_client: Option<AwgInterface>,
     #[cfg(feature = "amnezia-wg")]
     pub awg_mobile_client: Option<AwgInterface>,
+    /// Peers plane interfaces: members are owned by the api, the node only
+    /// programs them.
+    #[cfg(feature = "amnezia-wg")]
+    pub awg_peers_client: Option<AwgInterface>,
+    #[cfg(feature = "wireguard")]
+    pub wg_peers_client: Option<WgApi>,
     /// Wakes the write-through snapshot task after an applied message.
     pub snapshot_wake: Arc<tokio::sync::Notify>,
     /// Tags whose authoritative full list is expected right now, with the ids
@@ -73,10 +82,14 @@ where
         #[cfg(feature = "wireguard")] wg_client: Option<WgApi>,
         #[cfg(feature = "amnezia-wg")] awg_client: Option<AwgInterface>,
         #[cfg(feature = "amnezia-wg")] awg_mobile_client: Option<AwgInterface>,
+        #[cfg(feature = "amnezia-wg")] awg_peers_client: Option<AwgInterface>,
+        #[cfg(feature = "wireguard")] wg_peers_client: Option<WgApi>,
     ) -> Self {
         let memory = Arc::new(RwLock::new(Connections::default()));
+        let peers = Arc::new(RwLock::new(std::collections::HashMap::new()));
         Self {
             memory,
+            peers,
             node,
             metrics,
             subscriber,
@@ -90,6 +103,10 @@ where
             awg_client,
             #[cfg(feature = "amnezia-wg")]
             awg_mobile_client,
+            #[cfg(feature = "amnezia-wg")]
+            awg_peers_client,
+            #[cfg(feature = "wireguard")]
+            wg_peers_client,
             snapshot_wake: Arc::new(tokio::sync::Notify::new()),
             full_sync: Arc::new(tokio::sync::Mutex::new(FullSyncTracker::default())),
         }
@@ -216,6 +233,77 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         (None, None)
     };
 
+    // Peers plane: a separate interface whose members come from the api.
+    // The node only connects; bringing the device up is the operator's job
+    // (awg-quick / wg-quick), and a missing device is a hard error because a
+    // node that silently skips peers would strand every tunnel of its env.
+    #[cfg(feature = "amnezia-wg")]
+    let (awg_peers_client, awg_peers_config) = if settings.awg_peers.enabled {
+        let raw_config = AmneziaWgServerConfig::from_file(&settings.awg_peers.path)?;
+        let mut awg: AmneziaWgSettings = raw_config.try_into()?;
+        awg.keepalive = settings.awg_peers.keepalive;
+
+        debug!(
+            "amneziawg peers: iface {}, {:?}:{}, mtu {:?}",
+            awg.interface.interface,
+            awg.interface.address,
+            awg.interface.listen_port,
+            awg.interface.mtu
+        );
+
+        let client = AwgInterface::connect(awg.interface.interface.clone()).map_err(|e| {
+            Error::Custom(format!(
+                "Cannot connect to AWG peers interface '{}': {}. Bring it up with \
+                 `awg-quick up <iface>` first.",
+                awg.interface.interface, e
+            ))
+        })?;
+        let _device = client.get_device().map_err(|e| {
+            Error::Custom(format!(
+                "AWG peers interface '{}' is not usable: {}. Bring it up with \
+                 `awg-quick up <iface>` first.",
+                awg.interface.interface, e
+            ))
+        })?;
+
+        if let Some(ref obf) = awg.obfuscation {
+            client.set_obfuscation_params(obf).map_err(|e| {
+                Error::Custom(format!("Cannot configure AWG peers obfuscation: {}", e))
+            })?;
+        }
+
+        (Some(client), Some(awg))
+    } else {
+        (None, None)
+    };
+
+    #[cfg(feature = "wireguard")]
+    let (wg_peers_client, wg_peers_config) = if settings.wg_peers.enabled {
+        let raw_config = WireguardServerConfig::from_file(&settings.wg_peers.path)?;
+        let mut wg: WireguardSettings = raw_config.try_into()?;
+        wg.keepalive = settings.wg_peers.keepalive;
+        debug!(
+            "wireguard peers: iface {}, {}:{}",
+            wg.interface, wg.address, wg.port
+        );
+        let client = WgApi::new(&wg.interface).map_err(|e| {
+            Error::Custom(format!(
+                "Cannot connect to WG peers interface '{}': {}",
+                wg.interface, e
+            ))
+        })?;
+        client.validate().map_err(|e| {
+            Error::Custom(format!(
+                "WG peers interface '{}' is not usable: {}. Bring it up with \
+                 `wg-quick up <iface>` first.",
+                wg.interface, e
+            ))
+        })?;
+        (Some(client), Some(wg))
+    } else {
+        (None, None)
+    };
+
     // Init Hysteria2
     let h2_config = if settings.h2.enabled {
         match Hysteria2Settings::from_file(&settings.h2.path) {
@@ -261,6 +349,10 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         awg_config,
         #[cfg(feature = "amnezia-wg")]
         awg_mobile_config,
+        #[cfg(feature = "amnezia-wg")]
+        awg_peers_config,
+        #[cfg(feature = "wireguard")]
+        wg_peers_config,
         h2_config,
         mtproto_config,
     );
@@ -268,7 +360,12 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     let topic_init: Topic = settings.node.env.clone().into();
     let topic_updates: Topic = settings.node.uuid.into();
 
-    let topics = vec![topic_updates, topic_init];
+    // Peer topics are separate from the connection stream: a node of the env
+    // applies every peer change, and its own `peers-init-<uuid>` is the
+    // authoritative full set it prunes against.
+    let mut topics = vec![topic_updates, topic_init];
+    topics.push(Topic::PeersUpdates(settings.node.env.clone()));
+    topics.push(Topic::PeersInit(settings.node.uuid));
 
     tracing::debug!("Topics to connect {:?}", topics);
     let subscriber = Subscriber::new(&settings.service.updates_endpoint_zmq, topics)?;
@@ -295,6 +392,10 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         awg_client.clone(),
         #[cfg(feature = "amnezia-wg")]
         awg_mobile_client.clone(),
+        #[cfg(feature = "amnezia-wg")]
+        awg_peers_client.clone(),
+        #[cfg(feature = "wireguard")]
+        wg_peers_client.clone(),
     ));
 
     let metrics_endpoint = settings.metrics.endpoint.clone();
@@ -307,6 +408,7 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
             env: settings.node.env.to_string(),
             pool: settings.node.pool.clone(),
         })
+        .with_peers(node.peers.clone())
         .with_wake(node.snapshot_wake.clone());
 
     let metrics_server_handle = if metrics_enabled {
@@ -335,6 +437,9 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     if Path::new(&snapshot_manager.snapshot_path).exists() {
         match snapshot_manager.load_snapshot().await {
             Ok(Some(meta)) => {
+                // Peers come from the same file; program them now, the api
+                // prunes the stale ones on registration.
+                node.restore_peers_from_mirror().await;
                 // The snapshot is only worth applying if its per-tag counts
                 // still match what the api would send: a file that no longer
                 // describes reality used to be applied as-is, and the node then
@@ -376,10 +481,7 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                                     meta.counts.values().sum::<u64>()
                                 );
                             } else {
-                                warn!(
-                                    "snapshot rejected: {:?} -> full resync from api",
-                                    bad
-                                );
+                                warn!("snapshot rejected: {:?} -> full resync from api", bad);
                                 accepted = false;
                             }
                         }
@@ -484,9 +586,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         let token = settings.api.token.clone();
         let cfg = settings.snapshot.clone();
         tasks.push(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(
-                cfg.drift_check_sec.max(60),
-            ));
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(cfg.drift_check_sec.max(60)));
             interval.tick().await;
             loop {
                 interval.tick().await;
@@ -512,7 +613,8 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                     let mut out: std::collections::BTreeMap<String, u64> =
                         std::collections::BTreeMap::new();
                     for (_, conn) in mem.iter() {
-                        *out.entry(format!("{:?}", conn.get_proto().proto())).or_insert(0) += 1;
+                        *out.entry(format!("{:?}", conn.get_proto().proto()))
+                            .or_insert(0) += 1;
                     }
                     out
                 };
@@ -529,10 +631,7 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                         node.node.uuid,
                         "snapshot.divergence_ratio",
                         divergence_ratio(local, api_n),
-                        std::collections::BTreeMap::from([(
-                            "tag".to_string(),
-                            tag_name.clone(),
-                        )]),
+                        std::collections::BTreeMap::from([("tag".to_string(), tag_name.clone())]),
                     );
                     match by_name.get(&tag_name) {
                         Some(tag) => {
@@ -636,11 +735,7 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                                     .await
                                 {
                                     Ok(SyncOutcome::Applied { count }) => {
-                                        let keep = node
-                                            .full_sync
-                                            .lock()
-                                            .await
-                                            .finish(*tag, count);
+                                        let keep = node.full_sync.lock().await.finish(*tag, count);
                                         match keep {
                                             Some(keep) => {
                                                 if let Err(e) = node.prune_tag(*tag, &keep).await {
@@ -817,4 +912,43 @@ fn divergence_ratio(local: u64, api: u64) -> f64 {
         return 0.0;
     }
     (local.abs_diff(api) as f64) / (api as f64)
+}
+
+impl<C> Node<C>
+where
+    C: ConnectionBaseOperations + Send + Sync + Clone + 'static + From<fcore::BaseConnection>,
+{
+    /// Program the peer interfaces from the snapshot mirror.
+    ///
+    /// The mirror is filled by `SnapshotManager::load_snapshot` from the same
+    /// rkyv file that carries the connections, so a restart brings tunnels up
+    /// before the api answers. The api then pushes the authoritative set and
+    /// the node prunes whatever it did not list — a tunnel revoked while the
+    /// node was down dies there, not here.
+    pub async fn restore_peers_from_mirror(&self) {
+        let peers: Vec<fcore::SnapshotPeer> = {
+            let mirror = self.peers.read().await;
+            mirror.values().cloned().collect()
+        };
+        if peers.is_empty() {
+            return;
+        }
+
+        let mut restored = 0usize;
+        for peer in &peers {
+            let msg = fcore::PeerMessage {
+                peer_id: peer.peer_id,
+                action: fcore::Action::Create,
+                tag: peer.tag,
+                public_key: peer.public_key.clone(),
+                address: peer.address.clone(),
+                subscription_id: peer.subscription_id,
+            };
+            match self.apply_peer(&msg).await {
+                Ok(()) => restored += 1,
+                Err(e) => warn!("peers snapshot: cannot restore {}: {}", peer.public_key, e),
+            }
+        }
+        info!("peers snapshot: restored {} tunnels", restored);
+    }
 }

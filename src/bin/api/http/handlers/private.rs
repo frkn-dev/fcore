@@ -352,10 +352,7 @@ mod refresh_env_tests {
     /// Новая нода без строки в базе: только персональный env.
     #[test]
     fn unknown_node_must_ask_for_personal_env() {
-        assert_eq!(
-            refresh_env(None, &Env::Dev),
-            Err("personal env required")
-        );
+        assert_eq!(refresh_env(None, &Env::Dev), Err("personal env required"));
         let env = personal("a");
         assert_eq!(refresh_env(None, &env), Ok(env));
     }
@@ -366,11 +363,7 @@ mod refresh_env_tests {
 /// Теги обязаны совпадать с тегами настоящих heartbeat от агента: ключ серии
 /// в MetricStorage — хеш (имя + теги), и пустой набор тегов создавал вторую,
 /// навсегда замороженную серию `sys.heartbeat` рядом с живой.
-fn note_heartbeat(
-    metrics: &MetricStorage,
-    node_id: Uuid,
-    tags: BTreeMap<String, String>,
-) {
+fn note_heartbeat(metrics: &MetricStorage, node_id: Uuid, tags: BTreeMap<String, String>) {
     metrics.insert_envelope(MetricEnvelope {
         node_id,
         name: "sys.heartbeat".to_string(),
@@ -552,7 +545,9 @@ where
             // Own nodes are a right, not a plan: a paid account may have it too.
             let limit = sub.own_nodes_limit();
             if limit <= 0 {
-                return Ok(super::share::forbidden("own nodes are not enabled for this account"));
+                return Ok(super::share::forbidden(
+                    "own nodes are not enabled for this account",
+                ));
             }
             let used = mem
                 .nodes
@@ -1550,7 +1545,9 @@ where
         let mem = memory.memory.read().await;
         if let Some(owner) = mem.subscriptions.find_by_id(&owner_id) {
             if !owner.can_resell() {
-                return Ok(super::share::forbidden("resell is not enabled for this account"));
+                return Ok(super::share::forbidden(
+                    "resell is not enabled for this account",
+                ));
             }
         }
     }

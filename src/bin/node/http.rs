@@ -263,7 +263,10 @@ where
         let status = res.status();
         if !status.is_success() {
             let text = res.text().await.unwrap_or_default();
-            return Err(Error::Custom(format!("drift report: {} - {}", status, text)));
+            return Err(Error::Custom(format!(
+                "drift report: {} - {}",
+                status, text
+            )));
         }
         Ok(())
     }

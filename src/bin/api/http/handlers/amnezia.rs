@@ -381,6 +381,8 @@ fn inbound_label(tag: Tag) -> &'static str {
         Tag::Hysteria2 => "Hysteria2",
         Tag::Mtproto => "MTProto",
         Tag::Vmess => "VMess",
+        Tag::AmneziaPeer => "AmneziaWG (peer)",
+        Tag::WireguardPeer => "WireGuard (peer)",
     }
 }
 
@@ -1706,6 +1708,30 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
     Connection: From<C>,
 {
+    // Grants, when present, decide what this subscription may be served: a
+    // subscription with rights is no longer served from the product catalogue.
+    // An expired grant serves nothing — its connections are pruned like any
+    // other expired one.
+    let grants = memory.db.peers().grants(*sub_id).await.unwrap_or_default();
+    let allowed: Option<std::collections::HashSet<(fcore::Env, fcore::Tag)>> = if grants.is_empty()
+    {
+        None
+    } else {
+        let now = chrono::Utc::now();
+        Some(
+            grants
+                .iter()
+                .filter(|g| g.expires_at.is_none_or(|at| at > now))
+                .flat_map(|g| {
+                    g.protos
+                        .iter()
+                        .filter(|p| !p.is_peer())
+                        .map(move |p| (g.env.clone(), *p))
+                })
+                .collect(),
+        )
+    };
+
     let mem = memory.memory.read().await;
 
     let sub = match mem.subscriptions.find_by_id(sub_id) {
@@ -1765,6 +1791,13 @@ where
             continue;
         }
         let conn_tag = conn.get_proto().proto();
+        // Rights first: no grant for this env+protocol means no config, even
+        // if the row still exists in `connections`.
+        if let Some(allowed) = &allowed {
+            if !allowed.contains(&(conn.get_env(), conn_tag)) {
+                continue;
+            }
+        }
         // Traffic mode: protocols without per-connection accounting are unservable.
         if traffic_mode && !conn_tag.is_metered(metered_conns) {
             continue;
@@ -2073,7 +2106,15 @@ where
     // Событие подключения пишем ДО сборки ответа: клиент ждёт обычный
     // конфиг, и сбой записи не должен его ломать (ошибка только в журнал).
     if req.is_connect_event {
-        record_connect_event(&req, &sub_id, service_protocol, &memory, remote, x_forwarded_for.as_deref()).await;
+        record_connect_event(
+            &req,
+            &sub_id,
+            service_protocol,
+            &memory,
+            remote,
+            x_forwarded_for.as_deref(),
+        )
+        .await;
     }
 
     let params = GatewayConfigParams {
@@ -2496,27 +2537,27 @@ mod tests {
     fn contract_sample_pool_card() {
         // EU Рилзопровод как есть: 6 нод, 10 адресов, у всех 443.
         let eu = [
-            node_with_ips(1, "177.177.20.172", &[], 443),                        // at
+            node_with_ips(1, "177.177.20.172", &[], 443), // at
             node_with_ips(2, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443), // ee
             node_with_ips(
                 3,
                 "185.156.108.232",
                 &["185.156.108.232", "45.137.42.16"],
                 443,
-            ),                                                                    // eu01
-            node_with_ips(4, "138.124.113.88", &[], 443),                         // eu02
+            ), // eu01
+            node_with_ips(4, "138.124.113.88", &[], 443), // eu02
             node_with_ips(
                 5,
                 "109.120.178.116",
                 &["109.120.178.116", "77.221.152.88"],
                 443,
-            ),                                                                    // fr
+            ), // fr
             node_with_ips(
                 6,
                 "195.133.80.155",
                 &["195.133.80.155", "195.133.80.156"],
                 443,
-            ),                                                                    // pl
+            ), // pl
         ];
         let members: Vec<&fcore::Node> = eu.iter().collect();
         let ports = node_ports_of_members(&members, Tag::Wireguard);
@@ -2891,7 +2932,11 @@ mod tests {
 
         // тот же состав и адреса, но другой ключ на второй ноде
         let mut b2 = b.clone();
-        if let Some(wg) = b2.inbounds.get_mut(&Tag::Wireguard).and_then(|i| i.wg.as_mut()) {
+        if let Some(wg) = b2
+            .inbounds
+            .get_mut(&Tag::Wireguard)
+            .and_then(|i| i.wg.as_mut())
+        {
             wg.keys = WgKeys {
                 privkey: WgKeys::default().privkey,
             };
@@ -3338,7 +3383,6 @@ mod mobile_proto_tests {
     }
 }
 
-
 // ============================================================================
 // NODE LOAD (`POST /v1/nodes/load`)
 // ============================================================================
@@ -3687,7 +3731,10 @@ mod load_tests {
     fn score_takes_the_worst_term() {
         // Bandwidth is the binding constraint: the mix must not water it down.
         let score = node_load_score(Some(0.9), Some(0.1), Some(0.1), 0.85).unwrap();
-        assert_eq!(score, 1.0, "0.9 is above the threshold and must read as 1.0");
+        assert_eq!(
+            score, 1.0,
+            "0.9 is above the threshold and must read as 1.0"
+        );
 
         let score = node_load_score(Some(0.5), Some(0.1), Some(0.1), 0.85).unwrap();
         assert!((score - 0.5).abs() < 1e-9);
@@ -3696,7 +3743,10 @@ mod load_tests {
     #[test]
     fn score_mixes_connections_and_cpu() {
         let score = node_load_score(None, Some(0.5), Some(0.5), 0.85).unwrap();
-        assert!((score - 0.5).abs() < 1e-9, "0.6*0.5 + 0.4*0.5 = 0.5, got {score}");
+        assert!(
+            (score - 0.5).abs() < 1e-9,
+            "0.6*0.5 + 0.4*0.5 = 0.5, got {score}"
+        );
 
         // Without one of the terms the other is used as is, not diluted by zero.
         let score = node_load_score(None, Some(0.4), None, 0.85).unwrap();
@@ -3734,7 +3784,10 @@ mod load_tests {
         // A pool of several nodes collapses into one card: the client has the
         // addresses (`node_ips`) but only one node uuid, so it must be able to
         // ask by address.
-        let keys = parse_load_keys(&[], &["1.2.3.4".to_string(), "1.2.3.4".into(), "nope".into()]);
+        let keys = parse_load_keys(
+            &[],
+            &["1.2.3.4".to_string(), "1.2.3.4".into(), "nope".into()],
+        );
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].as_str(), "1.2.3.4");
 
@@ -3776,7 +3829,10 @@ mod load_tests {
         });
 
         let util = node_bandwidth_util(&storage, &node_id, "eth0", 100_000_000).unwrap();
-        assert!((util - 0.4).abs() < 1e-9, "only the fresh series counts, got {util}");
+        assert!(
+            (util - 0.4).abs() < 1e-9,
+            "only the fresh series counts, got {util}"
+        );
 
         // Tunnel traffic must not be counted twice: awg0 carries the same bytes
         // as eth0, so only the default interface is read.
@@ -3788,7 +3844,10 @@ mod load_tests {
             tags: BTreeMap::new(),
         });
         let util = node_bandwidth_util(&storage, &node_id, "eth0", 100_000_000).unwrap();
-        assert!((util - 0.4).abs() < 1e-9, "awg0 must not be added, got {util}");
+        assert!(
+            (util - 0.4).abs() < 1e-9,
+            "awg0 must not be added, got {util}"
+        );
 
         storage.insert_envelope(MetricEnvelope {
             node_id,

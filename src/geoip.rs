@@ -62,11 +62,7 @@ pub fn init(
         _ => None,
     };
     // Проиграв гонку, второй инициализатор просто выходит.
-    let _ = DB.set(GeoDb {
-        asn,
-        country,
-        city,
-    });
+    let _ = DB.set(GeoDb { asn, country, city });
     Ok(())
 }
 
@@ -117,10 +113,7 @@ pub fn lookup_full(ip: IpAddr) -> GeoDetails {
                     .and_then(|n| n.get("en").copied())
                     .map(|s| s.to_string())
                     .filter(|s| !s.trim().is_empty());
-                let country = c
-                    .country
-                    .and_then(|c| c.iso_code)
-                    .map(|s| s.to_string());
+                let country = c.country.and_then(|c| c.iso_code).map(|s| s.to_string());
                 (city, country)
             }
             Err(_) => (None, None),

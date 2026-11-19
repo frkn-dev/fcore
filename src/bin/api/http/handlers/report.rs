@@ -9,9 +9,9 @@
 //! пустым (DNS не ответил) — это валидный и самый информативный отчёт.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use sha2::{Digest, Sha256};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use warp::{Rejection, Reply};
@@ -325,7 +325,11 @@ fn app_fields(app: &Option<Value>) -> (String, String, Option<String>) {
 /// Первая строка — базовая (она несёт `probe` и `session` целиком), остальные
 /// — только адрес/порт/состояние/задержка. Так отчёт пула из 7 адресов даёт
 /// 7 строк с одним `batch_id`, и дашборд может сказать «доступно 5 из 7».
-fn expand_probe_endpoints(row: &Observation, probe: &Option<Value>, batch_id: uuid::Uuid) -> Vec<Observation> {
+fn expand_probe_endpoints(
+    row: &Observation,
+    probe: &Option<Value>,
+    batch_id: uuid::Uuid,
+) -> Vec<Observation> {
     let mut out = vec![row.clone()];
     let Some(list) = probe
         .as_ref()
@@ -356,12 +360,13 @@ fn expand_probe_endpoints(row: &Observation, probe: &Option<Value>, batch_id: uu
             .get("state")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let ms = entry
-            .get("ms")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32);
+        let ms = entry.get("ms").and_then(|v| v.as_i64()).map(|v| v as i32);
         let mut extra = Vec::new();
-        if entry.get("in_use").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if entry
+            .get("in_use")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             extra.push("в работе");
         }
         if entry
@@ -1134,12 +1139,7 @@ where
     // этого в дашборде «отчёт» выглядел как одна цель без статуса.
     let rows = expand_probe_endpoints(&row, &req.report.probe, batch_id);
 
-    match memory
-        .db
-        .report()
-        .insert_batch(batch_id, &rows)
-        .await
-    {
+    match memory.db.report().insert_batch(batch_id, &rows).await {
         Ok(true) => Ok(accepted(serde_json::json!({
             "id": row.id,
             "dedup": false,
@@ -1423,7 +1423,12 @@ where
             .and_then(|v| v.as_str())
             .and_then(|v| uuid::Uuid::parse_str(v).ok());
         let attempts = match id {
-            Some(id) => memory.db.report().list_attempts(id).await.unwrap_or_default(),
+            Some(id) => memory
+                .db
+                .report()
+                .list_attempts(id)
+                .await
+                .unwrap_or_default(),
             None => Vec::new(),
         };
         if let Some(obj) = report.as_object_mut() {
@@ -1498,19 +1503,19 @@ where
             // дашборде было видно «EU Рилзопровод, доступно 5 из 7».
             let grouped = group_observations(rows.clone(), &memory).await;
             Ok(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "status": 200,
-                "response": {
-                    "subscription": subscription,
-                    "address": address,
-                    "count": rows.len(),
-                    "reports": grouped,
-                    "observations": rows,
-                }
-            })),
-            warp::http::StatusCode::OK,
-        )
-        .into_response())
+                warp::reply::json(&serde_json::json!({
+                    "status": 200,
+                    "response": {
+                        "subscription": subscription,
+                        "address": address,
+                        "count": rows.len(),
+                        "reports": grouped,
+                        "observations": rows,
+                    }
+                })),
+                warp::http::StatusCode::OK,
+            )
+            .into_response())
         }
         Err(err) => {
             tracing::error!("report observations failed: {err}");
@@ -1666,14 +1671,24 @@ where
         return Ok(json_status(401, "unauthorized"));
     }
 
-    let subscription = match query.subscription.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    let subscription = match query
+        .subscription
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         Some(raw) => match raw.parse::<uuid::Uuid>() {
             Ok(v) => Some(v),
             Err(_) => return Ok(json_status(400, "invalid_subscription")),
         },
         None => None,
     };
-    let support_tag = match query.support_tag.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    let support_tag = match query
+        .support_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         Some(raw) => match raw.parse::<uuid::Uuid>() {
             Ok(v) => Some(v),
             Err(_) => return Ok(json_status(400, "invalid_support_tag")),
@@ -1871,9 +1886,16 @@ mod tests {
         // базовая (185.156.108.232) + два валидных адреса; «не-ip» отброшен,
         // а совпадающий с target адрес не дублируется
         assert_eq!(rows.len(), 3, "строк: {}", rows.len());
-        assert_eq!(rows[0].session["rtt_ms_avg"], 93, "первая строка несёт session");
+        assert_eq!(
+            rows[0].session["rtt_ms_avg"], 93,
+            "первая строка несёт session"
+        );
 
-        let by_ip = |ip: &str| rows.iter().find(|r| r.address == Some(ip.parse().unwrap())).unwrap();
+        let by_ip = |ip: &str| {
+            rows.iter()
+                .find(|r| r.address == Some(ip.parse().unwrap()))
+                .unwrap()
+        };
         assert_eq!(by_ip("109.120.178.116").state.as_deref(), Some("timeout"));
         let ok = by_ip("138.124.113.88");
         assert_eq!(ok.state.as_deref(), Some("ok"));
@@ -2134,10 +2156,8 @@ mod tests {
     /// Разбор таргетов: битые записи отбрасываются, годные остаются.
     #[test]
     fn targets_parse_and_reject_broken_entries() {
-        let targets: Vec<TargetEntry> = serde_json::from_value(
-            body(RICH_PROBE).get("targets").unwrap().clone(),
-        )
-        .unwrap();
+        let targets: Vec<TargetEntry> =
+            serde_json::from_value(body(RICH_PROBE).get("targets").unwrap().clone()).unwrap();
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].state.as_deref(), Some("unknown"));
         assert_eq!(targets[1].state.as_deref(), Some("ok"));
@@ -2187,16 +2207,18 @@ mod tests {
         // и словари не пересекаются — иначе одна строка попадёт в два счётчика
         for state in OK_STATES {
             assert!(!FAIL_STATES.contains(state), "{state} в двух словарях");
-            assert!(!INCONCLUSIVE_STATES.contains(state), "{state} в двух словарях");
+            assert!(
+                !INCONCLUSIVE_STATES.contains(state),
+                "{state} в двух словарях"
+            );
         }
     }
 
     /// Тело без таргетов, цели и попыток — не отчёт (при валидном id).
     #[test]
     fn empty_report_is_rejected() {
-        let empty = body(
-            r#"{"report_id":"7d9c1f7e-0000-4000-8000-000000000002","support_tag":"x"}"#,
-        );
+        let empty =
+            body(r#"{"report_id":"7d9c1f7e-0000-4000-8000-000000000002","support_tag":"x"}"#);
         let has_target = empty.get("target").map(|v| !v.is_null()).unwrap_or(false);
         let targets: Vec<TargetEntry> = empty
             .get("targets")
@@ -2219,7 +2241,10 @@ mod tests {
         let sub = uuid::Uuid::from_u128(0x5150);
         let ip: IpAddr = "5.18.0.1".parse().unwrap();
 
-        for (name, raw) in [("tunnel off (probes)", RICH_PROBE), ("tunnel on", RICH_TUNNEL)] {
+        for (name, raw) in [
+            ("tunnel off (probes)", RICH_PROBE),
+            ("tunnel on", RICH_TUNNEL),
+        ] {
             let parsed = parse_rich_report(&body(raw), Some(sub), ip).unwrap();
             println!("\n=== {name} ===");
             println!(
@@ -2334,13 +2359,9 @@ mod tests {
         let first = parse_rich_report(&body(RICH_PROBE), Some(sub), ip).unwrap();
         let second = parse_rich_report(&body(RICH_PROBE), Some(sub), ip).unwrap();
         assert_eq!(first.report.id, second.report.id);
-        let ids = |p: &RichParsed| {
-            p.attempts.iter().map(|a| a.id).collect::<Vec<_>>()
-        };
+        let ids = |p: &RichParsed| p.attempts.iter().map(|a| a.id).collect::<Vec<_>>();
         assert_eq!(ids(&first), ids(&second));
-        let obs = |p: &RichParsed| {
-            p.observations.iter().map(|o| o.id).collect::<Vec<_>>()
-        };
+        let obs = |p: &RichParsed| p.observations.iter().map(|o| o.id).collect::<Vec<_>>();
         assert_eq!(obs(&first), obs(&second));
     }
 

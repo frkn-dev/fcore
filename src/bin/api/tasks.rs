@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rand::Rng;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -467,6 +467,17 @@ where
                         continue;
                     }
                 };
+
+                let conns_map =
+                    match crate::access::conns_map_for(&self.sync.db, sub_id, conns_map.clone())
+                        .await
+                    {
+                        Ok(map) => map,
+                        Err(e) => {
+                            error!("reconcile: cannot read grants for {}: {}", sub_id, e);
+                            continue;
+                        }
+                    };
 
                 ensure_enabled_connections(
                     sub_id,
@@ -1319,6 +1330,91 @@ where
                     tracing::error!("Failed to update node {} status: {:?}", node_id, e);
                 } else {
                     tracing::info!("Node {} status changed to {:?}", node_id, new_status);
+                }
+            }
+        }
+    }
+}
+
+impl<N, C, S> Service<N, C, S>
+where
+    N: NodeStorageOperations + Send + Sync + Clone + 'static + std::default::Default,
+    C: ConnectionBaseOperations
+        + ConnectionApiOperations
+        + Send
+        + Sync
+        + Clone
+        + 'static
+        + PartialEq
+        + From<Connection>
+        + Into<Connection>,
+    S: SubscriptionOperations
+        + Send
+        + Sync
+        + Clone
+        + 'static
+        + PartialEq
+        + From<Subscription>
+        + std::default::Default,
+    Connection: From<C>,
+    Vec<(uuid::Uuid, Connection)>: FromIterator<(uuid::Uuid, C)>,
+{
+    /// Persist peer traffic into `peer_traffic`.
+    ///
+    /// Peers have no watermark table: the window is simply "since the last
+    /// tick", kept in memory. A restart therefore re-reads at most one
+    /// interval (bounded by `interval_sec`), which is cheaper than a table
+    /// write per peer per tick and never double counts persisted data.
+    pub async fn persist_peer_traffic(&self, interval_sec: u64) {
+        use std::collections::HashMap;
+
+        let mut interval_timer = tokio::time::interval(Duration::from_secs(interval_sec.max(5)));
+        let mut watermarks: HashMap<uuid::Uuid, DateTime<Utc>> = HashMap::new();
+
+        loop {
+            interval_timer.tick().await;
+            let now = Utc::now();
+
+            let peers = match self.sync.db.peers().all_live_peers().await {
+                Ok(peers) => peers,
+                Err(e) => {
+                    error!("Failed to load peers for traffic persist: {}", e);
+                    continue;
+                }
+            };
+
+            for peer in peers {
+                let from = watermarks
+                    .get(&peer.id)
+                    .copied()
+                    .unwrap_or(now - chrono::Duration::seconds(interval_sec as i64));
+                if from >= now {
+                    continue;
+                }
+                let (uplink, downlink) = self.metrics.get_peer_delta_traffic(
+                    &peer.id,
+                    from.timestamp_millis(),
+                    now.timestamp_millis(),
+                );
+                watermarks.insert(peer.id, now);
+                if uplink == 0 && downlink == 0 {
+                    continue;
+                }
+                if let Err(e) = self
+                    .sync
+                    .db
+                    .peers()
+                    .upsert_peer_traffic(
+                        peer.id,
+                        peer.subscription_id,
+                        &peer.env,
+                        crate::traffic::day_start(now),
+                        uplink as i64,
+                        downlink as i64,
+                    )
+                    .await
+                {
+                    error!("Failed to persist traffic of peer {}: {}", peer.id, e);
                 }
             }
         }

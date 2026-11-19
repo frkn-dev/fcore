@@ -310,6 +310,24 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    // Grants, when present, are the only entitlement: a subscription with
+    // rights must not receive a connection the payer did not buy.
+    if let Some(sub_id) = subscription_id {
+        if let Ok(grants) = memory.db.peers().grants(sub_id).await {
+            if !grants.is_empty() {
+                let now = chrono::Utc::now();
+                let granted = grants.iter().any(|g| {
+                    g.env == *env
+                        && g.protos.contains(&proto)
+                        && g.expires_at.is_none_or(|at| at > now)
+                });
+                if !granted {
+                    return Err("subscription has no grant for this env and protocol".to_string());
+                }
+            }
+        }
+    }
+
     let expired_at: Option<DateTime<Utc>> =
         days.map(|d| Utc::now() + chrono::Duration::days(d.into()));
 
@@ -408,6 +426,12 @@ where
         Tag::Mtproto => {
             let secret = utils::generate_random_password(15);
             Proto::Mtproto { secret }
+        }
+        // Peer protocols live in `peers`, not in `connections`: the client
+        // owns the key pair and the api assigns the address, so a legacy
+        // connection must never be minted for them.
+        Tag::AmneziaPeer | Tag::WireguardPeer => {
+            return Err("peer protocols are created via POST /v1/peers".to_string())
         }
     };
 

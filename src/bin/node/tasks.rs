@@ -5,7 +5,7 @@ use tokio::time::Duration;
 #[cfg(feature = "xray")]
 use tonic::Status;
 
-use fcore::{Action, BaseConnection as Connection, Message, Metrics, Topic};
+use fcore::{Action, BaseConnection as Connection, Message, Metrics, PeerMessage, Topic};
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use fcore::{ConnectionStorageBaseOperations, Proto};
 use fcore::{Error, Result, Tag};
@@ -30,6 +30,10 @@ pub trait Tasks {
     async fn handle_messages_batch(&self, msg: Vec<Message>) -> Result<()>;
     async fn handle_message(&self, msg: Message) -> Result<()>;
     async fn collect_metrics(&self);
+    /// Apply a batch of peer changes. `authoritative` is set for
+    /// `peers-init-<uuid>`: after applying, peers the api did not list are
+    /// removed (that is how a revoked tunnel dies on a node that was down).
+    async fn handle_peer_batch(&self, msgs: Vec<PeerMessage>, authoritative: bool) -> Result<()>;
     /// Drop connections of `tag` that the api did not list in its full sync.
     async fn prune_tag(
         &self,
@@ -83,12 +87,45 @@ where
                     continue;
                 }
 
+                Topic::PeersUpdates(env) if env != node_env => {
+                    tracing::trace!("SUB: Skipping peers update for another env: {}", env);
+                    continue;
+                }
+
+                Topic::PeersInit(uuid) if uuid != &node_uuid => {
+                    tracing::trace!("SUB: Skipping peers init for another node: {}", uuid);
+                    continue;
+                }
+
                 _ => {
                     tracing::debug!("SUB: Accepted for processing: {:?}", topic);
                 }
             }
 
             if payload_bytes.is_empty() {
+                continue;
+            }
+
+            let is_peers = matches!(topic, Topic::PeersUpdates(_) | Topic::PeersInit(_));
+            if is_peers {
+                let peers: Option<Vec<PeerMessage>> = {
+                    let mut aligned = AlignedVec::new();
+                    aligned.extend_from_slice(&payload_bytes);
+                    match rkyv::check_archived_root::<Vec<PeerMessage>>(&aligned) {
+                        Ok(archived) => archived.deserialize(&mut Infallible).ok(),
+                        Err(e) => {
+                            tracing::error!("SUB: Invalid peers payload: {:?}", e);
+                            None
+                        }
+                    }
+                };
+                if let Some(msgs) = peers {
+                    let authoritative = matches!(topic, Topic::PeersInit(_));
+                    if let Err(err) = self.handle_peer_batch(msgs, authoritative).await {
+                        tracing::error!("SUB: Failed to apply peers: {}", err);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 continue;
             }
 
@@ -189,6 +226,62 @@ where
         // Write-through: state changed, so the file on disk must change too.
         self.snapshot_wake.notify_one();
 
+        Ok(())
+    }
+
+    async fn handle_peer_batch(&self, msgs: Vec<PeerMessage>, authoritative: bool) -> Result<()> {
+        let mut keep: std::collections::HashMap<Tag, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+
+        for msg in &msgs {
+            match msg.action {
+                Action::Create | Action::Update => {
+                    // One broken peer must not abort the batch: the rest are
+                    // valid, and the failed one is retried by the next
+                    // authoritative sync.
+                    if let Err(e) = self.apply_peer(msg).await {
+                        tracing::error!("peers: apply {} failed: {}", msg.public_key, e);
+                        continue;
+                    }
+                    self.peers.write().await.insert(
+                        msg.public_key.clone(),
+                        fcore::SnapshotPeer {
+                            peer_id: msg.peer_id,
+                            subscription_id: msg.subscription_id,
+                            tag: msg.tag,
+                            public_key: msg.public_key.clone(),
+                            address: msg.address.clone(),
+                        },
+                    );
+                }
+                Action::Delete => {
+                    if let Err(e) = self.drop_peer(msg).await {
+                        tracing::error!("peers: drop {} failed: {}", msg.public_key, e);
+                    }
+                    self.peers.write().await.remove(&msg.public_key);
+                }
+                Action::ResetStat => {}
+            }
+            keep.entry(msg.tag)
+                .or_default()
+                .insert(msg.public_key.clone());
+        }
+
+        if authoritative {
+            if let Err(e) = self.prune_peers(&keep).await {
+                tracing::error!("peers: prune failed: {}", e);
+            }
+            // Mirror the prune: a peer that is no longer on the interface must
+            // not keep reporting traffic either.
+            let listed: std::collections::HashSet<String> =
+                keep.values().flat_map(|set| set.iter().cloned()).collect();
+            self.peers
+                .write()
+                .await
+                .retain(|public_key, _| listed.contains(public_key));
+        }
+
+        self.snapshot_wake.notify_one();
         Ok(())
     }
 
@@ -569,5 +662,158 @@ where
         if self.awg_mobile_client.is_some() {
             self.collect_awg_mobile_metrics().await;
         }
+        #[cfg(feature = "amnezia-wg")]
+        if self.awg_peers_client.is_some() {
+            self.collect_peer_metrics(Tag::AmneziaPeer, "amnezia_peer")
+                .await;
+        }
+        #[cfg(feature = "wireguard")]
+        if self.wg_peers_client.is_some() {
+            self.collect_peer_metrics(Tag::WireguardPeer, "wireguard_peer")
+                .await;
+        }
+    }
+}
+
+/// Peer plane helpers: program the interface, never decide anything.
+///
+/// The api owns the address book; a node only applies (public_key, address).
+/// Every function is idempotent the way the api expects: a create that is
+/// already applied is a no-op, a delete of a missing peer is not an error.
+impl<C> Node<C>
+where
+    C: ConnectionBaseOperations + Send + Sync + Clone + 'static + From<Connection>,
+{
+    pub(crate) async fn apply_peer(&self, msg: &PeerMessage) -> Result<()> {
+        match msg.tag {
+            #[cfg(feature = "amnezia-wg")]
+            Tag::AmneziaPeer => {
+                let api = self
+                    .awg_peers_client
+                    .as_ref()
+                    .ok_or_else(|| Error::Custom("AWG peers interface is not configured".into()))?;
+                let key = AwgInterface::decode_pubkey(&msg.public_key)?;
+                let device = api.get_device().map_err(|e| {
+                    Error::Custom(format!("Failed to read AWG peers device: {}", e))
+                })?;
+                let exists = device.peers.iter().any(|p| {
+                    p.0.iter().any(|attr| {
+                        matches!(attr, AmneziaWireguardPeerAttribute::PublicKey(k) if k == &key)
+                    })
+                });
+                if exists {
+                    return Ok(());
+                }
+
+                let address: std::net::IpAddr = msg.address.parse().map_err(|_| {
+                    Error::Custom(format!("Invalid peer address '{}'", msg.address))
+                })?;
+                let peer = AmneziaWireguardPeer(vec![
+                    AmneziaWireguardPeerAttribute::PublicKey(key),
+                    AmneziaWireguardPeerAttribute::AllowedIps(vec![fcore::IpAddrMask::host(
+                        address,
+                    )
+                    .into()]),
+                ]);
+                api.add_peer(peer).map_err(|e| {
+                    Error::Custom(format!("Failed to add AWG peer via netlink: {}", e))
+                })?;
+                Ok(())
+            }
+            #[cfg(feature = "wireguard")]
+            Tag::WireguardPeer => {
+                let api = self
+                    .wg_peers_client
+                    .as_ref()
+                    .ok_or_else(|| Error::Custom("WG peers interface is not configured".into()))?;
+                if api.is_exist(msg.public_key.clone()) {
+                    return Ok(());
+                }
+                let address: std::net::IpAddr = msg.address.parse().map_err(|_| {
+                    Error::Custom(format!("Invalid peer address '{}'", msg.address))
+                })?;
+                api.create(&msg.public_key, fcore::IpAddrMask::host(address))
+            }
+            other => Err(Error::Custom(format!(
+                "peer message for a non-peer tag: {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub(crate) async fn drop_peer(&self, msg: &PeerMessage) -> Result<()> {
+        match msg.tag {
+            #[cfg(feature = "amnezia-wg")]
+            Tag::AmneziaPeer => {
+                let api = self
+                    .awg_peers_client
+                    .as_ref()
+                    .ok_or_else(|| Error::Custom("AWG peers interface is not configured".into()))?;
+                let key = AwgInterface::decode_pubkey(&msg.public_key)?;
+                // Removing a peer that is already gone is not an error: the
+                // same delete may arrive twice (grant revoke + device delete).
+                let _ = api.remove_peer(key);
+                Ok(())
+            }
+            #[cfg(feature = "wireguard")]
+            Tag::WireguardPeer => {
+                let api = self
+                    .wg_peers_client
+                    .as_ref()
+                    .ok_or_else(|| Error::Custom("WG peers interface is not configured".into()))?;
+                if api.is_exist(msg.public_key.clone()) {
+                    api.delete(&msg.public_key)?;
+                }
+                Ok(())
+            }
+            other => Err(Error::Custom(format!(
+                "peer message for a non-peer tag: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Remove every peer of the interfaces this node serves that the api did
+    /// not list. This is what makes `peers-init` authoritative: a tunnel
+    /// revoked while the node was down dies here.
+    async fn prune_peers(
+        &self,
+        keep: &std::collections::HashMap<Tag, std::collections::HashSet<String>>,
+    ) -> Result<()> {
+        use base64::Engine;
+
+        #[cfg(feature = "amnezia-wg")]
+        if let Some(api) = self.awg_peers_client.as_ref() {
+            let wanted = keep.get(&Tag::AmneziaPeer);
+            let device = api
+                .get_device()
+                .map_err(|e| Error::Custom(format!("Failed to read AWG peers device: {}", e)))?;
+            for peer in &device.peers {
+                for attr in &peer.0 {
+                    if let AmneziaWireguardPeerAttribute::PublicKey(key) = attr {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(key);
+                        let listed = wanted.is_some_and(|w| w.contains(&b64));
+                        if !listed {
+                            tracing::warn!("peers: pruning AWG peer {} (not listed)", b64);
+                            let _ = api.remove_peer(*key);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "wireguard")]
+        if let Some(api) = self.wg_peers_client.as_ref() {
+            let wanted = keep.get(&Tag::WireguardPeer);
+            for key in api.peer_pubkeys()? {
+                let listed = wanted.is_some_and(|w| w.contains(&key));
+                if !listed {
+                    tracing::warn!("peers: pruning WG peer {} (not listed)", key);
+                    let _ = api.delete(&key);
+                }
+            }
+        }
+
+        Ok(())
     }
 }

@@ -69,9 +69,8 @@ fn token_ok(expected: &Option<String>, header_token: Option<String>, auth: Optio
     if expected.is_empty() {
         return false;
     }
-    let provided = header_token.or_else(|| {
-        auth.and_then(|v| v.strip_prefix("Bearer ").map(|s| s.trim().to_string()))
-    });
+    let provided = header_token
+        .or_else(|| auth.and_then(|v| v.strip_prefix("Bearer ").map(|s| s.trim().to_string())));
     match provided {
         Some(v) => {
             // сравнение постоянного времени по длине+байтам

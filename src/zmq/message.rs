@@ -63,6 +63,23 @@ pub struct Message {
     pub subscription_id: Option<uuid::Uuid>,
 }
 
+/// One peer change for the node plane.
+///
+/// Everything the node needs to program the interface: who (public key), where
+/// (address), and which device (tag). No private key, no auth data — a node
+/// never decides anything about peers.
+#[derive(Archive, Serialize, Deserialize, SerdeSer, SerdeDes, Debug, Clone)]
+#[archive(check_bytes)]
+pub struct PeerMessage {
+    pub peer_id: uuid::Uuid,
+    pub action: Action,
+    pub tag: ProtoTag,
+    pub public_key: String,
+    /// Address as `a.b.c.d`, the node appends `/32`.
+    pub address: String,
+    pub subscription_id: Option<uuid::Uuid>,
+}
+
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(

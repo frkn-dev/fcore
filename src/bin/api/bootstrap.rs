@@ -57,6 +57,41 @@ where
             db.iap().ensure_table().await?;
         }
 
+        // Peers: seed the address blocks of each env. The table stays
+        // authoritative (the DB refuses overlaps), the config only states what
+        // this deployment serves. Seeding is skipped entirely while the feature
+        // is off, so an untouched config.toml changes nothing.
+        if settings.service.peers.enabled {
+            for (env, blocks) in &settings.service.peers.subnets {
+                for block in blocks {
+                    let mask = match block.parse::<fcore::IpAddrMask>() {
+                        Ok(mask) => mask,
+                        Err(_) => {
+                            tracing::error!(
+                                "peers: invalid subnet '{}' for env {} — skipped",
+                                block,
+                                env
+                            );
+                            continue;
+                        }
+                    };
+                    match db.peers().insert_env_block(env, &mask).await {
+                        Ok(crate::postgres::peers::Inserted::Done) => {
+                            tracing::info!("peers: {} now serves {}", env, block)
+                        }
+                        Ok(crate::postgres::peers::Inserted::Conflict) => tracing::warn!(
+                            "peers: {} {} is already taken by another env or already seeded",
+                            env,
+                            block
+                        ),
+                        Err(e) => {
+                            tracing::error!("peers: cannot seed {} for {}: {}", block, env, e)
+                        }
+                    }
+                }
+            }
+        }
+
         // Share tokens: idempotent DDL (own table + connections.issued_via).
         db.share().ensure_table().await?;
         db.conn().ensure_schema().await?;
@@ -87,6 +122,23 @@ where
         db.node().ensure_pool_column().await?;
 
         let mem = Arc::new(RwLock::new(Cache::new()));
+
+        // Peers layer into memory: handlers validate against this copy and
+        // only write to Postgres.
+        if settings.service.peers.enabled {
+            match db.peers().load_state().await {
+                Ok(state) => {
+                    tracing::info!(
+                        "peers: loaded {} tunnels across {} envs",
+                        state.peers.len(),
+                        state.env_networks.len()
+                    );
+                    mem.write().await.peers_state = state;
+                }
+                Err(e) => tracing::error!("peers: cannot load state: {}", e),
+            }
+        }
+
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;
         let mem_sync = MemSync::new(mem.clone(), db.clone(), publisher);
         let metric_storage = match MetricStorage::load_snapshot(

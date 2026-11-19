@@ -29,6 +29,16 @@ pub struct ServiceSettings {
     #[cfg(feature = "amnezia-wg")]
     #[serde(default)]
     pub awg_mobile: AmneziaWgConfig,
+    /// Peers plane: a separate AmneziaWG interface whose members are created
+    /// by the api (`peers`), not by this node. Disabled by default, so an
+    /// existing config.toml keeps running the legacy plane untouched.
+    #[cfg(feature = "amnezia-wg")]
+    #[serde(default)]
+    pub awg_peers: AmneziaWgConfig,
+    /// Peers plane over plain WireGuard (routers, Linux clients).
+    #[cfg(feature = "wireguard")]
+    #[serde(default)]
+    pub wg_peers: WgConfig,
     #[serde(default)]
     pub h2: H2Config,
     #[serde(default)]

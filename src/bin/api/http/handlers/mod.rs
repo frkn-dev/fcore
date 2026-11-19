@@ -9,15 +9,16 @@ pub mod key;
 pub mod mesh;
 pub mod metrics;
 pub mod node;
+pub mod peers;
 pub mod premium;
 pub mod premium_inventory;
-pub mod watchcat;
 pub mod private;
 pub(crate) mod report;
 pub mod score;
 pub mod share;
 pub mod subscription;
 pub(crate) mod usage;
+pub mod watchcat;
 
 use warp::http::StatusCode;
 

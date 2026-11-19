@@ -9,6 +9,7 @@ use crate::{
     service::{Cache, Service},
 };
 
+mod access;
 mod alerts;
 mod bootstrap;
 mod config;
@@ -18,6 +19,7 @@ mod http;
 mod iap;
 mod metrics;
 mod mrkting;
+mod peers;
 mod postgres;
 mod runtime;
 mod service;

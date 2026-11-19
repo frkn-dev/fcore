@@ -65,7 +65,7 @@ pub use memory::{
         DEFAULT_NODE_WEIGHT,
     },
     product::Product,
-    snapshot::{SnapshotIdentity, SnapshotManager, SnapshotMeta},
+    snapshot::{PeerMirror, SnapshotIdentity, SnapshotManager, SnapshotMeta, SnapshotPeer},
     stat::{Kind as StatKind, StatType},
     storage::{
         connection::ApiOp as ConnectionStorageApiOperations,
@@ -100,7 +100,7 @@ pub use proto::xray::{
 pub use utils::*;
 
 pub use zmq::{
-    message::{Action, Message},
+    message::{Action, Message, PeerMessage},
     publisher::Publisher,
     subscriber::Subscriber,
     topic::Topic,

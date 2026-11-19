@@ -866,7 +866,15 @@ impl PgReport {
         let rows = client
             .query(
                 &sql,
-                &[&from, &to, &address, &min_observations, &fail, &ok, &inconclusive],
+                &[
+                    &from,
+                    &to,
+                    &address,
+                    &min_observations,
+                    &fail,
+                    &ok,
+                    &inconclusive,
+                ],
             )
             .await?;
 
@@ -943,7 +951,10 @@ mod sql_shape_tests {
             .split(')')
             .next()
             .expect("конец списка колонок");
-        let cols = cols_part.split(',').filter(|c| !c.trim().is_empty()).count();
+        let cols = cols_part
+            .split(',')
+            .filter(|c| !c.trim().is_empty())
+            .count();
 
         // `$N` встречаются только в списке значений, поэтому берём весь запрос.
         let mut nums: Vec<u32> = Vec::new();
@@ -958,7 +969,12 @@ mod sql_shape_tests {
         nums.sort_unstable();
         nums.dedup();
 
-        assert_eq!(cols, nums.len(), "колонок {cols}, параметров {}", nums.len());
+        assert_eq!(
+            cols,
+            nums.len(),
+            "колонок {cols}, параметров {}",
+            nums.len()
+        );
         assert_eq!(
             nums,
             (1..=nums.len() as u32).collect::<Vec<_>>(),
@@ -1010,7 +1026,10 @@ mod sql_cast_tests {
             let after = &rest[digits.len()..];
             let after = after.trim_start();
             if let Some(cast) = after.strip_prefix("::text::") {
-                let name: String = cast.chars().take_while(|c| c.is_alphanumeric() || *c == '(' || *c == ')').collect();
+                let name: String = cast
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '(' || *c == ')')
+                    .collect();
                 casts.push((num, Box::leak(name.into_boxed_str())));
             }
         }

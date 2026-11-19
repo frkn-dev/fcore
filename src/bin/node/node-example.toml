@@ -43,6 +43,22 @@ enabled = false
 path = "/etc/amnezia-wg/awg1.conf"
 # keepalive = 25
 
+# Peers plane: a separate AmneziaWG interface whose members are created by the
+# api (POST /v1/peers), not by this node. The address comes from the api too:
+# a node here only programs what it was told. Bring the device up yourself
+# (`awg-quick up awg0-peer`) — fnode connects and refuses to start if it is
+# missing. File format is the same as [awg].
+[awg_peers]
+enabled = false
+path = "/etc/amnezia/awg0-peer.conf"
+# keepalive = 25
+
+# Same for plain WireGuard (routers, Linux clients).
+[wg_peers]
+enabled = false
+path = "/etc/wireguard/wg0-peer.conf"
+# keepalive = 25
+
 [mtproto]
 enabled = false
 path = "/opt/teleproxy/config.toml"

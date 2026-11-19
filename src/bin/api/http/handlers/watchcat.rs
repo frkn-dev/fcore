@@ -24,7 +24,10 @@ use warp::{Rejection, Reply};
 
 use crate::postgres::watchcat::WatchcatEvent;
 use crate::sync::MemSync;
-use fcore::{Connection, ConnectionApiOperations, ConnectionBaseOperations, NodeStorageOperations, Subscription, SubscriptionOperations};
+use fcore::{
+    Connection, ConnectionApiOperations, ConnectionBaseOperations, NodeStorageOperations,
+    Subscription, SubscriptionOperations,
+};
 
 fn json_status(code: u16, message: &str) -> warp::reply::Response {
     let status =
@@ -424,7 +427,10 @@ where
         "snapshot_drift"
     );
 
-    Ok(json_status(200, if notified { "notified" } else { "recorded" }))
+    Ok(json_status(
+        200,
+        if notified { "notified" } else { "recorded" },
+    ))
 }
 
 #[cfg(test)]

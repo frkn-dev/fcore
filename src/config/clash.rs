@@ -73,7 +73,10 @@ pub enum ClashProxy {
         allowed_ips: Vec<String>,
         udp: bool,
         mtu: u16,
-        #[serde(rename = "persistent-keepalive", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "persistent-keepalive",
+            skip_serializing_if = "Option::is_none"
+        )]
         persistent_keepalive: Option<u16>,
         #[serde(rename = "amnezia-wg-option", skip_serializing_if = "Option::is_none")]
         amnezia_wg_option: Option<AwgOpts>,
@@ -296,13 +299,23 @@ impl InboundClashConfig for Inbound {
                 // mihomo wants a bare address; the mask carries the prefix.
                 let client_ip = param.address.to_string();
                 let prefix = get_uuid_last_octet_simple(conn_id);
-                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
+                let name = format!(
+                    "{} [{}] {} {}",
+                    label,
+                    self.tag,
+                    prefix,
+                    short_host(_hostname)
+                );
 
                 return Some(ClashProxy::Wireguard {
                     name,
                     server: host.to_string(),
                     port,
-                    ip: client_ip.split('/').next().unwrap_or(&client_ip).to_string(),
+                    ip: client_ip
+                        .split('/')
+                        .next()
+                        .unwrap_or(&client_ip)
+                        .to_string(),
                     private_key: param.keys.privkey.clone(),
                     public_key: peer_pubkey,
                     allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
@@ -326,7 +339,13 @@ impl InboundClashConfig for Inbound {
 
                 let prefix = get_uuid_last_octet_simple(conn_id);
 
-                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
+                let name = format!(
+                    "{} [{}] {} {}",
+                    label,
+                    self.tag,
+                    prefix,
+                    short_host(_hostname)
+                );
 
                 Some(ClashProxy::Vmess {
                     name,
@@ -390,7 +409,13 @@ impl InboundClashConfig for Inbound {
                 };
 
                 let prefix = get_uuid_last_octet_simple(conn_id);
-                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
+                let name = format!(
+                    "{} [{}] {} {}",
+                    label,
+                    self.tag,
+                    prefix,
+                    short_host(_hostname)
+                );
 
                 Some(ClashProxy::Vless {
                     name,
@@ -422,7 +447,13 @@ impl InboundClashConfig for Inbound {
                     .unwrap_or_else(|| host.to_string());
 
                 let prefix = get_uuid_last_octet_simple(conn_id);
-                let name = format!("{} [{}] {} {}", label, self.tag, prefix, short_host(_hostname));
+                let name = format!(
+                    "{} [{}] {} {}",
+                    label,
+                    self.tag,
+                    prefix,
+                    short_host(_hostname)
+                );
 
                 Some(ClashProxy::Vless {
                     name,
@@ -624,10 +655,7 @@ mod tests {
     #[test]
     fn amneziawg_proxy_renders_for_mihomo() {
         let conn_id = uuid::Uuid::parse_str("6f9619ff-8b86-d011-b42d-00c04fc964ff").unwrap();
-        let param = crate::WgParam::new(crate::IpAddrMask::new(
-            "10.8.0.42".parse().unwrap(),
-            32,
-        ));
+        let param = crate::WgParam::new(crate::IpAddrMask::new("10.8.0.42".parse().unwrap(), 32));
         let conn = Connection::new(&Env::Ru, None, Proto::new_awg_mobile(&param), None);
 
         let proxy = awg_inbound()
@@ -680,10 +708,22 @@ mod tests {
         let conn = Connection::new(&Env::Ru, None, Proto::new_awg_mobile(&param), None);
 
         let a = awg_inbound()
-            .proxy(&conn_id, &conn, "tw-ru-msk-core-01.example", "1.1.1.1", "RU")
+            .proxy(
+                &conn_id,
+                &conn,
+                "tw-ru-msk-core-01.example",
+                "1.1.1.1",
+                "RU",
+            )
             .unwrap();
         let b = awg_inbound()
-            .proxy(&conn_id, &conn, "vdska-ru-msk-core-01.example", "2.2.2.2", "RU")
+            .proxy(
+                &conn_id,
+                &conn,
+                "vdska-ru-msk-core-01.example",
+                "2.2.2.2",
+                "RU",
+            )
             .unwrap();
 
         let (na, nb) = match (&a, &b) {
@@ -696,5 +736,4 @@ mod tests {
         assert!(na.ends_with("tw-ru-msk-core-01"));
         assert!(nb.ends_with("vdska-ru-msk-core-01"));
     }
-
 }

@@ -190,6 +190,14 @@ impl WgApi {
             .unwrap_or(false)
     }
 
+    /// Every peer of the interface, as base64 public keys. Used by the peers
+    /// plane to prune what the api no longer lists.
+    pub fn peer_pubkeys(&self) -> Result<Vec<String>> {
+        let data = self.client.read_interface_data()?;
+        // `Key` renders itself as base64, the same form the api stores.
+        Ok(data.peers.keys().map(|key| key.to_string()).collect())
+    }
+
     pub fn delete(&self, pubkey: &str) -> Result<()> {
         let key = Self::decode_pubkey(pubkey)?;
         self.client.remove_peer(&key)?;

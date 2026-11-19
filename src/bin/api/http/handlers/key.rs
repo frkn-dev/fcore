@@ -169,6 +169,22 @@ fn is_valid_activation_email(email: Option<&str>) -> bool {
 /// expires_at NULL and connections from lite_enabled_conns (falling back to
 /// enabled_conns). Email is optional: when present, it is bound to the
 /// subscription via mrkting.
+/// Which activation a caller wants.
+///
+/// Both flows create the subscription the same way; they differ in how access
+/// is granted. Keeping them behind two endpoints means the cutover is a change
+/// on the site (a URL), not a config flag and not a restart — and rolling back
+/// is pointing the site at the old URL again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationFlow {
+    /// Product catalogue + `subscription.expires_at` (the model we are
+    /// draining). Never writes grants.
+    Legacy,
+    /// Shards and grants: the api picks an env, writes `subscription_access`,
+    /// and there is no fallback — a payer without a live shard is quarantined.
+    Peers,
+}
+
 pub async fn post_activate_key_handler<N, C, S>(
     req: ActivateKeyReq,
     trace_id_header: Option<String>,
@@ -178,6 +194,7 @@ pub async fn post_activate_key_handler<N, C, S>(
     awg_mobile_network: Option<fcore::IpAddrMask>,
     resolver: crate::entitlements::ConnResolver,
     mrkting: Option<crate::config::MrktingConfig>,
+    flow: ActivationFlow,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -211,7 +228,7 @@ where
         KeyKind::Standard => PlanKind::Standard,
         KeyKind::Lite => PlanKind::Lite,
     };
-    let conns_map = match resolver.resolve(key_plan_kind, key.product) {
+    let catalog_map = match resolver.resolve(key_plan_kind, key.product) {
         Ok(map) => map,
         Err(err) => {
             error!("Cannot activate key {}: {}", key.id, err);
@@ -326,6 +343,148 @@ where
         }
     };
 
+    // Shard assignment happens before the key is consumed: a paid key must
+    // not burn because the api has nowhere to put the user. A renewal keeps
+    // the shard it already has (sticky by plan) and never fails here.
+    // Assignment kicks in only once the plan declares shards in
+    // `env_capacity`: before that the feature is not rolled out and activation
+    // keeps the legacy path. Once declared, a plan with no live shard is a
+    // hard stop (the payer is quarantined instead of silently unserved).
+    let plan = key.product.to_string();
+    let declared_shards = memory
+        .db
+        .peers()
+        .plan_shards(&plan)
+        .await
+        .unwrap_or_default();
+    if flow == ActivationFlow::Peers && declared_shards.is_empty() {
+        // Not a single shard is declared for this plan: serving is impossible
+        // and the payer must not be charged for our planning gap.
+        let _ = memory
+            .db
+            .peers()
+            .record_activation_failure(
+                key.id,
+                &key.code,
+                &plan,
+                &plan,
+                "plan_not_configured",
+                Some(sub_id),
+            )
+            .await;
+        error!(
+            "activation blocked: plan '{}' has no shards in env_capacity (key {:?})",
+            plan, key.code
+        );
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&fcore::http::ResponseMessage::<Option<uuid::Uuid>> {
+                status: 503,
+                message: "Сейчас нет доступных серверов. Напишите в поддержку — ключ не потрачен."
+                    .to_string(),
+                response: None,
+            }),
+            warp::http::StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+
+    if flow == ActivationFlow::Peers {
+        let protos: Vec<fcore::Tag> = catalog_map
+            .as_ref()
+            .map(|map| {
+                map.values()
+                    .flatten()
+                    .copied()
+                    .filter(|tag| !tag.is_peer())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !protos.is_empty() {
+            let expires_at = memory
+                .db
+                .sub()
+                .find(&sub_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.expires_at());
+            // TODO: thread `peers.subscriptions_per_node` from settings; until
+            // then the documented default is used here.
+            let shards = crate::http::handlers::peers::live_shards(&memory, &plan, 100).await;
+            match memory
+                .db
+                .peers()
+                .assign_grant(
+                    sub_id,
+                    &plan,
+                    &protos,
+                    "payment",
+                    expires_at,
+                    key.traffic_bytes,
+                    &shards,
+                )
+                .await
+            {
+                Ok(Some((row, used, limit, overflow))) => {
+                    if overflow {
+                        error!(
+                            "activation: shards of plan '{}' are over capacity ({}/{}), add a node",
+                            plan, used, limit
+                        );
+                    }
+                    tracing::info!(
+                        "activation: subscription {} assigned to {} ({}/{})",
+                        sub_id,
+                        row.env,
+                        used,
+                        limit
+                    );
+                }
+                Ok(None) => {
+                    let _ = memory
+                        .db
+                        .peers()
+                        .record_activation_failure(
+                            key.id,
+                            &key.code,
+                            &plan,
+                            &plan,
+                            "no_live_shard",
+                            Some(sub_id),
+                        )
+                        .await;
+                    error!(
+                        "activation blocked: no live shard for plan '{}' (key {:?})",
+                        plan, key.code
+                    );
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&fcore::http::ResponseMessage::<Option<uuid::Uuid>> {
+                            status: 503,
+                            message: "Сейчас нет доступных серверов. Напишите в поддержку — ключ не потрачен.".to_string(),
+                            response: None,
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                }
+                Err(e) => {
+                    error!("activation: cannot assign shard for {}: {}", sub_id, e);
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&fcore::http::ResponseMessage::<Option<uuid::Uuid>> {
+                            status: 503,
+                            message:
+                                "Не удалось выдать доступ. Напишите в поддержку — ключ не потрачен."
+                                    .to_string(),
+                            response: None,
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                }
+            }
+        }
+    }
+
     match add_days_status {
         Ok(Status::Updated(_)) => {
             key.activate(&sub_id);
@@ -335,6 +494,24 @@ where
                     err
                 )));
             }
+
+            // Grants win over the catalogue for this subscription: once the
+            // payer's rights are stored, the product catalogue stops deciding
+            // what to create. A subscription without grants keeps the old
+            // behaviour unchanged.
+            let conns_map =
+                match crate::access::conns_map_for(&memory.db, sub_id, catalog_map.clone()).await {
+                    Ok(map) => map,
+                    Err(e) => {
+                        error!(
+                            "Cannot read grants for {}: {} — using the catalogue",
+                            sub_id, e
+                        );
+                        catalog_map
+                    }
+                };
+
+            let _ = memory.db.peers().resolve_activation_failure(key.id).await;
 
             match key.kind {
                 // Lite subs get connections from lite_enabled_conns; the

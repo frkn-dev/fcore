@@ -233,6 +233,17 @@ where
             }
         });
 
+        if self.settings.service.peers.enabled {
+            spawn_task("persist_peer_traffic", {
+                let interval = self.settings.tasks.traffic_persist_interval_sec;
+                let service = Arc::clone(&self);
+
+                async move {
+                    service.persist_peer_traffic(interval).await;
+                }
+            });
+        }
+
         spawn_task("enforce_traffic_limits", {
             let interval = self.settings.tasks.traffic_limit_interval_sec;
             let service = Arc::clone(&self);

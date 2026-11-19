@@ -158,6 +158,67 @@ fn default_metered_conns() -> Vec<String> {
     .collect()
 }
 
+/// Peers: the client owns the key pair, the api assigns the address.
+///
+/// Inert until `enabled = true`: the routes are registered either way, but a
+/// disabled section answers 404 so a half-configured deployment cannot hand
+/// out tunnels nobody serves.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PeersConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Default cap of live tunnels per device. A per-subscription override in
+    /// `subscription_limits` wins over this.
+    #[serde(default = "default_peers_max_per_device")]
+    pub max_per_device: i64,
+    /// Default cap of live tunnels per subscription (the guard that keeps one
+    /// account from occupying a whole /20).
+    #[serde(default = "default_peers_max_per_subscription")]
+    pub max_per_subscription: i64,
+    /// env → subnet blocks, seeded into `env_networks` at startup (the table
+    /// stays authoritative; overlapping blocks are refused by the DB).
+    #[serde(default)]
+    pub subnets: HashMap<Env, Vec<String>>,
+    /// Revoked peers stay listed in `GET /peers` for this many days, so the
+    /// app can say why a tunnel died instead of "no such peer".
+    #[serde(default = "default_peers_remember_days")]
+    pub remember_days: i64,
+    /// Capacity of one peer node, in subscriptions. A shard's limit is
+    /// `live_nodes * this` unless `env_capacity` sets an explicit override;
+    /// one node ≈ one /24 (100 subs × ~2.5 peers ≈ 250 addresses).
+    #[serde(default = "default_peers_subscriptions_per_node")]
+    pub subscriptions_per_node: i64,
+}
+
+fn default_peers_max_per_device() -> i64 {
+    5
+}
+
+fn default_peers_max_per_subscription() -> i64 {
+    50
+}
+
+fn default_peers_remember_days() -> i64 {
+    7
+}
+
+fn default_peers_subscriptions_per_node() -> i64 {
+    100
+}
+
+impl Default for PeersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_per_device: default_peers_max_per_device(),
+            max_per_subscription: default_peers_max_per_subscription(),
+            subnets: HashMap::new(),
+            remember_days: default_peers_remember_days(),
+            subscriptions_per_node: default_peers_subscriptions_per_node(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServiceConfig {
     #[serde(default = "default_listen_address")]
@@ -255,6 +316,10 @@ pub struct ServiceConfig {
     /// mesh inbox itself is memory-only by design.
     #[serde(default = "default_mesh_snapshot_path")]
     pub mesh_snapshot_path: String,
+    /// Peer scheme. Disabled by default: an api that has the code but no
+    /// enabled section behaves exactly like before this feature.
+    #[serde(default)]
+    pub peers: PeersConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

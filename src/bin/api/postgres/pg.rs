@@ -104,6 +104,10 @@ impl PgContext {
         PgNode::new(self.manager.clone())
     }
 
+    pub fn peers(&self) -> crate::postgres::peers::PgPeers {
+        crate::postgres::peers::PgPeers::new(self.manager.clone())
+    }
+
     pub fn conn(&self) -> PgConn {
         PgConn::new(self.manager.clone())
     }

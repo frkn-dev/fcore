@@ -48,13 +48,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(">>> --reset-snapshot: no snapshot at {}", path.display());
             return Ok(());
         }
-        let backup = format!(
-            "{}.bak-{}",
-            path.display(),
-            chrono::Utc::now().timestamp()
-        );
+        let backup = format!("{}.bak-{}", path.display(), chrono::Utc::now().timestamp());
         std::fs::rename(path, &backup)?;
-        println!(">>> --reset-snapshot: moved {} -> {}", path.display(), backup);
+        println!(
+            ">>> --reset-snapshot: moved {} -> {}",
+            path.display(),
+            backup
+        );
         println!(">>> next start begins from a clean state");
         return Ok(());
     }

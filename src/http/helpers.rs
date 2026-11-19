@@ -36,10 +36,7 @@ pub fn too_many_requests(msg: &str) -> warp::reply::WithStatus<Json> {
         message: msg.to_string(),
         response: None,
     };
-    warp::reply::with_status(
-        warp::reply::json(&resp),
-        StatusCode::TOO_MANY_REQUESTS,
-    )
+    warp::reply::with_status(warp::reply::json(&resp), StatusCode::TOO_MANY_REQUESTS)
 }
 
 pub fn not_found(msg: &str) -> warp::reply::WithStatus<Json> {

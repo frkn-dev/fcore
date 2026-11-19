@@ -2,10 +2,14 @@
 
 ## Current
 - **Repo:** ffcore
-- **Branch:** `main`
-- **Task:** BENCH-URL — `speedtest_url` в `/status`, `/v1/services` и `/v1/config`
-- **Status:** 0.6.134 в проде (`Ok (v0.6.134)`), 0.6.135 собирается: добавлено поле в коннекшены `/v1/services` и в ответ `/v1/config`
-- **Updated:** 2026-11-14
+- **Branch:** `feature/peers` (закоммичено, не запушено)
+- **Task:** PEERS — новый слой пиров: ключ на устройстве, адрес от api, права по env, шарды
+- **Status:** 0.7.1, код собран, тесты 116/230. **На прод не выкатывалось**, миграция `0020` на прод не накатывалась, бэкапов нет.
+- **Осталось:** перевести чтения `handlers/peers.rs` на `memory.peers_state` (10 точек: grant/limits/live_counts/live_by_key/env_blocks/used_addresses/grants×3), добавить `subscription_limits` в `load_state`, write-through после записей, затем release-сборка на `us.frkn.org`, деплой api с бэкапами `/opt/api/api` и `config.toml`, тест на ноде.
+- **Updated:** 2026-11-19
+
+## Done (peers)
+- 2026-11-19 — **PEERS: каркас схемы (api + миграция + нода), без выката**. Миграция аддитивная: `env_networks` с `EXCLUDE USING gist` (пересечение подсетей невозможно), `subscription_access` (строка на env, `protos[]`, свой срок, свой лимит), `devices` (`device_uid` + `device_name` + `support_tag`), `peers` (пир может нести свой ключ — каналы роутера), `peer_traffic`, `subscription_limits`, view `subscription_traffic`. api: валидация в памяти, аллокатор адресов по блокам env, публикация в шину на create/delete/revoke, `peers-init` при регистрации ноды. fnode: отдельные интерфейсы, apply/prune идемпотентны, трафик по `peer_id`, локальный `peers.json`. v1 не тронут (peer-теги отбиваются в старых путях). Спека — `../PEERS-SPEC.md`, контракт — `docs/api-peers.md`. **Не сделано:** Linux-сборка с фичами (гоняю на `us.frkn.org`), приложение, снапшот-восстановление на живом стенде, деплой.
 
 ## Done
 - 2026-11-15 — **сводка переехала: api отдаёт данные, письмо собирает mrkting (api 0.6.139)**. `GET /v1/admin/digest?kind=&from=&to=` под service-or-admin токеном возвращает JSON сводки (флот, алерты, клиенты, люди, тренд), окно считает отправитель. Из api удалены `DigestConfig`/`[digest]`, `digest_scheduler`, рендер письма и SMTP-отправка сводки; **алерты по нодам остались** со своим `enabled`. Тесты `cargo test --bin api` — 205 passed. Релизы: `v0.6.138` (данные) и `v0.6.139` (ручка принимает сервисный токен — mrkting ходит именно им, а не админским; без этого было бы 401). Прод: бинарь `sha256 2360a2b3…`, бэкап `/opt/api/api.bak-0.6.137-20261115-195615`, `/healthcheck` → `Ok (v0.6.139)`, секция `[digest]` из `/opt/api/config.toml` убрана (бэкап в `/root/frkn-prod-backups/`). Живая проверка: сервисным токеном `https://api.frkn.org/v1/admin/digest?kind=daily` → 200 с реальными числами (70 нод, 3055 подключений, 1071 активных), без токена → 400.

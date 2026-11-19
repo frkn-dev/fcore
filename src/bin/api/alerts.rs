@@ -207,9 +207,9 @@ impl Default for AlertsConfig {
             disk_threshold_pct: default_disk_threshold(),
             disk_hold_sec: default_disk_hold(),
             disk_reset_pct: default_disk_reset(),
-             watchcat_switch_throttle_sec: 120,
-             watchcat_intercept_throttle_sec: 1800,
-             watchcat_no_healthy_throttle_sec: 600,
+            watchcat_switch_throttle_sec: 120,
+            watchcat_intercept_throttle_sec: 1800,
+            watchcat_no_healthy_throttle_sec: 600,
             cpu_threshold_pct: default_cpu_threshold(),
             cpu_hold_sec: default_cpu_hold(),
             cpu_reset_pct: default_cpu_reset(),
@@ -915,7 +915,9 @@ pub async fn notify(
     host: &str,
     text: &str,
 ) -> bool {
-    notify_report(cfg, client, subject, host, text).await.delivered()
+    notify_report(cfg, client, subject, host, text)
+        .await
+        .delivered()
 }
 
 /// То же, но с результатом по каждому каналу — для админской «проверить
@@ -1009,17 +1011,19 @@ pub async fn send_email_html(
     }
 
     let message = builder
-        .multipart(
-            MultiPart::alternative_plain_html(
-                text.to_string(),
-                format!(
-                    "<html><body style=\"margin:0;padding:18px;background:#fff\">{html}</body></html>"
-                ),
+        .multipart(MultiPart::alternative_plain_html(
+            text.to_string(),
+            format!(
+                "<html><body style=\"margin:0;padding:18px;background:#fff\">{html}</body></html>"
             ),
-        )
+        ))
         .map_err(|e| format!("cannot build message: {e}"))?;
 
-    smtp_transport(cfg)?.send(message).await.map(|_| ()).map_err(|e| format!("smtp send failed: {e}"))
+    smtp_transport(cfg)?
+        .send(message)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("smtp send failed: {e}"))
 }
 
 pub async fn send_email(
@@ -1160,9 +1164,9 @@ mod tests {
             disk_threshold_pct: 90.0,
             disk_hold_sec: 900,
             disk_reset_pct: 85.0,
-             watchcat_switch_throttle_sec: 120,
-             watchcat_intercept_throttle_sec: 1800,
-             watchcat_no_healthy_throttle_sec: 600,
+            watchcat_switch_throttle_sec: 120,
+            watchcat_intercept_throttle_sec: 1800,
+            watchcat_no_healthy_throttle_sec: 600,
             cpu_threshold_pct: 85.0,
             cpu_hold_sec: 600,
             cpu_reset_pct: 70.0,
@@ -1286,7 +1290,10 @@ mod tests {
         cfg.email.as_mut().unwrap().enabled = false;
         assert!(!cfg.email_ready());
         assert!(!cfg.can_deliver());
-        assert!(cfg.email.is_some(), "disabled is not the same as unconfigured");
+        assert!(
+            cfg.email.is_some(),
+            "disabled is not the same as unconfigured"
+        );
     }
 
     #[test]
@@ -1308,7 +1315,10 @@ mod tests {
             email_subject_state("ee.frkn.org", "🔴", ""),
             "[FRKN] 🔴 ee.frkn.org"
         );
-        assert_eq!(email_subject_state("ee.frkn.org", "", ""), "[FRKN] ee.frkn.org");
+        assert_eq!(
+            email_subject_state("ee.frkn.org", "", ""),
+            "[FRKN] ee.frkn.org"
+        );
         assert_eq!(AlertKind::NodeOffline.emoji(), "🔴");
         assert_eq!(AlertKind::NodeRecovered.emoji(), "🟢");
         assert_eq!(AlertKind::NodeOffline.label_ru(), "офлайн");
@@ -1331,9 +1341,15 @@ mod tests {
 
     #[test]
     fn mail_thread_root_stays_inside_headers() {
-        assert_eq!(thread_root("ee.frkn.org"), "<frkn-alerts-ee.frkn.org@frkn.org>");
+        assert_eq!(
+            thread_root("ee.frkn.org"),
+            "<frkn-alerts-ee.frkn.org@frkn.org>"
+        );
         // Nothing that could break a header survives the filter.
-        assert_eq!(thread_root("bad host <script>"), "<frkn-alerts-badhostscript@frkn.org>");
+        assert_eq!(
+            thread_root("bad host <script>"),
+            "<frkn-alerts-badhostscript@frkn.org>"
+        );
         assert_eq!(thread_root(""), "<frkn-alerts-unknown@frkn.org>");
     }
 
@@ -1353,7 +1369,10 @@ mod tests {
             telegram: None,
             email: Some(false),
         };
-        assert!(!email_failed.delivered(), "a failed channel is not delivery");
+        assert!(
+            !email_failed.delivered(),
+            "a failed channel is not delivery"
+        );
 
         let both = NotifyReport {
             telegram: Some(false),

@@ -87,7 +87,9 @@ impl MetricBuffer {
         {
             let mut seen = self.entry_seen.lock();
             match seen.get(&conn_id) {
-                Some((last_ip, last_ms)) if last_ip == &ip_text && now - last_ms < ENTRY_REFRESH_MS => {
+                Some((last_ip, last_ms))
+                    if last_ip == &ip_text && now - last_ms < ENTRY_REFRESH_MS =>
+                {
                     return;
                 }
                 _ => {}
@@ -122,7 +124,11 @@ impl MetricBuffer {
             }
         };
 
-        if let Err(e) = self.publisher.send_binary(&Topic::Entries, bytes.as_slice()).await {
+        if let Err(e) = self
+            .publisher
+            .send_binary(&Topic::Entries, bytes.as_slice())
+            .await
+        {
             tracing::error!("Entry batch publish failed: {}", e);
         }
     }
@@ -769,6 +775,24 @@ impl MetricStorage {
     ) -> (u64, u64) {
         let mut tags = BTreeMap::new();
         tags.insert("conn_id".to_string(), conn_id.to_string());
+
+        (
+            self.delta_sum(Some("user.traffic.uplink"), &tags, from_ms, to_ms) as u64,
+            self.delta_sum(Some("user.traffic.downlink"), &tags, from_ms, to_ms) as u64,
+        )
+    }
+
+    /// Same as [`get_connection_delta_traffic`], but for peer series: nodes
+    /// tag peer traffic with `peer_id` and never with `conn_id`, so the two
+    /// key spaces cannot collide.
+    pub fn get_peer_delta_traffic(
+        &self,
+        peer_id: &uuid::Uuid,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> (u64, u64) {
+        let mut tags = BTreeMap::new();
+        tags.insert("peer_id".to_string(), peer_id.to_string());
 
         (
             self.delta_sum(Some("user.traffic.uplink"), &tags, from_ms, to_ms) as u64,

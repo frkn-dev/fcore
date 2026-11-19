@@ -106,6 +106,11 @@ where
     /// Excluded named devices remain available through explicit conn/share requests.
     #[serde(default)]
     pub main_feed_excluded_conns: std::collections::HashSet<uuid::Uuid>,
+    /// Peers layer: devices, tunnels, grants, env blocks and capacity — the
+    /// hot copy every peer handler validates against. Postgres is written
+    /// first, this state second.
+    #[serde(default)]
+    pub peers_state: crate::peers::store::PeersState,
 }
 
 impl<T: Default, C, S: Default + PartialEq> Default for Cache<T, C, S>
@@ -147,6 +152,7 @@ where
             conn_nodes: std::collections::HashMap::new(),
             main_feed_nodes: std::collections::HashSet::new(),
             main_feed_excluded_conns: std::collections::HashSet::new(),
+            peers_state: crate::peers::store::PeersState::default(),
         }
     }
 }

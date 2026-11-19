@@ -380,6 +380,14 @@ where
         }
 
         match req.proto {
+            // Peer protocols are minted by the api itself (`POST /v1/peers`):
+            // the client brings the key and the address comes from the env
+            // blocks, so a premium share must not create them as connections.
+            Tag::AmneziaPeer | Tag::WireguardPeer => {
+                return Ok(http::bad_request(
+                    "peer protocols are created via POST /v1/peers",
+                ))
+            }
             // WG-family protocols share the allocation logic; each tag
             // draws from its own address pool.
             Tag::Wireguard | Tag::AmneziaWg | Tag::AmneziaWgMobile => {

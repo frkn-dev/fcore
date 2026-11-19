@@ -1,6 +1,5 @@
 use super::node::Node;
 
-#[cfg(any(feature = "xray", feature = "amnezia-wg"))]
 use fcore::Tag;
 #[cfg(feature = "xray")]
 use fcore::{Prefix, StatsOp};
@@ -51,6 +50,7 @@ fn peer_online_by_handshake(last_handshake_ms: Option<u64>) -> f64 {
     }
 }
 
+#[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 #[async_trait::async_trait]
 impl<C> BusinessMetrics for Node<C>
@@ -315,6 +315,96 @@ where
                     addr.ip(),
                 );
             }
+        }
+    }
+}
+
+/// Peer plane metrics. A plain inherent impl: the `BusinessMetrics` trait is
+/// feature-gated and already implemented for `Node`, and this code must be
+/// callable exactly when the peer interfaces exist.
+impl<C> Node<C>
+where
+    C: ConnectionBaseOperations + Send + Sync + Clone + 'static,
+{
+    #[allow(dead_code)]
+    pub(crate) async fn collect_peer_metrics(&self, tag: Tag, proto_label: &str) {
+        use base64::Engine;
+
+        let node_uuid = self.node.uuid;
+        let base_tags = self.node.get_base_tags();
+
+        // (public_key, uplink, downlink) per tunnel present on the interface.
+        let samples: Vec<(String, i64, i64)> = match tag {
+            #[cfg(feature = "amnezia-wg")]
+            Tag::AmneziaPeer => {
+                let Some(api) = self.awg_peers_client.as_ref() else {
+                    return;
+                };
+                let stats = match api.peer_stats() {
+                    Ok(stats) => stats,
+                    Err(e) => {
+                        tracing::error!("Failed to read AWG peers stats: {}", e);
+                        return;
+                    }
+                };
+                stats
+                    .iter()
+                    .map(|(key, stat)| {
+                        (
+                            base64::engine::general_purpose::STANDARD.encode(key),
+                            stat.rx_bytes as i64,
+                            stat.tx_bytes as i64,
+                        )
+                    })
+                    .collect()
+            }
+            #[cfg(feature = "wireguard")]
+            Tag::WireguardPeer => {
+                let Some(api) = self.wg_peers_client.as_ref() else {
+                    return;
+                };
+                let keys = match api.peer_pubkeys() {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        tracing::error!("Failed to read WG peers: {}", e);
+                        return;
+                    }
+                };
+                keys.into_iter()
+                    .filter_map(|key| {
+                        api.peer_stats(&key)
+                            .ok()
+                            .map(|(uplink, downlink, _, _)| (key, uplink, downlink))
+                    })
+                    .collect()
+            }
+            _ => return,
+        };
+
+        let peers = self.peers.read().await;
+        for (public_key, uplink, downlink) in samples {
+            let Some(meta) = peers.get(&public_key) else {
+                // A peer the api never announced (left over from an older
+                // config) has no owner to bill: skip instead of inventing one.
+                continue;
+            };
+
+            let mut metric_tags = base_tags.clone();
+            metric_tags.insert("peer_id".to_string(), meta.peer_id.to_string());
+            metric_tags.insert("proto".to_string(), proto_label.to_string());
+            metric_tags.insert("vpn_ip".to_string(), meta.address.clone());
+            if let Some(subscription_id) = meta.subscription_id {
+                metric_tags.insert("subscription_id".to_string(), subscription_id.to_string());
+            }
+
+            self.metrics.push(
+                node_uuid,
+                "user.traffic.downlink",
+                downlink as f64,
+                metric_tags.clone(),
+            );
+            self.metrics
+                .push(node_uuid, "user.traffic.uplink", uplink as f64, metric_tags);
         }
     }
 }

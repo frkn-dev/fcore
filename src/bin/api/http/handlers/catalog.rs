@@ -219,6 +219,7 @@ mod tests {
             conn_nodes: HashMap::new(),
             main_feed_nodes: HashSet::new(),
             main_feed_excluded_conns: HashSet::new(),
+            peers_state: Default::default(),
         }
     }
 

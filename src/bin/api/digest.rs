@@ -316,7 +316,11 @@ impl Digest {
                 // за сутки — одна дата, иначе «10.11 — 10.11» в теме и в шапке
                 Some(DigestKind::Daily) => f.format("%d.%m").to_string(),
                 Some(DigestKind::Monthly) => (t - Duration::days(1)).format("%m.%Y").to_string(),
-                _ => format!("{} — {}", f.format("%d.%m"), (t - Duration::days(1)).format("%d.%m")),
+                _ => format!(
+                    "{} — {}",
+                    f.format("%d.%m"),
+                    (t - Duration::days(1)).format("%d.%m")
+                ),
             },
             _ => String::new(),
         }

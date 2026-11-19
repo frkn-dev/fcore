@@ -1350,7 +1350,10 @@ mod tests {
     #[test]
     fn chat_ids_are_normalized_and_validated() {
         assert_eq!(normalize_chat_id("  123456789 "), Some("123456789".into()));
-        assert_eq!(normalize_chat_id("-1001234567890"), Some("-1001234567890".into()));
+        assert_eq!(
+            normalize_chat_id("-1001234567890"),
+            Some("-1001234567890".into())
+        );
         assert_eq!(normalize_chat_id("@frkn_ops"), Some("@frkn_ops".into()));
         // A pasted sentence is not a chat id.
         assert_eq!(normalize_chat_id("мой телеграм 12345"), None);
