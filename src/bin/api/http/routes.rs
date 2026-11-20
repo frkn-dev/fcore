@@ -1716,6 +1716,24 @@ where
         // A non-Copy optional value rides as a filter of its own.
         let with_peers_auto_pool = warp::any().map(move || peers_auto_pool.clone());
 
+        // Кабинет: на какой схеме подписка (legacy/peers/mixed) и что рисовать.
+        // Плоский GET, как остальные ручки ЛК — конверта в браузере нет.
+        let cabinet_route = warp::get()
+            .and(warp::path!("cabinet" / Uuid))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |subscription_id: Uuid, enabled: bool, sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(peers_handlers::get_cabinet_handler(subscription_id, sync).await)
+                },
+            );
+
         // Client peer routes speak the AGW envelope only: every one of them is a
         // POST with an encrypted body, so `subscription_id` never lands in a
         // query string, an access log or a crash report. Ids that used to sit
@@ -2049,6 +2067,7 @@ where
             .or(post_locations_route)
             .or(get_access_route)
             .or(get_capacity_route)
+            .or(cabinet_route)
             .or(post_access_route)
             .or(delete_access_route)
             .or(get_support_route);

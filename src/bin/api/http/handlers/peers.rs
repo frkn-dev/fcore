@@ -1625,6 +1625,94 @@ where
     Ok(Some((peers_revoked, conns_revoked)))
 }
 
+/// `GET /cabinet/<subscription_id>` — плоский JSON для ЛК (без конверта, как
+/// `/subscription/<id>` и `/sub`): на какой схеме подписка и что показывать.
+///
+/// Схема решается здесь, а не в браузере: гранты — новый мир, v1-коннекты —
+/// старый, и во время переезда у человека может быть и то, и другое.
+pub async fn get_cabinet_handler<N, C, S>(
+    subscription_id: Uuid,
+    memory: MemSync<N, C, S>,
+) -> Box<dyn warp::Reply>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let grants = match memory.db.peers().grants(subscription_id).await {
+        Ok(rows) => rows,
+        Err(e) => return db_error("cabinet_grants", e),
+    };
+
+    let (cards, connections, devices) = {
+        let mem = memory.memory.read().await;
+        let cards = cards_for_grants(&mem.nodes, &grants);
+        let connections = mem
+            .connections
+            .get_by_subscription_id(&subscription_id)
+            .unwrap_or_default()
+            .iter()
+            .filter(|(_, conn)| !conn.get_deleted())
+            .count();
+        let devices = mem.peers_state.devices.of_sub(&subscription_id).len();
+        (cards, connections, devices)
+    };
+
+    // legacy — только старый мир; peers — только гранты; mixed — переезд.
+    let scheme = if grants.is_empty() {
+        "legacy"
+    } else if connections == 0 {
+        "peers"
+    } else {
+        "mixed"
+    };
+
+    let access: Vec<serde_json::Value> = grants
+        .iter()
+        .map(|grant| {
+            serde_json::json!({
+                "plan": grant.plan,
+                "plan_title": plan_title(grant.plan.as_deref()),
+                "protos": grant.protos.iter().map(proto_wire_name).collect::<Vec<_>>(),
+                "expires_at": grant.expires_at,
+                "traffic_limit": grant.traffic_limit,
+            })
+        })
+        .collect();
+
+    let cards_json: Vec<serde_json::Value> = cards
+        .iter()
+        .map(|card| {
+            serde_json::json!({
+                "card_id": card.card_id,
+                "pool": card.pool,
+                "pool_translation": card.pool_translation,
+                "proto": card.proto,
+                "nodes": card.nodes.len(),
+            })
+        })
+        .collect();
+
+    json_reply(
+        200,
+        "cabinet",
+        serde_json::json!({
+            "scheme": scheme,
+            "grants": access,
+            "cards": cards_json,
+            "connections": connections,
+            "devices": devices,
+        }),
+    )
+}
+
 /// GET /v1/access/capacity?plan=… (service token): per-shard load.
 pub async fn get_capacity_handler<N, C, S>(
     plan: String,
