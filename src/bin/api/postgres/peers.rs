@@ -852,6 +852,54 @@ impl PgPeers {
         })
     }
 
+    /// Carve a fresh block for `env` out of `pool` and store it.
+    ///
+    /// Shards whose number is unknown (premium slots, customers' machines)
+    /// cannot be listed in the api config, so their address space is allocated on
+    /// first use. Returns the block, or `None` when the pool is exhausted.
+    pub async fn allocate_env_block(
+        &self,
+        env: &Env,
+        pool: &IpAddrMask,
+        prefix: u8,
+    ) -> Result<Option<IpAddrMask>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query("SELECT subnet::text AS subnet FROM env_networks", &[])
+            .await?;
+        let mut taken: Vec<IpAddrMask> = rows
+            .iter()
+            .filter_map(|r| IpAddrMask::from_str(r.get::<_, String>("subnet").as_str()).ok())
+            .collect();
+
+        // The exclusion constraint is the real judge: a block another api
+        // instance grabbed between our read and our insert bounces, and we take
+        // the next one.
+        for _ in 0..64 {
+            let Some(candidate) = crate::peers::alloc::next_block(pool, &taken, prefix) else {
+                return Ok(None);
+            };
+            let inserted = client
+                .execute(
+                    r#"
+                    INSERT INTO env_networks (env, subnet)
+                    VALUES ($1, $2::text::cidr)
+                    ON CONFLICT DO NOTHING
+                    "#,
+                    &[&env.to_string(), &candidate.to_string()],
+                )
+                .await?;
+            if inserted > 0 {
+                return Ok(Some(candidate));
+            }
+            taken.push(candidate);
+        }
+
+        Ok(None)
+    }
+
     /// Addresses currently held by live peers of one env.
     pub async fn used_addresses(&self, env: &Env) -> Result<Vec<Ipv4Addr>> {
         let mut manager = self.manager.lock().await;

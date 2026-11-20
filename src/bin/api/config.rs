@@ -183,6 +183,16 @@ pub struct PeersConfig {
     /// stays authoritative; overlapping blocks are refused by the DB).
     #[serde(default)]
     pub subnets: HashMap<Env, Vec<String>>,
+    /// Supernet the api carves shard blocks out of on first use
+    /// (`10.128.0.0/9`). Needed where the number of shards is unknown — premium
+    /// slots and customers' own machines: no live list of their subnets in the
+    /// config, and none of them are related to each other. Empty disables it.
+    #[serde(default)]
+    pub auto_subnet_pool: Option<String>,
+    /// Prefix of an auto-allocated shard block (default /16: one shard is one
+    /// machine of one customer).
+    #[serde(default = "default_auto_subnet_prefix")]
+    pub auto_subnet_prefix: u8,
     /// Shards declared here are applied at startup: plan, title, kind and caps
     /// are written to `env_capacity`, so provisioning is a config edit instead
     /// of hand-written SQL. The admin endpoint writes the same row for changes
@@ -227,6 +237,10 @@ fn default_peers_remember_days() -> i64 {
     7
 }
 
+fn default_auto_subnet_prefix() -> u8 {
+    16
+}
+
 fn default_peers_prune_max_per_tick() -> usize {
     50
 }
@@ -243,6 +257,8 @@ impl Default for PeersConfig {
             max_per_subscription: default_peers_max_per_subscription(),
             max_devices_per_subscription: default_peers_max_devices_per_subscription(),
             subnets: HashMap::new(),
+            auto_subnet_pool: None,
+            auto_subnet_prefix: default_auto_subnet_prefix(),
             shards: HashMap::new(),
             remember_days: default_peers_remember_days(),
             prune_legacy_conns: false,

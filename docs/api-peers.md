@@ -154,7 +154,13 @@ curl -s https://api.frkn.org/status | jq '.response[] | {hostname, env, env_titl
 
 ```toml
 [service.peers.subnets]
-"0001" = ["10.88.0.0/16"]
+"0001" = ["10.88.0.0/16"]     # только там, где шард наш и диапазон выбираем мы
+
+# Шарды, которых заранее неизвестно сколько (premium-слоты, машины юзеров),
+# нигде не перечисляются: api вырезает каждому свой /16 из пула при первом
+# обращении (POST /v1/peers), EXCLUDE-констрейнт не даст двум шардам пересечься.
+auto_subnet_pool = "10.128.0.0/9"
+auto_subnet_prefix = 16
 
 [service.peers.shards."0001"]
 plan = "standard"

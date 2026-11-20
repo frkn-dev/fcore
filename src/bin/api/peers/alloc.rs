@@ -60,6 +60,49 @@ pub fn first_free(blocks: &[IpAddrMask], used: &HashSet<Ipv4Addr>) -> Option<Ipv
     None
 }
 
+/// Whether two blocks share at least one address.
+pub fn overlaps(a: &IpAddrMask, b: &IpAddrMask) -> bool {
+    let (Some(a_net), Some(b_net)) = (network_of(a), network_of(b)) else {
+        return false;
+    };
+    let prefix = a.cidr.min(b.cidr);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    (a_net & mask) == (b_net & mask)
+}
+
+/// First free `prefix`-sized block inside `pool`.
+///
+/// Used where the number of shards is not known in advance (premium slots, a
+/// customer's own machine): nobody wants to keep a live list of those subnets in
+/// the api config, so the api carves a block out of a reserved supernet on first
+/// use. `taken` is every block the database already holds — the allocator is a
+/// pure function; the unique/exclude constraint on `env_networks` is the fuse.
+pub fn next_block(pool: &IpAddrMask, taken: &[IpAddrMask], prefix: u8) -> Option<IpAddrMask> {
+    let base = network_of(pool)?;
+    if prefix < pool.cidr || prefix > 32 {
+        return None;
+    }
+    let step = 1u32 << (32 - prefix);
+    let count = 1u32 << (prefix - pool.cidr);
+
+    for index in 0..count {
+        let net = base.checked_add(index * step)?;
+        let candidate = IpAddrMask::new(
+            std::net::IpAddr::V4(Ipv4Addr::from(net)),
+            prefix,
+        );
+        if !taken.iter().any(|used| overlaps(used, &candidate)) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 /// Share of the address budget we refuse to hand out. A revoke frees its
 /// address for the next request, but a burst of re-issues (card switch,
 /// reinstall) must not race into the last host of the block.
@@ -111,6 +154,31 @@ mod tests {
 
     fn block(cidr: &str) -> IpAddrMask {
         IpAddrMask::from_str(cidr).expect("valid block")
+    }
+
+    #[test]
+    fn auto_blocks_are_carved_out_of_the_pool() {
+        let pool = block("10.128.0.0/9");
+        // Nothing taken yet: the first /16 of the pool.
+        assert_eq!(
+            next_block(&pool, &[], 16).map(|b| b.to_string()),
+            Some("10.128.0.0/16".to_string())
+        );
+        // A taken /24 inside the first /16 pushes the next shard to the next /16.
+        let taken = vec![block("10.128.7.0/24")];
+        assert_eq!(
+            next_block(&pool, &taken, 16).map(|b| b.to_string()),
+            Some("10.129.0.0/16".to_string())
+        );
+        // A pool of /16s yields exactly 128 of them, then it is full.
+        let mut taken = Vec::new();
+        for _ in 0..128 {
+            let Some(next) = next_block(&pool, &taken, 16) else {
+                panic!("pool exhausted early");
+            };
+            taken.push(next);
+        }
+        assert!(next_block(&pool, &taken, 16).is_none());
     }
 
     #[test]

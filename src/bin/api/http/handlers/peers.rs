@@ -707,6 +707,8 @@ pub async fn post_peers_handler<N, C, S>(
     req: PeerCreateRequest,
     memory: MemSync<N, C, S>,
     default_limits: Limits,
+    auto_pool: Option<fcore::IpAddrMask>,
+    auto_prefix: u8,
 ) -> Box<dyn warp::Reply>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -887,7 +889,7 @@ where
         None => {}
     }
 
-    let (blocks, mut used) = {
+    let (mut blocks, mut used) = {
         let mem = memory.memory.read().await;
         (
             mem.peers_state.block_masks(&env),
@@ -895,7 +897,35 @@ where
         )
     };
     if blocks.is_empty() {
-        return refusal_reply(Refusal::EnvNotServed);
+        // Shards whose number is not known in advance — premium slots, a
+        // customer's own machine — cannot be listed in the api config, so their
+        // address space is carved out of the reserved pool on first use.
+        let Some(pool) = auto_pool.as_ref() else {
+            return refusal_reply(Refusal::EnvNotServed);
+        };
+        match db.allocate_env_block(&env, pool, auto_prefix).await {
+            Ok(Some(block)) => {
+                tracing::info!("peers: shard {} got {} from the auto pool", env, block);
+                memory
+                    .memory
+                    .write()
+                    .await
+                    .peers_state
+                    .env_networks
+                    .entry(env.clone())
+                    .or_default()
+                    .push(block.to_string());
+                blocks = vec![block];
+            }
+            Ok(None) => {
+                tracing::error!(
+                    "peers: the auto pool is exhausted, shard {} cannot hand out an address",
+                    env
+                );
+                return refusal_reply(Refusal::EnvNotServed);
+            }
+            Err(e) => return db_error("allocate_env_block", e),
+        }
     }
     // Keep the reserve of the env's blocks free: an address freed by a revoke
     // goes to the next request, but a burst of re-issues (card switch,

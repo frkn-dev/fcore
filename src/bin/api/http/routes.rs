@@ -1696,6 +1696,25 @@ where
         let peers_per_device = peers_cfg.max_per_device as u64;
         let peers_per_subscription = peers_cfg.max_per_subscription as u64;
         let peers_devices_per_subscription = peers_cfg.max_devices_per_subscription as u64;
+        let peers_auto_prefix = peers_cfg.auto_subnet_prefix as u64;
+        let peers_auto_pool: Option<fcore::IpAddrMask> = match peers_cfg
+            .auto_subnet_pool
+            .as_deref()
+        {
+            Some(raw) => match raw.parse::<fcore::IpAddrMask>() {
+                Ok(pool) => Some(pool),
+                Err(_) => {
+                    tracing::error!(
+                        "peers: auto_subnet_pool {:?} is not a CIDR, auto allocation stays off",
+                        raw
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        // A non-Copy optional value rides as a filter of its own.
+        let with_peers_auto_pool = warp::any().map(move || peers_auto_pool.clone());
 
         // Client peer routes speak the AGW envelope only: every one of them is a
         // POST with an encrypted body, so `subscription_id` never lands in a
@@ -1712,6 +1731,8 @@ where
             .and(with_param_u64(peers_per_device))
             .and(with_param_u64(peers_per_subscription))
             .and(with_param_u64(peers_devices_per_subscription))
+            .and(with_peers_auto_pool)
+            .and(with_param_u64(peers_auto_prefix))
             .and_then(
                 |enabled: bool,
                  req: peers_handlers::PeerCreateRequest,
@@ -1719,7 +1740,9 @@ where
                  sync: MemSync<N, C, S>,
                  per_device: u64,
                  per_subscription: u64,
-                 devices_per_subscription: u64| async move {
+                 devices_per_subscription: u64,
+                 auto_pool: Option<fcore::IpAddrMask>,
+                 auto_prefix: u64| async move {
                     if !enabled {
                         return crypto::encrypt_gateway_reply(
                             peers_handlers::not_enabled().into_response(),
@@ -1732,7 +1755,14 @@ where
                         per_subscription: per_subscription as i64,
                         devices_per_subscription: devices_per_subscription as i64,
                     };
-                    let reply = peers_handlers::post_peers_handler(req, sync, limits).await;
+                    let reply = peers_handlers::post_peers_handler(
+                        req,
+                        sync,
+                        limits,
+                        auto_pool,
+                        auto_prefix as u8,
+                    )
+                    .await;
                     crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
                 },
             );
