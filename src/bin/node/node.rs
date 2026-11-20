@@ -773,7 +773,20 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                             break;
                         }
                         Err(e) => {
-                            warn!("API unavailable, {} retrying... ", e);
+                            // A pool conflict is a configuration error, not a
+                            // transient one: retrying every 10 s only floods the
+                            // api and buries the cause in the journal. Exit so
+                            // systemd shows the node as failed and the operator
+                            // fixes the config instead of waiting for it to heal.
+                            let text = e.to_string();
+                            if text.contains("pool_inbounds_conflict") {
+                                tracing::error!(
+                                    "Registration refused by the api (pool_inbounds_conflict): {}",
+                                    text
+                                );
+                                std::process::exit(1);
+                            }
+                            warn!("API unavailable, {} retrying... ", text);
                             sleep(Duration::from_secs(10)).await;
                         }
                     }

@@ -54,9 +54,14 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # Above the threshold the endpoint reports a hard 1.0 (docs/nodes-load.md).
 # node_load_conn_capacity = 300
 # node_load_threshold = 0.85
-# Node registration vs pool inbounds: true (default) answers 409
-# pool_inbounds_conflict with the differing fields, false only logs. Either way
-# the node registers and serves, with status `degraded`.
+# Node registration vs pool inbounds. A card is one config for the whole pool,
+# so what goes into that config must match across its nodes: interface address,
+# DNS, keepalive, MTU, the server key and the obfuscation profile. The PORT is
+# not part of the comparison — each machine may serve the card on its own port,
+# the card carries a per-node endpoint. With true (default) a mismatching node
+# is refused with 409 `pool_inbounds_conflict` and the differing fields; it never
+# enters the roster and fnode exits instead of retrying. With false the node
+# registers as `degraded` and only a warning is logged (deliberate rollouts).
 # pool_strict_inbounds = true
 
 # Peers: the client owns the key pair, the api hands out the address.

@@ -239,10 +239,14 @@ where
         }
     }
 
-    // A mismatch is a diagnosis, not a door lock: the node still registers and
-    // still gets connections through /connections/sync. Blocking registration
-    // used to leave the pool on a stale snapshot and silently stop handing new
-    // configs to clients.
+    // A node that declares different client parameters than the rest of its
+    // pool cannot serve the same card: the app builds one config per card and
+    // only swaps the endpoint, so a mismatching node hands out a tunnel that
+    // never handshakes. Strict mode therefore refuses the node outright — it
+    // never enters the roster, gets no peers-init and no connections, and fnode
+    // exits on the 409 instead of retrying a config error every 10 seconds.
+    // Non-strict keeps the old diagnosis-only path (register as `degraded`)
+    // for deliberate rollouts.
     let conflict = {
         let mem = memory.memory.read().await;
         let peers = mem.nodes.get_by_env(&node.env).unwrap_or_default();
@@ -261,6 +265,17 @@ where
             strict = strict_inbounds,
             "node inbounds do not match its pool"
         );
+
+        if strict_inbounds {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+                    status: StatusCode::CONFLICT.as_u16(),
+                    message: "pool_inbounds_conflict".to_string(),
+                    response: None,
+                }),
+                StatusCode::CONFLICT,
+            ));
+        }
     }
 
     let status = SyncOp::add_node(&memory, &node_id, node.clone()).await;
@@ -352,22 +367,6 @@ where
             ));
         }
     };
-
-    // Strict mode keeps the old, loud behaviour for deliberate rollouts: the
-    // caller sees a 409 *and* knows exactly what differs, while the data plane
-    // stays up because the node was registered above.
-    if let Some(conflict) = conflict {
-        if strict_inbounds && result_response.status == StatusCode::OK.as_u16() {
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&ResponseMessage {
-                    status: StatusCode::CONFLICT.as_u16(),
-                    message: "pool_inbounds_conflict".to_string(),
-                    response: Some(conflict),
-                }),
-                StatusCode::CONFLICT,
-            ));
-        }
-    }
 
     let status_code =
         StatusCode::from_u16(result_response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

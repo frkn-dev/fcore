@@ -316,7 +316,10 @@ fn key_fingerprint(privkey: &str) -> String {
 /// `Inbound` values is what produced the endless 409 `pool_key_mismatch`.
 fn client_inbound_fields(inbound: &Inbound) -> BTreeMap<String, serde_json::Value> {
     let mut out: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    out.insert("port".to_string(), serde_json::json!(inbound.port));
+    // The port is deliberately NOT compared: a pool may serve one card on
+    // different ports per machine (a hoster that only allows 8443, a NAT'd
+    // box), and the card already carries a per-node `endpoint` — the client
+    // dials the node it picked, so the port never has to match.
 
     if let Some(wg) = &inbound.wg {
         out.insert(
@@ -335,10 +338,6 @@ fn client_inbound_fields(inbound: &Inbound) -> BTreeMap<String, serde_json::Valu
         out.insert(
             "address".to_string(),
             serde_json::json!(awg.interface.address.to_string()),
-        );
-        out.insert(
-            "listen_port".to_string(),
-            serde_json::json!(awg.interface.listen_port),
         );
         out.insert("mtu".to_string(), serde_json::json!(awg.interface.mtu));
         out.insert("dns".to_string(), serde_json::json!(awg.interface.dns));
@@ -980,7 +979,10 @@ mod tests {
     }
 
     #[test]
-    fn pool_inbounds_port_mismatch_names_the_field() {
+    fn pool_port_may_differ_between_nodes() {
+        // One card is served on whatever port each machine can offer (a hoster
+        // that only opens 8443, a NAT'd box). The card carries a per-node
+        // endpoint, so only what goes into the config has to match.
         let a = pool_node(
             "11111111-1111-1111-1111-111111111111",
             Some(awg_inbound(443, "key-a", 5, "awg0")),
@@ -989,15 +991,7 @@ mod tests {
             "22222222-2222-2222-2222-222222222222",
             Some(awg_inbound(8443, "key-a", 5, "awg0")),
         );
-        let conflict = pool_inbounds_conflict(&[a], &b).expect("port must conflict");
-        let port = conflict
-            .differences
-            .iter()
-            .find(|d| d.field == "port")
-            .expect("port difference must be reported");
-        assert_eq!(port.tag, "AmneziaWgMobile");
-        assert_eq!(port.peer, serde_json::json!(443));
-        assert_eq!(port.incoming, serde_json::json!(8443));
+        assert_eq!(pool_inbounds_conflict(&[a], &b), None);
     }
 
     #[test]
@@ -1086,12 +1080,31 @@ mod tests {
             serde_json::from_value(node_request_json(r#"{"pool":"  "}"#)).unwrap();
         assert!(req.as_node().pool.is_none());
 
-        let a = node_with_port(443, Some("EU"), "11111111-1111-1111-1111-111111111111");
-        let same = node_with_port(443, Some("EU"), "22222222-2222-2222-2222-222222222222");
-        let other = node_with_port(8443, Some("EU"), "22222222-2222-2222-2222-222222222222");
-        let solo = node_with_port(8443, Some("EU"), "11111111-1111-1111-1111-111111111111");
+        let a = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let same = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(443, "key-a", 5, "awg0")),
+        );
+        let other_port = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(8443, "key-a", 5, "awg0")),
+        );
+        let other_key = pool_node(
+            "22222222-2222-2222-2222-222222222222",
+            Some(awg_inbound(443, "key-b", 5, "awg0")),
+        );
+        let solo = pool_node(
+            "11111111-1111-1111-1111-111111111111",
+            Some(awg_inbound(8443, "key-b", 5, "awg0")),
+        );
         assert_eq!(pool_inbounds_conflict(&[a.clone()], &same), None);
-        assert!(pool_inbounds_conflict(&[a.clone()], &other).is_some());
+        // Port differences are fine (per-node endpoint), the server key is not.
+        assert_eq!(pool_inbounds_conflict(&[a.clone()], &other_port), None);
+        assert!(pool_inbounds_conflict(&[a.clone()], &other_key).is_some());
+        // A node is never compared with itself.
         assert_eq!(pool_inbounds_conflict(&[a], &solo), None);
     }
 }
