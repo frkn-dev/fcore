@@ -175,6 +175,10 @@ pub struct AccessRevokeRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct PoolNode {
     pub endpoint: String,
+    /// ISO country of the machine (`[node] country`, e.g. `NL`). A pool may
+    /// span countries, so this rides on the node, not on the card: the app
+    /// takes the flag from here instead of parsing the hostname.
+    pub country: String,
     pub server_public_key: String,
     pub mtu: u16,
     pub dns: Vec<String>,
@@ -189,6 +193,13 @@ pub struct PoolCard {
     pub card_id: String,
     pub pool: String,
     pub pool_translation: Option<std::collections::BTreeMap<String, String>>,
+    /// Country under the card's flag. It comes from the pool itself
+    /// (`[node] pool_country_code`), because one card may span countries; a
+    /// pool that declares none falls back to the country of its first node.
+    pub country: Option<String>,
+    /// Human name of `country` (`[node] pool_country_name`); absent means the
+    /// client translates the code.
+    pub country_name: Option<String>,
     pub proto: String,
     pub nodes: Vec<PoolNode>,
 }
@@ -399,13 +410,20 @@ fn grant_of(row: &AccessRow) -> Grant {
 /// valid for any node of the card — only the endpoint differs.
 fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) -> Vec<PoolCard> {
     let tag = proto.tag();
-    let mut grouped: HashMap<
-        String,
-        (
-            Option<std::collections::BTreeMap<String, String>>,
-            Vec<(Uuid, PoolNode)>,
-        ),
-    > = HashMap::new();
+    /// One card while it is being filled: the pool's own attributes plus the
+    /// nodes that carry them.
+    struct Group {
+        translation: Option<std::collections::BTreeMap<String, String>>,
+        /// The country the pool declares (`[node] pool_country_*`), taken from
+        /// the first node that has it: old binaries send nothing.
+        pool_country: Option<(String, Option<String>)>,
+        /// Country of the first node of the card, used when the pool declares
+        /// none — a card with no flag at all would look broken in the list.
+        first_node_country: Option<String>,
+        nodes: Vec<(Uuid, PoolNode)>,
+    }
+
+    let mut grouped: HashMap<String, Group> = HashMap::new();
 
     for (uuid, node) in nodes.iter_nodes() {
         if &node.env != env || !node.status.is_serving() {
@@ -452,13 +470,30 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
 
         let endpoint = format!("{}:{}", node.address, inbound.port);
         let pool_name = node.pool.clone().unwrap_or_else(|| "default".to_string());
-        let entry = grouped
-            .entry(pool_name)
-            .or_insert_with(|| (node.pool_translation.clone(), Vec::new()));
-        entry.1.push((
+        let declared = node
+            .pool_country_code
+            .clone()
+            .map(|code| (code, node.pool_country_name.clone()));
+        let entry = grouped.entry(pool_name).or_insert_with(|| Group {
+            translation: node.pool_translation.clone(),
+            pool_country: None,
+            first_node_country: Some(node.country.clone()),
+            nodes: Vec::new(),
+        });
+        // Any node of the pool may be the one that declares the country.
+        if entry.pool_country.is_none() {
+            if let Some(declared) = declared {
+                entry.pool_country = Some(declared);
+            }
+        }
+        if entry.translation.is_none() {
+            entry.translation = node.pool_translation.clone();
+        }
+        entry.nodes.push((
             *uuid,
             PoolNode {
                 endpoint,
+                country: node.country.clone(),
                 server_public_key,
                 mtu,
                 dns,
@@ -470,14 +505,20 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
 
     let mut cards: Vec<PoolCard> = grouped
         .into_iter()
-        .map(|(pool, (translation, mut nodes))| {
-            nodes.sort_by_key(|(uuid, _)| *uuid);
+        .map(|(pool, mut group)| {
+            group.nodes.sort_by_key(|(uuid, _)| *uuid);
+            let (country, country_name) = match group.pool_country {
+                Some((code, name)) => (Some(code), name),
+                None => (group.first_node_country, None),
+            };
             PoolCard {
                 card_id: card_handle(env, &pool, proto),
                 pool,
-                pool_translation: translation,
+                pool_translation: group.translation,
+                country,
+                country_name,
                 proto: proto.as_str().to_string(),
-                nodes: nodes.into_iter().map(|(_, node)| node).collect(),
+                nodes: group.nodes.into_iter().map(|(_, node)| node).collect(),
             }
         })
         .collect();
@@ -1716,6 +1757,8 @@ where
                 "card_id": card.card_id,
                 "pool": card.pool,
                 "pool_translation": card.pool_translation,
+                "country": card.country,
+                "country_name": card.country_name,
                 "proto": card.proto,
                 "nodes": card.nodes.len(),
             })

@@ -6,7 +6,10 @@ use std::str::FromStr;
 
 use std::collections::HashSet;
 
-use fcore::{Env, Error, Inbound, Node, NodeStatus, NodeType, Tag};
+use fcore::{
+    normalize_pool_country, normalize_pool_country_name, Env, Error, Inbound, Node, NodeStatus,
+    NodeType, Tag,
+};
 
 /// Normalizes an optional `pool_translation` map received from a node (or a
 /// third-party tool): trims keys/values, lowercases the language code,
@@ -199,6 +202,13 @@ pub struct NodeRequest {
     /// accepted as an alias of `uk`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Country of the pool (`[node] pool_country_code`): the card's flag. Old
+    /// node binaries do not send it, so it is optional everywhere.
+    #[serde(default)]
+    pub pool_country_code: Option<String>,
+    /// Human name of `pool_country_code` (`[node] pool_country_name`).
+    #[serde(default)]
+    pub pool_country_name: Option<String>,
 }
 
 impl NodeRequest {
@@ -254,6 +264,8 @@ impl NodeRequest {
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty()),
             pool_translation: normalize_pool_translation(self.pool_translation.clone()),
+            pool_country_code: normalize_pool_country(self.pool_country_code.clone()),
+            pool_country_name: normalize_pool_country_name(self.pool_country_name.clone()),
             node_weights: self
                 .node_weights
                 .iter()

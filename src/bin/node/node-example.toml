@@ -90,6 +90,14 @@ type = "common"
 # alias of `uk`. Blank values are ignored and never overwrite stored ones.
 # pool = "Finland"
 # pool_translation = { en = "Finland", ru = "Финляндия", uk = "Фінляндія" }
+# Country of the POOL (not of this machine): the flag under the card's name.
+# One pool may span countries, so it is declared here and every node of the
+# pool should send the same value; 2-3 latin letters, anything else is dropped.
+# Absent = the card falls back to the node's own `country`.
+# pool_country_code = "NL"
+# Optional human name of that country; absent means the client translates the
+# code itself.
+# pool_country_name = "Netherlands"
 # Optional per-address weights for the pool: address -> weight (default 100).
 # Addresses of one node and of neighbour nodes may share the same weight; the
 # api hands the client `node_weights{ip: weight}` and the client splits traffic

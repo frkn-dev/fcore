@@ -46,7 +46,9 @@ impl PgNode {
             .batch_execute(
                 "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool TEXT;
                  ALTER TABLE nodes ADD COLUMN IF NOT EXISTS node_weights JSONB;
-                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS bench_url TEXT;",
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS bench_url TEXT;
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_country_code TEXT;
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_country_name TEXT;",
             )
             .await?;
         Ok(())
@@ -98,10 +100,10 @@ impl PgNode {
 
         let node_query = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, node_weights
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, pool_country_code, pool_country_name, node_weights
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19, $20, $21
         )
         ON CONFLICT (id) DO UPDATE SET
             uuid = EXCLUDED.uuid,
@@ -120,6 +122,10 @@ impl PgNode {
             node_ips = EXCLUDED.node_ips,
             pool = COALESCE(EXCLUDED.pool, nodes.pool),
             pool_translation = COALESCE(EXCLUDED.pool_translation, nodes.pool_translation),
+            -- The pool country describes the card, not this machine: a node that
+            -- does not declare it must not erase what a sibling already sent.
+            pool_country_code = COALESCE(EXCLUDED.pool_country_code, nodes.pool_country_code),
+            pool_country_name = COALESCE(EXCLUDED.pool_country_name, nodes.pool_country_name),
             node_weights = EXCLUDED.node_weights
     ";
 
@@ -144,6 +150,8 @@ impl PgNode {
                 &node_ips,
                 &node.pool,
                 &pool_translation,
+                &node.pool_country_code,
+                &node.pool_country_name,
                 &node_weights,
             ],
         )
@@ -375,6 +383,8 @@ impl PgNode {
                       n.node_ips,
                       n.pool,
                       n.pool_translation,
+                      n.pool_country_code,
+                      n.pool_country_name,
                       n.node_weights,
                       n.bench_url,
 
@@ -437,6 +447,8 @@ impl PgNode {
             let pool_translation: Option<BTreeMap<String, String>> = row
                 .get::<_, Option<serde_json::Value>>("pool_translation")
                 .and_then(|v| serde_json::from_value(v).ok());
+            let pool_country_code: Option<String> = row.get("pool_country_code");
+            let pool_country_name: Option<String> = row.get("pool_country_name");
 
             // Stored as TEXT[]; parse each entry back into Ipv4Addr.
             // Unparseable entries are skipped with a warning rather than
@@ -513,6 +525,8 @@ impl PgNode {
                     pool: pool.clone(),
                     node_weights: node_weights.clone(),
                     pool_translation: pool_translation.clone(),
+                    pool_country_code: pool_country_code.clone(),
+                    pool_country_name: pool_country_name.clone(),
                     bench_url: bench_url.clone(),
                 });
 

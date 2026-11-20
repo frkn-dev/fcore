@@ -1616,6 +1616,8 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
             node_weights: std::collections::BTreeMap::new(),
             bench_url: None,
         }

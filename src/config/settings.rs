@@ -58,6 +58,13 @@ pub struct NodeConfig {
     pub pool: Option<String>,
     /// Per-language translations of `pool` (e.g. en/ru/uk).
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Country of the whole pool (`[node] pool_country_code`), not of this
+    /// machine: the card shows one flag even when the pool spans countries.
+    /// Normalised to 2–3 upper-case latin letters.
+    pub pool_country_code: Option<String>,
+    /// Human name of `pool_country_code` (`[node] pool_country_name`); absent
+    /// means the client translates the code itself.
+    pub pool_country_name: Option<String>,
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
     /// address from `node_ips`; an unlisted address weighs 100.
     pub node_weights: Option<BTreeMap<String, i32>>,
@@ -90,6 +97,15 @@ pub struct NodeConfigRaw {
     /// and `ua` is accepted as an alias of `uk`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Country of the whole pool (config.toml `[node] pool_country_code`): the
+    /// flag of the card, not of this machine. Anything but 2–3 latin letters is
+    /// dropped, so a typo cannot put "europe" under the flag.
+    #[serde(default, alias = "pool_country")]
+    pub pool_country_code: Option<String>,
+    /// Human name of the pool country (`[node] pool_country_name`); optional,
+    /// the client translates the code when it is absent.
+    #[serde(default)]
+    pub pool_country_name: Option<String>,
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by address.
     /// An empty map means every address uses the default (100). An unparsable
     /// key or a non-positive weight is dropped.
@@ -124,6 +140,21 @@ fn normalize_node_weights(raw: Option<BTreeMap<String, i32>>) -> Option<BTreeMap
 /// Trims the configured pool name and treats a blank value as absent.
 fn normalize_pool(pool: Option<String>) -> Option<String> {
     pool.map(|p| p.trim().to_string()).filter(|p| !p.is_empty())
+}
+
+/// Pool country code (`[node] pool_country_code`): trimmed, upper-cased and
+/// kept only when it is 2–3 latin letters — the flag lookup the client does
+/// takes ISO codes, and a typo must not reach the card.
+pub fn normalize_pool_country(code: Option<String>) -> Option<String> {
+    let code = code?.trim().to_uppercase();
+    let usable = (2..=3).contains(&code.chars().count())
+        && code.chars().all(|c| c.is_ascii_alphabetic());
+    usable.then_some(code)
+}
+
+/// Pool country name (`[node] pool_country_name`): trimmed, blank means absent.
+pub fn normalize_pool_country_name(name: Option<String>) -> Option<String> {
+    name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
 }
 
 /// Normalizes a `pool_translation` map: trims keys/values, lowercases the
@@ -184,6 +215,8 @@ impl NodeConfig {
             node_ips: raw.node_ips,
             pool: normalize_pool(raw.pool),
             pool_translation: normalize_pool_translation(raw.pool_translation),
+            pool_country_code: normalize_pool_country(raw.pool_country_code),
+            pool_country_name: normalize_pool_country_name(raw.pool_country_name),
             node_weights: normalize_node_weights(raw.node_weights),
         })
     }
@@ -307,5 +340,32 @@ mod tests {
             normalize_pool(Some(" Finland ".to_string())),
             Some("Finland".to_string())
         );
+    }
+
+    /// The card's flag is looked up by ISO code: anything that is not 2-3 latin
+    /// letters must be dropped rather than shown as a broken flag.
+    #[test]
+    fn pool_country_code_takes_only_iso_codes() {
+        assert_eq!(
+            normalize_pool_country(Some(" nl ".to_string())).as_deref(),
+            Some("NL")
+        );
+        assert_eq!(
+            normalize_pool_country(Some("usa".to_string())).as_deref(),
+            Some("USA")
+        );
+        assert!(normalize_pool_country(Some("europe".to_string())).is_none());
+        assert!(normalize_pool_country(Some("N1".to_string())).is_none());
+        assert!(normalize_pool_country(Some("   ".to_string())).is_none());
+        assert!(normalize_pool_country(None).is_none());
+    }
+
+    #[test]
+    fn pool_country_name_is_trimmed_or_absent() {
+        assert_eq!(
+            normalize_pool_country_name(Some(" Netherlands ".to_string())).as_deref(),
+            Some("Netherlands")
+        );
+        assert!(normalize_pool_country_name(Some("  ".to_string())).is_none());
     }
 }

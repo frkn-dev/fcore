@@ -40,7 +40,10 @@ pub use config::{
     h2::{H2Settings, Hysteria2Settings},
     inbound::{Inbound, InboundConnLink, Network, Settings as XraySettings},
     mtproto::MtprotoSettings,
-    settings::{ApiAccessConfig, MetricsTxConfig, NodeConfig, NodeConfigRaw, Settings},
+    settings::{
+        normalize_pool_country, normalize_pool_country_name, ApiAccessConfig, MetricsTxConfig,
+        NodeConfig, NodeConfigRaw, Settings,
+    },
     wireguard::{WireguardServerConfig, WireguardSettings},
 };
 

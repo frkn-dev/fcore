@@ -738,6 +738,8 @@ mod tests {
             node_ips: None,
             pool: pool.map(str::to_string),
             pool_translation: translation,
+            pool_country_code: None,
+            pool_country_name: None,
             node_weights: BTreeMap::new(),
             bench_url: None,
         }

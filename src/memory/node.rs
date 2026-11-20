@@ -217,6 +217,15 @@ pub struct Node {
     /// falls back to `pool`; an absent map means there is no translation.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Country of the whole pool (`[node] pool_country_code`): the flag of the
+    /// card, not of this machine. A pool may span countries; when it declares
+    /// none the card falls back to the node's own `country`.
+    #[serde(default)]
+    pub pool_country_code: Option<String>,
+    /// Human name of `pool_country_code` (`[node] pool_country_name`); absent
+    /// means the client translates the code itself.
+    #[serde(default)]
+    pub pool_country_name: Option<String>,
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
     /// address from `node_ips`. An unlisted address weighs `DEFAULT_NODE_WEIGHT`;
     /// neighbour addresses may share the same weight. Part of the derived
@@ -437,6 +446,8 @@ impl Node {
             node_ips: settings.node_ips,
             pool: settings.pool,
             pool_translation: settings.pool_translation,
+            pool_country_code: settings.pool_country_code,
+            pool_country_name: settings.pool_country_name,
             node_weights: settings.node_weights.unwrap_or_default(),
             bench_url: None,
         }
@@ -555,6 +566,8 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
             node_weights: BTreeMap::new(),
             bench_url: None,
         };

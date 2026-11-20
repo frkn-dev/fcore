@@ -2525,6 +2525,8 @@ mod tests {
             },
             pool: Some("Russia".into()),
             pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
             node_weights: BTreeMap::new(),
             bench_url: None,
         }
@@ -2975,6 +2977,8 @@ mod tests {
             node_ips: None,
             pool: None,
             pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
             node_weights: BTreeMap::new(),
             bench_url: None,
         };
@@ -3247,6 +3251,8 @@ mod tests {
                 node_ips: Some(ips),
                 pool: pool.map(|s| s.to_string()),
                 pool_translation: None,
+                pool_country_code: None,
+                pool_country_name: None,
                 node_weights: BTreeMap::new(),
                 bench_url: None,
             }
