@@ -39,6 +39,13 @@ pub struct NodeRequest {
     /// Optional per-language translations of `pool`.
     #[serde(default)]
     pub pool_translation: Option<BTreeMap<String, String>>,
+    /// Country of the whole pool (config.toml `[node] pool_country_code`): the
+    /// card's flag. Old api builds ignore the unknown field.
+    #[serde(default)]
+    pub pool_country_code: Option<String>,
+    /// Human name of the pool country (`[node] pool_country_name`).
+    #[serde(default)]
+    pub pool_country_name: Option<String>,
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
     /// address from `node_ips`. Old api builds ignore the unknown field.
     #[serde(default)]
@@ -321,6 +328,8 @@ where
             node_ips: node.node_ips.clone(),
             pool: node.pool.clone(),
             pool_translation: node.pool_translation.clone(),
+            pool_country_code: node.pool_country_code.clone(),
+            pool_country_name: node.pool_country_name.clone(),
             node_weights: node.node_weights.clone(),
         };
 

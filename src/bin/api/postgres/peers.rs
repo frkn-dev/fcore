@@ -499,13 +499,17 @@ impl PgPeers {
         // `integer` while the caller speaks i64. Both mismatches used to kill
         // the insert, and the caller swallowed the error — the registry stayed
         // empty for every shard.
+        // `$3::text::jsonb` keeps the parameter type `text` (a bare `$3::jsonb`
+        // makes it jsonb, and a String then fails to serialize into it);
+        // `node_count` is `integer`, the caller speaks i64.
         let translation = translation.map(|value| value.to_string());
+        let node_count = node_count as i32;
 
         client
             .execute(
                 r#"
                 INSERT INTO pools (env, pool, pool_translation, node_count)
-                VALUES ($1, $2, $3::jsonb, $4::int4)
+                VALUES ($1, $2, $3::text::jsonb, $4)
                 ON CONFLICT (env, pool) DO UPDATE
                 SET pool_translation = COALESCE(EXCLUDED.pool_translation, pools.pool_translation),
                     last_seen = now(),
