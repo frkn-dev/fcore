@@ -36,6 +36,18 @@ fn peer_interface_addresses(node: &fcore::Node) -> Vec<(Tag, String)> {
     out
 }
 
+/// The block a node brings for its own shard: the subnet of its peer interface
+/// (`10.222.5.1/24` -> `10.222.5.0/24`). `None` when the node announces no peer
+/// interface at all.
+fn adopted_peer_block(node: &fcore::Node) -> Option<fcore::IpAddrMask> {
+    for (_, raw) in peer_interface_addresses(node) {
+        if let Ok(mask) = raw.parse::<fcore::IpAddrMask>() {
+            return Some(mask);
+        }
+    }
+    None
+}
+
 /// Whether `address` (as `10.88.0.1/16`) falls inside one of the shard blocks.
 /// Unparseable input is a refusal too: a node that cannot be checked must not
 /// be trusted with the shard's addresses.
@@ -123,6 +135,63 @@ where
     // hide the node and POST /v1/peers will answer env_not_served. Say it in
     // the log instead of leaving the operator with an empty card.
     if node.env.is_named_shard() {
+        // A shard nobody declared (a premium slot, a customer's own machine)
+        // takes the subnet the node brought with it. The exclusion constraint
+        // refuses an overlap, and then the operator has to pick another range —
+        // silently sharing one range between two shards breaks both.
+        let declared = {
+            let mem = memory.memory.read().await;
+            mem.peers_state.block_masks(&node.env)
+        };
+        if declared.is_empty() {
+            if let Some(block) = adopted_peer_block(&node) {
+                match memory.db.peers().insert_env_block(&node.env, &block).await {
+                    Ok(crate::postgres::peers::Inserted::Done) => {
+                        memory
+                            .memory
+                            .write()
+                            .await
+                            .peers_state
+                            .env_networks
+                            .entry(node.env.clone())
+                            .or_default()
+                            .push(block.to_string());
+                        tracing::info!(
+                            "peers: shard {:?} adopted {} from node {} ({})",
+                            node.env.to_string(),
+                            block,
+                            node.uuid,
+                            node_req.hostname
+                        );
+                    }
+                    Ok(crate::postgres::peers::Inserted::Conflict) => {
+                        tracing::error!(
+                            "peers: node {} brings {}, already held by another shard — refusing",
+                            node.uuid,
+                            block
+                        );
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+                                status: StatusCode::BAD_REQUEST.as_u16(),
+                                message: format!(
+                                    "peer subnet {} is already used by another shard — \
+                                     pick another range in the node config",
+                                    block
+                                ),
+                                response: None,
+                            }),
+                            StatusCode::BAD_REQUEST,
+                        ));
+                    }
+                    Err(e) => tracing::error!(
+                        "peers: cannot store the subnet of shard {:?}: {}",
+                        node.env.to_string(),
+                        e
+                    ),
+                }
+            }
+        }
+
         let blocks = {
             let mem = memory.memory.read().await;
             mem.peers_state.block_masks(&node.env)
