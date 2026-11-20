@@ -494,14 +494,18 @@ impl PgPeers {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
+        // jsonb has no `ToSql` without tokio-postgres' serde_json feature, so
+        // the translation travels as text and is cast here; `node_count` is
+        // `integer` while the caller speaks i64. Both mismatches used to kill
+        // the insert, and the caller swallowed the error — the registry stayed
+        // empty for every shard.
+        let translation = translation.map(|value| value.to_string());
+
         client
             .execute(
                 r#"
                 INSERT INTO pools (env, pool, pool_translation, node_count)
-                -- node_count is integer, the caller speaks i64: without the
-                -- cast tokio-postgres refuses the parameter and the whole
-                -- registry row is lost (the caller used to swallow the error).
-                VALUES ($1, $2, $3, $4::int4)
+                VALUES ($1, $2, $3::jsonb, $4::int4)
                 ON CONFLICT (env, pool) DO UPDATE
                 SET pool_translation = COALESCE(EXCLUDED.pool_translation, pools.pool_translation),
                     last_seen = now(),
