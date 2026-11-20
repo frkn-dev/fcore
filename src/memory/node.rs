@@ -83,8 +83,17 @@ impl FromStr for Status {
 #[derive(Clone, Debug, Deserialize, Serialize, Copy, ToSql, FromSql, PartialEq)]
 #[postgres(name = "node_type")]
 pub enum Type {
+    /// Legacy label. Old fnode builds register as `common`; new ones send
+    /// `core`. Both mean the same thing: a machine that serves client traffic.
     #[postgres(name = "common")]
     Node,
+
+    #[postgres(name = "core")]
+    Core,
+
+    /// A user's own machine (self-hosted subscription).
+    #[postgres(name = "selfhosted")]
+    SelfHosted,
 
     #[postgres(name = "premium")]
     PremiumNode,
@@ -96,10 +105,18 @@ pub enum Type {
     Agent,
 }
 
+impl Type {
+    /// True for both the legacy `common` label and the new `core` one.
+    pub fn is_core(&self) -> bool {
+        matches!(self, Type::Node | Type::Core)
+    }
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Node => write!(f, "Node"),
+            Type::Node | Type::Core => write!(f, "core"),
+            Type::SelfHosted => write!(f, "selfhosted"),
             Type::PremiumNode => write!(f, "PremiumNode"),
             Type::Service => write!(f, "Service"),
             Type::Agent => write!(f, "Agent"),
@@ -112,9 +129,13 @@ impl FromStr for Type {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input.to_lowercase().as_str() {
-            "agent" | "common" | "node" => Ok(Type::Node),
+            // `common` is what old fnode builds send; normalise it to `core`
+            // so freshly registered machines carry the new label.
+            "core" | "common" | "node" => Ok(Type::Core),
             "premium" | "premiumnode" | "premium_node" => Ok(Type::PremiumNode),
             "service" => Ok(Type::Service),
+            "agent" => Ok(Type::Agent),
+            "selfhosted" | "self_hosted" | "personal" => Ok(Type::SelfHosted),
             _ => Err(()),
         }
     }

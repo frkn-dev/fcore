@@ -735,7 +735,7 @@ where
     }
 
     node_req.env = expected.clone();
-    node_req.r#type = Some(NodeType::Node);
+    node_req.r#type = Some(NodeType::SelfHosted);
     node_req.cluster = None;
     node_req.pool = None;
 
@@ -1925,7 +1925,7 @@ where
 
     node_req.env = env.clone();
     node_req.uuid = known;
-    node_req.r#type = Some(NodeType::Node);
+    node_req.r#type = Some(NodeType::SelfHosted);
     node_req.cluster = None;
     node_req.pool = None;
 

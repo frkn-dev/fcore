@@ -229,7 +229,7 @@ impl NodeRequest {
         let t = if let Some(t) = self.r#type {
             t
         } else {
-            NodeType::Node
+            NodeType::Core
         };
         Node {
             uuid: self.uuid,
