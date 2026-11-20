@@ -221,6 +221,15 @@ impl DeviceStore {
             .filter(|row| row.subscription_id == *subscription_id)
             .collect()
     }
+
+    /// Drops a device the reaping task deleted. Its peers are already revoked
+    /// and therefore absent from `PeerStore`.
+    pub fn remove(&mut self, id: &Uuid) -> Option<DeviceRow> {
+        let row = self.by_id.remove(id)?;
+        self.by_uid.remove(&(row.subscription_id, row.device_uid));
+        self.by_support.remove(&row.support_tag);
+        Some(row)
+    }
 }
 
 /// Grants keyed by `(subscription, env)` — one row per env, as in the table.
@@ -364,6 +373,7 @@ mod tests {
             proto: fcore::Tag::AmneziaPeer,
             public_key: key.to_string(),
             address: addr.to_string(),
+            pool: None,
             label: None,
             created_at: Utc::now(),
             revoked_at: None,

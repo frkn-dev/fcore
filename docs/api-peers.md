@@ -40,9 +40,17 @@
 
 ```json
 { "peer_id": "…", "device_id": "…", "env": "standard-eu", "proto": "amnezia_peer",
+  "card_id": "standard-eu:eu:amnezia_peer",
   "address": "10.88.0.2/32", "label": null, "created_at": "…",
   "revoked_at": null, "revoke_reason": null }
 ```
+
+`card_id` — карточка (`<шард>:<пул>:<протокол>`), под которую создан пир. По ней
+приложение собирает конфиг из списка пиров без похода в api: адрес берётся из
+блока шарда, а endpoint, серверный ключ, MTU, DNS и обфускация — из ноды этого
+пула. `card_id = null` у пиров, созданных до появления `peers.pool` (миграция
+`0025`) и у ручной формы `env` + `proto`: для них приложение берёт карточки из
+`POST /v1/locations`.
 
 `PeerCreateResponse` — то же плюс `support_tag` (строка вида `7K2M-9XQ4P`) и `pools[]`
 с `endpoint` / `server_public_key` / `mtu` / `dns` / `keepalive` / `obfuscation`.

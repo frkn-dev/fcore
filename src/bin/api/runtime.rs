@@ -234,6 +234,17 @@ where
                     service.expire_grants(interval).await;
                 }
             });
+
+            // Installations nobody uses any more: without this the device cap
+            // of a subscription fills with phones that were wiped long ago.
+            spawn_task("reap_stale_devices", {
+                let interval = self.settings.tasks.stale_device_interval_sec;
+                let service = Arc::clone(&self);
+
+                async move {
+                    service.reap_stale_devices(interval).await;
+                }
+            });
         }
 
         spawn_task("enforce_traffic_limits", {

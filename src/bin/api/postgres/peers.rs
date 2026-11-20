@@ -37,7 +37,12 @@ pub struct ShardRow {
     pub shard: String,
     pub title: Option<String>,
     pub plan: String,
-    pub pools: i64,
+    /// Shard class (`core | premium | personal | legacy`). Derived from the
+    /// plan on write; never from the id, which is opaque.
+    pub kind: String,
+    pub enabled: bool,
+    /// Pools the shard's nodes declare — the cards a client sees, not a count.
+    pub pools: Vec<String>,
     pub nodes: i64,
     pub peers_live: i64,
     pub address_hosts: i64,
@@ -68,6 +73,10 @@ pub struct PeerRow {
     pub proto: Tag,
     pub public_key: String,
     pub address: String,
+    /// Card the tunnel was created for (`<shard>:<pool>:<proto>` → the middle
+    /// part). `None` for rows written before the column existed: their pool
+    /// cannot be recovered, so the app falls back to env + proto.
+    pub pool: Option<String>,
     pub label: Option<String>,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -489,7 +498,10 @@ impl PgPeers {
             .execute(
                 r#"
                 INSERT INTO pools (env, pool, pool_translation, node_count)
-                VALUES ($1, $2, $3, $4)
+                -- node_count is integer, the caller speaks i64: without the
+                -- cast tokio-postgres refuses the parameter and the whole
+                -- registry row is lost (the caller used to swallow the error).
+                VALUES ($1, $2, $3, $4::int4)
                 ON CONFLICT (env, pool) DO UPDATE
                 SET pool_translation = COALESCE(EXCLUDED.pool_translation, pools.pool_translation),
                     last_seen = now(),
@@ -617,9 +629,11 @@ impl PgPeers {
         let rows = client
             .query(
                 r#"
-                SELECT shard, title, plan,
-                       pools::int8 AS pools,
-                       nodes::int8 AS nodes,
+                SELECT shard, title, plan, kind, enabled,
+                       -- `pools` is text[] (the card names of the shard), the
+                       -- rest are counts. Casting the array to int8 made this
+                       -- query, and with it `GET /admin/api/shards`, fail.
+                       pools, nodes::int8 AS nodes,
                        peers_live::int8 AS peers_live,
                        address_hosts::int8 AS address_hosts
                   FROM shard_overview
@@ -635,6 +649,8 @@ impl PgPeers {
                 shard: row.get("shard"),
                 title: row.get("title"),
                 plan: row.get("plan"),
+                kind: row.get("kind"),
+                enabled: row.get("enabled"),
                 pools: row.get("pools"),
                 nodes: row.get("nodes"),
                 peers_live: row.get("peers_live"),
@@ -1151,6 +1167,78 @@ impl PgPeers {
         Ok((row.get("device_live"), row.get("sub_live")))
     }
 
+    /// Idempotent DDL of the peers layer.
+    ///
+    /// `0025` is applied before the binary on a normal deploy, but a rollback
+    /// puts an older tree under a newer database and vice versa; the api must
+    /// not fail every peer query because one column is missing.
+    pub async fn ensure_schema(&self) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let row = client
+            .query_one("SELECT to_regclass('peers') IS NOT NULL AS present", &[])
+            .await?;
+        if !row.get::<_, bool>("present") {
+            return Ok(());
+        }
+
+        client
+            .batch_execute(
+                "ALTER TABLE peers ADD COLUMN IF NOT EXISTS pool text;
+                 CREATE INDEX IF NOT EXISTS peers_pool_live
+                     ON peers (env, pool) WHERE revoked_at IS NULL;",
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Deletes devices that are only history: no live tunnel and nothing
+    /// created for `days`.
+    ///
+    /// A device row is what makes an installation known to the api (`device_uid`
+    /// survives a reinstall because the app keeps it in the Keychain), so
+    /// without this the device cap fills up with phones that no longer exist and
+    /// support has to delete them by hand. Only devices without a live peer are
+    /// touched — an active installation always has one — and its peers are
+    /// already revoked, so nothing has to be pushed to a node.
+    pub async fn reap_stale_devices(&self, days: i64, limit: i64) -> Result<Vec<DeviceRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                DELETE FROM devices d
+                WHERE d.id IN (
+                    SELECT c.id
+                      FROM devices c
+                     WHERE NOT EXISTS (
+                               SELECT 1 FROM peers p
+                                WHERE p.device_id = c.id AND p.revoked_at IS NULL)
+                       AND GREATEST(
+                               c.created_at,
+                               COALESCE(c.rotated_at, c.created_at),
+                               COALESCE((SELECT max(GREATEST(
+                                                       p.created_at,
+                                                       COALESCE(p.revoked_at, p.created_at)))
+                                           FROM peers p
+                                          WHERE p.device_id = c.id), c.created_at)
+                           ) < now() - make_interval(days => $1::int)
+                     ORDER BY c.created_at
+                     LIMIT $2
+                )
+                RETURNING id, subscription_id, device_uid, device_name, public_key, platform,
+                          support_tag, created_at, rotated_at
+                "#,
+                &[&(days as i32), &limit],
+            )
+            .await?;
+
+        Ok(rows.iter().map(device_from_row).collect())
+    }
+
     // ----------------------------------------------------------------- peers
 
     pub async fn peer_by_id(&self, id: Uuid) -> Result<Option<PeerRow>> {
@@ -1303,6 +1391,7 @@ impl PgPeers {
         proto: Tag,
         public_key: &str,
         address: Ipv4Addr,
+        pool: Option<&str>,
         label: Option<&str>,
     ) -> Result<Option<PeerRow>> {
         let mut manager = self.manager.lock().await;
@@ -1314,8 +1403,8 @@ impl PgPeers {
                 &format!(
                     r#"
                     INSERT INTO peers
-                        (device_id, subscription_id, env, proto, public_key, address, label)
-                    VALUES ($1, $2, $3, $4, $5, $6::text::cidr, $7)
+                        (device_id, subscription_id, env, proto, public_key, address, pool, label)
+                    VALUES ($1, $2, $3, $4, $5, $6::text::cidr, $7, $8)
                     ON CONFLICT DO NOTHING
                     RETURNING {PEER_COLUMNS}
                     "#
@@ -1327,6 +1416,7 @@ impl PgPeers {
                     &proto,
                     &public_key,
                     &host,
+                    &pool,
                     &label,
                 ],
             )
@@ -1477,7 +1567,8 @@ impl PgPeers {
 }
 
 const PEER_COLUMNS: &str = "id, device_id, subscription_id, env, proto, public_key, \
-                            host(address) AS address, label, created_at, revoked_at, revoke_reason";
+                            host(address) AS address, pool, label, created_at, revoked_at, \
+                            revoke_reason";
 
 fn access_from_row(row: &tokio_postgres::Row) -> AccessRow {
     let env: String = row.get("env");
@@ -1516,6 +1607,7 @@ fn peer_from_row(row: &tokio_postgres::Row) -> PeerRow {
         proto: row.get("proto"),
         public_key: row.get("public_key"),
         address: row.get("address"),
+        pool: row.get("pool"),
         label: row.get("label"),
         created_at: row.get("created_at"),
         revoked_at: row.get("revoked_at"),

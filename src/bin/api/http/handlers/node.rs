@@ -303,11 +303,19 @@ where
                         })
                         .count() as i64
                 };
-                let _ = memory
+                if let Err(e) = memory
                     .db
                     .peers()
                     .note_pool(&node.env, &pool, translation, node_count)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        "peers: cannot register pool {} of shard {}: {}",
+                        pool,
+                        node.env,
+                        e
+                    );
+                }
 
                 crate::http::handlers::peers::publish_peers_init(
                     &memory, node_id, &node.env, &peer_tags,

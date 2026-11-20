@@ -177,6 +177,9 @@ where
         // Peers layer into memory: handlers validate against this copy and
         // only write to Postgres.
         if settings.service.peers.enabled {
+            if let Err(e) = db.peers().ensure_schema().await {
+                tracing::error!("peers: cannot prepare schema: {}", e);
+            }
             match db.peers().load_state().await {
                 Ok(state) => {
                     tracing::info!(

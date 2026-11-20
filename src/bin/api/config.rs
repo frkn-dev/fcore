@@ -203,6 +203,14 @@ pub struct PeersConfig {
     /// app can say why a tunnel died instead of "no such peer".
     #[serde(default = "default_peers_remember_days")]
     pub remember_days: i64,
+    /// A device with no live tunnel and nothing created for this many days is
+    /// deleted, together with its (already revoked) peers.
+    ///
+    /// The device cap is per subscription and `device_uid` survives a reinstall,
+    /// so without reaping the cap fills with phones that no longer exist. Zero
+    /// disables the task; the first tick after startup already reaps.
+    #[serde(default = "default_peers_stale_device_days")]
+    pub stale_device_days: i64,
     /// Remove v1 connections whose `(env, proto)` the subscription no longer
     /// holds a grant for. Off by default: a migration must be deliberate, and
     /// until the client can build peers a pruned connection leaves the user
@@ -237,6 +245,10 @@ fn default_peers_remember_days() -> i64 {
     7
 }
 
+fn default_peers_stale_device_days() -> i64 {
+    90
+}
+
 fn default_auto_subnet_prefix() -> u8 {
     16
 }
@@ -261,6 +273,7 @@ impl Default for PeersConfig {
             auto_subnet_prefix: default_auto_subnet_prefix(),
             shards: HashMap::new(),
             remember_days: default_peers_remember_days(),
+            stale_device_days: default_peers_stale_device_days(),
             prune_legacy_conns: false,
             prune_dry_run: true,
             prune_max_per_tick: default_peers_prune_max_per_tick(),
@@ -425,6 +438,10 @@ pub struct TasksConfig {
     /// connections (heals nodes that missed the one-shot delete).
     #[serde(default = "default_tombstone_republish_interval_sec")]
     pub tombstone_republish_interval_sec: u64,
+    /// How often `[service.peers] stale_device_days` is applied. The threshold
+    /// itself is counted in days, so an hourly tick is plenty.
+    #[serde(default = "default_stale_device_interval_sec")]
+    pub stale_device_interval_sec: u64,
 }
 
 impl ServiceConfig {
@@ -514,6 +531,10 @@ fn default_conns_reconcile_interval_sec() -> u64 {
 }
 
 fn default_tombstone_republish_interval_sec() -> u64 {
+    3600
+}
+
+fn default_stale_device_interval_sec() -> u64 {
     3600
 }
 

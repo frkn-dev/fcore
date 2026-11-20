@@ -198,6 +198,13 @@ pub struct PeerView {
     pub peer_id: Uuid,
     pub device_id: Uuid,
     pub proto: String,
+    /// The card this tunnel belongs to (`<shard>:<pool>:<proto>`), so the app
+    /// can rebuild the config from the peer list alone: the address comes from
+    /// the shard, but the endpoint, the server key and the obfuscation come
+    /// from the pool. `None` for tunnels created before `peers.pool` existed
+    /// and for the manual `env` + `proto` form — the app then falls back to
+    /// `GET /v1/locations`.
+    pub card_id: Option<String>,
     pub address: String,
     pub label: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -266,7 +273,7 @@ fn resolve_card(
     card_id: &Option<String>,
     env: Option<&str>,
     proto: Option<&str>,
-) -> Result<(Env, PeerProto), Box<dyn warp::Reply>> {
+) -> Result<(Env, PeerProto, Option<String>), Box<dyn warp::Reply>> {
     if let Some(raw) = card_id.as_deref() {
         let Some((head, proto_raw)) = raw.rsplit_once(':') else {
             return Err(json_reply(
@@ -275,7 +282,7 @@ fn resolve_card(
                 serde_json::json!({ "error": "bad_card_id" }),
             ));
         };
-        let Some((env_raw, _pool)) = head.split_once(':') else {
+        let Some((env_raw, pool)) = head.split_once(':') else {
             return Err(json_reply(
                 400,
                 "bad card_id",
@@ -290,7 +297,13 @@ fn resolve_card(
             ));
         };
         return match Env::from_str(env_raw) {
-            Ok(env) => Ok((env, proto)),
+            // The pool rides along: it is what the app needs to place the
+            // tunnel on the right card when it re-reads `GET /v1/peers`.
+            Ok(env) => Ok((
+                env,
+                proto,
+                (!pool.is_empty()).then(|| pool.to_string()),
+            )),
             Err(_) => Err(json_reply(
                 400,
                 "bad env",
@@ -314,7 +327,8 @@ fn resolve_card(
         ));
     };
     match Env::from_str(env_raw) {
-        Ok(env) => Ok((env, proto)),
+        // The manual form names no pool, so the tunnel is not tied to a card.
+        Ok(env) => Ok((env, proto, None)),
         Err(_) => Err(json_reply(
             400,
             "bad env",
@@ -324,10 +338,16 @@ fn resolve_card(
 }
 
 fn peer_view(row: &PeerRow) -> PeerView {
+    let proto = PeerProto::from_tag(row.proto);
     PeerView {
         peer_id: row.id,
         device_id: row.device_id,
         proto: proto_wire_name(&row.proto),
+        card_id: row
+            .pool
+            .as_deref()
+            .zip(proto)
+            .map(|(pool, proto)| card_handle(&row.env, pool, proto)),
         address: row.address.clone(),
         label: row.label.clone(),
         created_at: row.created_at,
@@ -722,10 +742,11 @@ where
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
-    let (env, proto) = match resolve_card(&req.card_id, req.env.as_deref(), req.proto.as_deref()) {
-        Ok(pair) => pair,
-        Err(reply) => return reply,
-    };
+    let (env, proto, pool) =
+        match resolve_card(&req.card_id, req.env.as_deref(), req.proto.as_deref()) {
+            Ok(card) => card,
+            Err(reply) => return reply,
+        };
 
     if let Some(key) = req.public_key.as_deref() {
         if !peers::is_valid_public_key(key) {
@@ -954,6 +975,7 @@ where
                 proto.tag(),
                 &public_key,
                 address,
+                pool.as_deref(),
                 req.label.as_deref(),
             )
             .await
@@ -1866,6 +1888,64 @@ pub fn not_enabled() -> Box<dyn warp::Reply> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn peer_row(pool: Option<&str>) -> PeerRow {
+        PeerRow {
+            id: uuid::Uuid::new_v4(),
+            device_id: uuid::Uuid::new_v4(),
+            subscription_id: uuid::Uuid::new_v4(),
+            env: Env::from_str("0001").unwrap(),
+            proto: fcore::Tag::AmneziaPeer,
+            public_key: "KEY".to_string(),
+            address: "10.88.0.2".to_string(),
+            pool: pool.map(|p| p.to_string()),
+            label: None,
+            created_at: chrono::Utc::now(),
+            revoked_at: None,
+            revoke_reason: None,
+        }
+    }
+
+    /// The pool of the card is the piece a rebuild of the config needs: the
+    /// endpoint and the server key live on the node of that pool, not on the
+    /// shard at large.
+    #[test]
+    fn peer_view_names_the_card_it_was_created_for() {
+        let row = peer_row(Some("eu"));
+        assert_eq!(
+            peer_view(&row).card_id.as_deref(),
+            Some("0001:eu:amnezia_peer")
+        );
+
+        // A tunnel from before `peers.pool` existed has no card to name.
+        assert!(peer_view(&peer_row(None)).card_id.is_none());
+    }
+
+    #[test]
+    fn resolve_card_keeps_the_pool() {
+        let Ok((env, proto, pool)) =
+            resolve_card(&Some("0001:eu:amnezia_peer".to_string()), None, None)
+        else {
+            panic!("a well-formed card_id must resolve");
+        };
+        assert_eq!(env, Env::from_str("0001").unwrap());
+        assert_eq!(proto, PeerProto::Amnezia);
+        assert_eq!(pool.as_deref(), Some("eu"));
+
+        // The manual form names no pool: `env` + `proto` is not tied to a card.
+        let Ok((_, _, pool)) = resolve_card(&None, Some("0001"), Some("wireguard_peer")) else {
+            panic!("env + proto must resolve");
+        };
+        assert!(pool.is_none());
+
+        // A pool-less handle ("<shard>:<pool>:<proto>" with an empty middle) is
+        // still a valid card; it just cannot name one.
+        let Ok((_, _, pool)) = resolve_card(&Some("0001::amnezia_peer".to_string()), None, None)
+        else {
+            panic!("an empty pool must still resolve");
+        };
+        assert!(pool.is_none());
+    }
 
     #[test]
     fn support_tags_are_readable_and_unique_enough() {

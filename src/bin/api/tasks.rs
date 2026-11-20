@@ -50,6 +50,10 @@ pub trait Tasks {
     /// End grants whose term is over or whose traffic limit is reached, taking
     /// their peers and v1 connections down with them.
     async fn expire_grants(&self, interval_sec: u64);
+    /// Delete installations that are only history (no live tunnel, nothing
+    /// created for `stale_device_days`), so the device cap does not fill with
+    /// phones that no longer exist.
+    async fn reap_stale_devices(&self, interval_sec: u64);
     async fn republish_conn_deletes(&self, interval_sec: u64);
 }
 
@@ -666,6 +670,43 @@ where
                         env, sub_id, e
                     ),
                 }
+            }
+        }
+    }
+
+    async fn reap_stale_devices(&self, interval_sec: u64) {
+        let days = self.settings.service.peers.stale_device_days;
+        if days <= 0 {
+            info!("reap_stale_devices: disabled (stale_device_days = 0)");
+            return;
+        }
+
+        // Per tick cap: a first run on a long-lived deployment must not lock
+        // `devices` for one big DELETE.
+        const PER_TICK: i64 = 200;
+
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+        loop {
+            interval.tick().await;
+            debug!("Run reap stale devices task");
+
+            match self.sync.db.peers().reap_stale_devices(days, PER_TICK).await {
+                Ok(rows) if rows.is_empty() => {}
+                Ok(rows) => {
+                    {
+                        let mut mem = self.sync.memory.write().await;
+                        for row in &rows {
+                            mem.peers_state.devices.remove(&row.id);
+                        }
+                    }
+                    info!(
+                        "reap_stale_devices: removed {} device(s) idle for more than {} days",
+                        rows.len(),
+                        days
+                    );
+                }
+                Err(e) => error!("reap_stale_devices: cannot delete stale devices: {}", e),
             }
         }
     }

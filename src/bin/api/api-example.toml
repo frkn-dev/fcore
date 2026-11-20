@@ -70,6 +70,10 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # max_devices_per_subscription = 15
 # max_per_subscription = 45
 # remember_days = 7
+# # A device with no live tunnel and nothing created for this many days is
+# # deleted with its revoked peers (default 90, 0 disables). Without it the
+# # device cap fills with phones that no longer exist.
+# stale_device_days = 90
 # subnets = { "0001" = ["10.88.0.0/16"] }
 # # Shards whose number is unknown (premium slots, customers' machines) are not
 # # listed anywhere: the api carves a /16 for each of them out of this pool on
@@ -145,6 +149,9 @@ traffic_persist_interval_sec = 3600
 # any missing (env, proto) connection (default 3600).
 # conns_reconcile_interval_sec = 3600
 # device_limit_max_ticks = 3
+# Peers: how often installations with no live tunnel get reaped (default 3600).
+# The threshold itself is `[service.peers] stale_device_days`.
+# stale_device_interval_sec = 3600
 connection_expire_interval = 600
 monitor_nodes_interval = 60
 heartbeat_node_offline_threshold_sec = 120
