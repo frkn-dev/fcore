@@ -261,17 +261,15 @@ pub struct ShardDecl {
     /// Human name shown as the group header in the app.
     #[serde(default)]
     pub title: Option<String>,
-    /// `core|premium|personal`; gates which endpoints may target the shard.
-    #[serde(default = "default_shard_kind")]
-    pub kind: String,
+    /// `core|premium|personal`. Optional: derived from `plan` when omitted
+    /// (standard/lite → core, premium → premium, selfhosted → personal), so a
+    /// declaration cannot drift from the tariff it sells.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub max_subscriptions: Option<i32>,
     #[serde(default = "default_true")]
     pub enabled: bool,
-}
-
-fn default_shard_kind() -> String {
-    "core".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -552,7 +550,6 @@ mod tests {
             [shards."0001"]
             plan = "standard"
             title = "Standard"
-            kind = "core"
 
             [shards."1001"]
             plan = "lite"
@@ -563,7 +560,16 @@ mod tests {
 
         let first = cfg.shards.get(&Env::Named("0001".into())).expect("0001");
         assert_eq!(first.plan, "standard");
-        assert_eq!(first.kind, "core");
+        // Not declared by hand: the kind follows the plan.
+        assert_eq!(first.kind, None);
+        assert_eq!(
+            crate::peers::ShardKind::for_plan(&first.plan),
+            Some(crate::peers::ShardKind::Core)
+        );
+        assert_eq!(
+            crate::peers::ShardKind::for_plan("premium"),
+            Some(crate::peers::ShardKind::Premium)
+        );
         assert!(first.enabled);
         let second = cfg.shards.get(&Env::Named("1001".into())).expect("1001");
         assert_eq!(second.plan, "lite");

@@ -1329,16 +1329,13 @@ pub struct AdminShardRequest {
     pub plan: String,
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default = "admin_shard_kind_default")]
-    pub kind: String,
+    /// `core|premium|personal`; derived from `plan` when omitted.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub max_subscriptions: Option<i32>,
     #[serde(default = "admin_shard_enabled_default")]
     pub enabled: bool,
-}
-
-fn admin_shard_kind_default() -> String {
-    "core".to_string()
 }
 
 fn admin_shard_enabled_default() -> bool {
@@ -1445,15 +1442,35 @@ where
         )));
     }
 
-    let Some(kind) = crate::peers::ShardKind::parse(&req.kind) else {
-        return Ok(Box::new(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "status": 400,
-                "message": "kind must be core, premium or personal",
-                "error": "bad_kind",
-            })),
-            StatusCode::BAD_REQUEST,
-        )));
+    let kind = match req.kind.as_deref() {
+        Some(raw) => match crate::peers::ShardKind::parse(raw) {
+            Some(kind) => kind,
+            None => {
+                return Ok(Box::new(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status": 400,
+                        "message": "kind must be core, premium or personal",
+                        "error": "bad_kind",
+                    })),
+                    StatusCode::BAD_REQUEST,
+                )));
+            }
+        },
+        // The plan already says what kind of shard this is; asking the operator
+        // to restate it was one more way to disagree with `plan`.
+        None => match crate::peers::ShardKind::for_plan(&req.plan) {
+            Some(kind) => kind,
+            None => {
+                return Ok(Box::new(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status": 400,
+                        "message": "unknown plan",
+                        "error": "bad_plan",
+                    })),
+                    StatusCode::BAD_REQUEST,
+                )));
+            }
+        },
     };
 
     if let Err(e) = memory

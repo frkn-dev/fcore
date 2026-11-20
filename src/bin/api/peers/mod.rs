@@ -47,6 +47,19 @@ impl ShardKind {
         }
     }
 
+    /// The kind a shard has unless the config says otherwise. `kind` is a
+    /// property of the shard, not of the tariff, but for every shard we run it is
+    /// fully implied by the plan — declaring it by hand was one more place to
+    /// disagree with `plan`.
+    pub fn for_plan(plan: &str) -> Option<Self> {
+        match plan.trim().to_ascii_lowercase().as_str() {
+            "standard" | "lite" => Some(Self::Core),
+            "premium" => Some(Self::Premium),
+            "selfhosted" => Some(Self::Personal),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Core => "core",

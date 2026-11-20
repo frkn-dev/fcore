@@ -159,7 +159,8 @@ curl -s https://api.frkn.org/status | jq '.response[] | {hostname, env, env_titl
 [service.peers.shards."0001"]
 plan = "standard"
 title = "Standard"
-kind = "core"
+# kind не пишется: он выводится из плана
+# standard/lite -> core, premium -> premium, selfhosted -> personal
 ```
 
 ```bash

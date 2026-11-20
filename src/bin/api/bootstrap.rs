@@ -96,14 +96,6 @@ where
         // writes. Declaring a shard must never need SQL, and a typo in the
         // plan must be loud rather than a shard nobody can be granted.
         for (env, decl) in &settings.service.peers.shards {
-            let Some(kind) = crate::peers::ShardKind::parse(&decl.kind) else {
-                tracing::error!(
-                    "peers: shard {} has an unknown kind '{}' — skipped (core|premium|personal)",
-                    env,
-                    decl.kind
-                );
-                continue;
-            };
             if <fcore::PlanKind as std::str::FromStr>::from_str(&decl.plan).is_err() {
                 tracing::error!(
                     "peers: shard {} has an unknown plan '{}' — skipped (standard|lite|premium|selfhosted)",
@@ -112,6 +104,23 @@ where
                 );
                 continue;
             }
+            let kind = match decl.kind.as_deref() {
+                Some(raw) => match crate::peers::ShardKind::parse(raw) {
+                    Some(kind) => kind,
+                    None => {
+                        tracing::error!(
+                            "peers: shard {} has an unknown kind '{}' — skipped (core|premium|personal)",
+                            env,
+                            raw
+                        );
+                        continue;
+                    }
+                },
+                None => match crate::peers::ShardKind::for_plan(&decl.plan) {
+                    Some(kind) => kind,
+                    None => continue,
+                },
+            };
             match db
                 .peers()
                 .upsert_shard(
