@@ -209,7 +209,9 @@
 - [ ] вернуть `fnode 0.6.95` на `cz2` (бэкап `/opt/fnode/fnode-0.6.95.bak-20261029`) — откат был лечением не той причины.
 - [ ] ветка `feature/share-cleanup` (не закоммичена, тесты не гонялись): миграция `0004_conn_invariants.sql` (исключить `issued_via='shared_sub'` из `connections_single_proto_idx` + `connections_token_uniq`), идемпотентный `POST /connection` (200 + существующий id вместо 500/409), `Env::Deserialize` через одну нормализацию префикса `custom`, env-гейт `validate_env_served` в `create_connection_inner`. `cargo check` для `--bin api` и `--bin auth` зелёный; `cargo test` и деплой — по отдельному согласию.
 - [ ] решить по `share_feed_url`: сейчас `base_url = https://frkn.org` даёт `https://frkn.org/sub/<token>`, а nginx отдаёт там HTML кабинета; сырой фид живёт на `api.frkn.org/sub/<token>`.
-- [ ] решить, персистить ли метрики (сейчас рестарт api обнуляет историю графиков).
+- [ ] решить, персистить ли метрики: ответ — метрики нод живут в rkyv-снапшоте `metrics.snapshot_path` (`/opt/api/snapshots/metrics.*`, ~1.78 ГБ), в БД их нет; `node_metrics` пустая, читать её нечем.
+- [ ] **чистка БД по плану `docs/db-cleanup.md`**: `0023_drop_unused.sql` (не накатана) сносит `node_metrics`, `node_metrics_1m`, `grafana_metrics`, `digest_runs`; отдельно решить по `pools` (пустая, `shard_overview.pools` от неё пуст) и по путям `client_reports`/`connection_attempts` (писатель есть, строк 0).
+- [ ] снапшот метрик: выключить сейв или срезать retention — сначала разобрать содержимое партов скриптом.
 - [ ] патч `src/bin/node/tasks.rs` (`SUB: Failed to handle messages`) — применять или нет.
 - [ ] проверить живьём шару одной ноды и шару региона на `dev` (api 0.6.62 + mrkting 0.2.42 уже на проде).
 - [ ] dopamine: сборка с `frkn://sub/shared/` (локально собирается, не закоммичено).
