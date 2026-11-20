@@ -106,7 +106,10 @@ def main():
     created = post("/v1/peers", payload)
     print(json.dumps(created, ensure_ascii=False, indent=2))
 
-    peer = (created.get("body") or {}).get("peer") or {}
+    body = created.get("body") or {}
+    # The api wraps payloads as {status, message, response}; a refusal is flat.
+    response = body.get("response") or body
+    peer = response.get("peer") or {}
     addr = (peer.get("address") or "").split("/")[0]
     if addr:
         print("CLIENT_PRIVATE_KEY=" + priv_b64)

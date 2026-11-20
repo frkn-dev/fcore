@@ -39,8 +39,15 @@ fnode | 0.7.16, `fnode.service` active | то же |
 
 Ключевое: **создание ключа — `POST /key`** (не `/v1/key`, отдаёт 405); активация — `/v1/activate` или `/key/activate`.
 
+## Обновление вечером 2026-11-20
+
+- Прод — **0.7.17**, миграции `0024` (node_type core/selfhosted) и `0025` (peers.pool) накатаны, `0023` нет. Бинарь `sha256 56784a7e…04ed`, бэкап `/opt/api/api.bak-0.7.16-20261120-203359`.
+- Шард `0001` проверен живым туннелем: пир по `card_id` → ядро на обеих нодах → хендшейк и ping `10.88.0.1` с `ee.frkn.org` (nl01 29 мс, nl02 38 мс). Шард снова пуст (0 пиров, 0 устройств).
+- Ноды шарда переведены под systemd: `awg-quick@awg0-peer` был поднят руками и inactive; `systemctl restart` не работает (юнит без ExecStop) — нужен `awg-quick down` + `systemctl start`.
+- Открыто: реестр `pools` (`shard_overview.pools`) пуст — фикс `75928e8` (jsonb/int4 в `note_pool`) собран но не выкачен, ждёт `0.7.18`.
+
 ## Осталось
 
-1. **0.7.17 (сервер):** `card_id` в `PeerView` (миграция `0025` → `peers.pool`, `createPeer` пишет pool из `card_id`), таска `reap_stale_devices` (порог в конфиге, дефолт 90 дней).
+1. **0.7.18 (сервер):** выкатить `75928e8` (запись реестра пулов). Сам `0.7.17` уже на проде: `card_id` в `PeerView`, `reap_stale_devices`, фикс `GET /admin/api/shards`.
 2. **Клиент:** адаптер `PoolCard → ServersModel` (без нового экрана: пулы и `localizedPoolName` уже есть), кэш конфигов + инвалидация по `revoke_reason` (подключение без api, если конфиг есть), экран устройств с удалением, приватный ключ в Keychain.
 3. Сборка клиента: `QT_BIN_DIR=/Users/2pizza/c/6.10.1/6.10.1/macos/bin bash deploy/build_macos_local.sh`; для iOS — реконфиг cmake в `build-ios-upload` (новые 4 файла в `sources.cmake`).
