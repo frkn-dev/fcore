@@ -17,6 +17,48 @@ use super::super::{
     request::{pool_inbounds_conflict, NodeRequest},
 };
 
+
+/// Addresses of the peer-plane interfaces a node announces (`awg_peers`,
+/// `wg_peers`), as the config spells them.
+fn peer_interface_addresses(node: &fcore::Node) -> Vec<(Tag, String)> {
+    let mut out = Vec::new();
+    for (tag, inbound) in &node.inbounds {
+        if !tag.is_peer() {
+            continue;
+        }
+        if let Some(awg) = inbound.awg.as_ref() {
+            out.push((*tag, awg.interface.address.to_string()));
+        }
+        if let Some(wg) = inbound.wg.as_ref() {
+            out.push((*tag, wg.address.to_string()));
+        }
+    }
+    out
+}
+
+/// Whether `address` (as `10.88.0.1/16`) falls inside one of the shard blocks.
+/// Unparseable input is a refusal too: a node that cannot be checked must not
+/// be trusted with the shard's addresses.
+fn address_in_blocks(address: &str, blocks: &[fcore::IpAddrMask]) -> bool {
+    let Ok(mask) = address.parse::<fcore::IpAddrMask>() else {
+        return false;
+    };
+    let Some(ip) = mask.as_ipv4() else {
+        return false;
+    };
+    blocks.iter().any(|block| {
+        let Some(base) = block.as_ipv4() else {
+            return false;
+        };
+        let bits = if block.cidr == 0 {
+            0
+        } else {
+            u32::MAX << (32 - block.cidr)
+        };
+        (u32::from(ip) & bits) == (u32::from(base) & bits)
+    })
+}
+
 // Register node handler
 // POST /node
 pub async fn post_node_handler<N, C, S>(
@@ -81,14 +123,50 @@ where
     // hide the node and POST /v1/peers will answer env_not_served. Say it in
     // the log instead of leaving the operator with an empty card.
     if node.env.is_named_shard() {
-        let mem = memory.memory.read().await;
-        if mem.peers_state.block_masks(&node.env).is_empty() {
+        let blocks = {
+            let mem = memory.memory.read().await;
+            mem.peers_state.block_masks(&node.env)
+        };
+
+        if blocks.is_empty() {
             tracing::warn!(
                 "peers: node {} registers in shard {:?} which has no address block \
                  in env_networks — peers cannot be served until the subnet is seeded",
                 node.uuid,
                 node.env.to_string()
             );
+        } else {
+            // A peer interface outside the shard's blocks is an operator error
+            // nobody would see: the api keeps allocating addresses from the
+            // shard, the node answers on a subnet it was never given, and every
+            // handshake dies silently. Refuse the registration and name both.
+            for (tag, address) in peer_interface_addresses(&node) {
+                if !address_in_blocks(&address, &blocks) {
+                    tracing::error!(
+                        "peers: node {} ({}) registers shard {:?} with peer interface on {}, \
+                         which is outside the shard blocks {:?} — refusing",
+                        node.uuid,
+                        node_req.hostname,
+                        node.env.to_string(),
+                        address,
+                        blocks.iter().map(|b| b.to_string()).collect::<Vec<_>>()
+                    );
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&ResponseMessage::<Option<IdResponse>> {
+                            status: StatusCode::BAD_REQUEST.as_u16(),
+                            message: format!(
+                                "peer interface {} sits outside the shard blocks of {} — \
+                                 the node would answer no peer the api allocates",
+                                address,
+                                node.env
+                            ),
+                            response: None,
+                        }),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+                let _ = tag;
+            }
         }
     }
 

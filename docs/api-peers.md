@@ -29,7 +29,7 @@
 | ручка | тело | ответ |
 |---|---|---|
 | `POST /v1/locations` | `{subscription_id}` | `{access: [...], pools: [...]}` |
-| `POST /v1/peers` | `{subscription_id, device_uid, device_name?, env, proto, public_key?, label?}` | `{peer: PeerView, support_tag, pools: [...]}` |
+| `POST /v1/peers` | `{subscription_id, device_uid, device_name?, card_id, public_key?, label?}` (ручной/админский вариант: `env`+`proto` вместо `card_id`) | `{peer: PeerView, support_tag, pools: [...]}` |
 | `POST /v1/peers/list` | `{subscription_id, device_uid?}` | `{peers: [PeerView]}` |
 | `POST /v1/peers/delete` | `{subscription_id, peer_id}` | `{status: "ok"}` |
 | `POST /v1/devices/list` | `{subscription_id}` | `{devices: [DeviceView]}` |
@@ -100,6 +100,21 @@
 `POST /v1/peers` с тем же `(env, public_key)` возвращает существующий пир — повтор после
 таймаута безопасен.
 
+## Клиент не видит шард: карточка — это handle
+
+Ответы наружу (`/v1/locations`, `/v1/peers*`, `/v1/access`) **не содержат `env`**: карточка
+локации отдаётся как
+
+```json
+{ "card_id": "0001:eu:amnezia_peer", "pool": "eu", "pool_translation": {...},
+  "proto": "amnezia_peer", "nodes": [ {"endpoint": "…", "server_public_key": "…", "mtu": 1280} ] }
+```
+
+`card_id` — `<шард>:<пул>:<протокол>`; приложение возвращает его в `POST /v1/peers`
+(`{"card_id": "0001:eu:amnezia_peer", ...}`), api сам разворачивает его в `(env, proto)`.
+Так шард остаётся деталью сервера, а не экраном. Ручной/админский вызов может по-прежнему
+передать `env` и `proto` раздельно.
+
 ## Шарды: `env` — непрозрачный id
 
 `env` — идентификатор шарда, а не описание: `0001`, `0002`, а не `standard-ru`. Имя несётся
@@ -132,3 +147,37 @@ curl -s https://api.frkn.org/status | jq '.response[] | {hostname, env, env_titl
 В конфиге ноды `shard = "0001"` — алиас `env`, оба ключа равнозначны.
 Пользователю имя шарда не показывается никогда: карточка рисуется по `pool_translation`,
 заголовок группы — по `plan_title`.
+
+## Админский провижининг шардов
+
+Шард объявляется **конфигом** (применяется при старте) либо ручкой, без SQL:
+
+```toml
+[service.peers.subnets]
+"0001" = ["10.88.0.0/16"]
+
+[service.peers.shards."0001"]
+plan = "standard"
+title = "Standard"
+kind = "core"
+```
+
+```bash
+PUT    /admin/api/shards/0001     # {plan,title?,kind?,max_subscriptions?,enabled?}
+GET    /admin/api/shards          # все шарды из shard_overview
+DELETE /admin/api/shards/0001     # забыть шард; отказ 409, пока есть ноды/пиры, force=1 — снести всё равно
+```
+
+## Срок и квота гранта
+
+Грант закрывается **сам** таской `expire_grants`: истёкший `expires_at` или выбранный
+`traffic_limit` → грант отзывается, пиры снимаются с нод, v1-коннекты этого шарда удаляются.
+
+Раскладка по планам:
+
+| план | `expires_at` | `traffic_limit` |
+|---|---|---|
+| `standard` | срок подписки | `NULL` — не ограничиваем трафик |
+| `lite` (Super Duper) | `NULL` — бессрочно | квота, дальше `quota_exhausted` |
+
+Грант с `expires_at = NULL` не истекает никогда — это законно только для квотных тарифов.

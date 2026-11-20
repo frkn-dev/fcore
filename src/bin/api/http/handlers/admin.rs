@@ -1510,6 +1510,101 @@ where
     }))))
 }
 
+
+/// `DELETE /admin/api/shards/{env}` — forget a shard (its policy and its address
+/// blocks). Refused while nodes or live peers still sit there, unless `force`.
+pub async fn admin_api_delete_shard_handler<N, C, S>(
+    env_raw: String,
+    force: bool,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let env = match <Env as std::str::FromStr>::from_str(&env_raw) {
+        Ok(env) => env,
+        Err(_) => {
+            return Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({ "status": 400, "message": "bad env", "error": "bad_env" }),
+                ),
+                StatusCode::BAD_REQUEST,
+            )));
+        }
+    };
+
+    if !force {
+        match memory.db.peers().shard_usage(&env).await {
+            Ok((nodes, peers)) if nodes > 0 || peers > 0 => {
+                return Ok(Box::new(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status": 409,
+                        "message": "shard still has nodes or live peers; pass force=true to remove anyway",
+                        "error": "shard_in_use",
+                        "nodes": nodes,
+                        "peers": peers,
+                    })),
+                    StatusCode::CONFLICT,
+                )));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                error!("admin: cannot read shard usage of {}: {}", env, e);
+                return Ok(Box::new(warp::reply::with_status(
+                    warp::reply::json(
+                        &serde_json::json!({ "status": 500, "message": "cannot read shard usage" }),
+                    ),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )));
+            }
+        }
+    }
+
+    match memory.db.peers().delete_shard(&env).await {
+        Ok(existed) => {
+            {
+                let mut state = memory.memory.write().await;
+                state.peers_state.env_capacity.remove(&env);
+                state.peers_state.env_networks.remove(&env);
+            }
+            Ok(Box::new(warp::reply::json(&serde_json::json!({
+                "status": 200,
+                "shard": env.to_string(),
+                "deleted": existed,
+            }))))
+        }
+        Err(e) => {
+            error!("admin: cannot delete shard {}: {}", env, e);
+            Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(
+                    &serde_json::json!({ "status": 500, "message": "cannot delete the shard" }),
+                ),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -549,6 +549,38 @@ impl PgPeers {
         Ok(())
     }
 
+    /// Admin: forget a shard entirely — its policy row and its address blocks.
+    ///
+    /// Callers must check that nothing lives there first: dropping the blocks of
+    /// a shard that still has peers leaves them unaddressable.
+    pub async fn delete_shard(&self, env: &Env) -> Result<bool> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        client.execute("DELETE FROM env_networks WHERE env = $1", &[&env.to_string()]).await?;
+        let policy = client
+            .execute("DELETE FROM env_capacity WHERE env = $1", &[&env.to_string()])
+            .await?;
+
+        Ok(policy > 0)
+    }
+
+    /// Admin: does anything still depend on the shard?
+    pub async fn shard_usage(&self, env: &Env) -> Result<(i64, i64)> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let row = client
+            .query_one(
+                r#"
+                SELECT (SELECT COUNT(*)::int8 FROM nodes WHERE env = $1) AS nodes,
+                       (SELECT COUNT(*)::int8 FROM peers WHERE env = $1 AND revoked_at IS NULL) AS peers
+                "#,
+                &[&env.to_string()],
+            )
+            .await?;
+        Ok((row.get("nodes"), row.get("peers")))
+    }
+
     /// Admin: every declared shard with its live numbers, straight from the
     /// `shard_overview` view (migration 0021).
     pub async fn list_shards(&self) -> Result<Vec<ShardRow>> {

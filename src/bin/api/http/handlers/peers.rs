@@ -94,8 +94,16 @@ pub struct PeerCreateRequest {
     pub subscription_id: Uuid,
     pub device_uid: Uuid,
     pub device_name: Option<String>,
-    pub env: String,
-    pub proto: String,
+    /// Card the app picked (`<shard>:<pool>:<proto>`). Preferred: the client
+    /// never learns the shard id, it only echoes the handle it was given.
+    #[serde(default)]
+    pub card_id: Option<String>,
+    /// Legacy/manual form of the same choice: the shard and the protocol
+    /// separately. Kept for curl and for the admin surface.
+    #[serde(default)]
+    pub env: Option<String>,
+    #[serde(default)]
+    pub proto: Option<String>,
     pub public_key: Option<String>,
     pub label: Option<String>,
 }
@@ -176,7 +184,9 @@ pub struct PoolNode {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PoolCard {
-    pub env: String,
+    /// Opaque handle of this card: `<shard>:<pool>:<proto>`. The app echoes it
+    /// back in `POST /v1/peers`; the shard id is not a field the client reads.
+    pub card_id: String,
     pub pool: String,
     pub pool_translation: Option<std::collections::BTreeMap<String, String>>,
     pub proto: String,
@@ -187,7 +197,6 @@ pub struct PoolCard {
 pub struct PeerView {
     pub peer_id: Uuid,
     pub device_id: Uuid,
-    pub env: String,
     pub proto: String,
     pub address: String,
     pub label: Option<String>,
@@ -221,7 +230,6 @@ fn device_view(row: &crate::postgres::peers::DeviceRow, live_peers: usize) -> De
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AccessView {
-    pub env: String,
     /// Machine value (`lite`); the app shows `plan_title` instead.
     pub plan: Option<String>,
     /// Human name. "Super Duper" for `lite`: the product is renamed in the UI
@@ -243,11 +251,82 @@ fn proto_wire_name(tag: &fcore::Tag) -> String {
         .unwrap_or_else(|| tag.to_string())
 }
 
+/// Handle of a location card: `<shard>:<pool>:<proto>`.
+///
+/// The app never reads the shard id — it echoes this handle back when it creates
+/// a tunnel, and the api resolves it here. Keeping the mapping server-side means
+/// the client payloads carry no env at all (see the app contract).
+fn card_handle(env: &Env, pool: &str, proto: PeerProto) -> String {
+    format!("{}:{}:{}", env, pool, proto.as_str())
+}
+
+/// Resolve the card the client picked: `card_id` first, `env` + `proto` as the
+/// manual/legacy form.
+fn resolve_card(
+    card_id: &Option<String>,
+    env: Option<&str>,
+    proto: Option<&str>,
+) -> Result<(Env, PeerProto), Box<dyn warp::Reply>> {
+    if let Some(raw) = card_id.as_deref() {
+        let Some((head, proto_raw)) = raw.rsplit_once(':') else {
+            return Err(json_reply(
+                400,
+                "bad card_id",
+                serde_json::json!({ "error": "bad_card_id" }),
+            ));
+        };
+        let Some((env_raw, _pool)) = head.split_once(':') else {
+            return Err(json_reply(
+                400,
+                "bad card_id",
+                serde_json::json!({ "error": "bad_card_id" }),
+            ));
+        };
+        let Some(proto) = PeerProto::parse(proto_raw) else {
+            return Err(json_reply(
+                400,
+                "unknown proto",
+                serde_json::json!({ "error": "unknown_proto" }),
+            ));
+        };
+        return match Env::from_str(env_raw) {
+            Ok(env) => Ok((env, proto)),
+            Err(_) => Err(json_reply(
+                400,
+                "bad env",
+                serde_json::json!({ "error": "bad_env" }),
+            )),
+        };
+    }
+
+    let (Some(env_raw), Some(proto_raw)) = (env, proto) else {
+        return Err(json_reply(
+            400,
+            "card_id (or env plus proto) is required",
+            serde_json::json!({ "error": "card_required" }),
+        ));
+    };
+    let Some(proto) = PeerProto::parse(proto_raw) else {
+        return Err(json_reply(
+            400,
+            "unknown proto",
+            serde_json::json!({ "error": "unknown_proto" }),
+        ));
+    };
+    match Env::from_str(env_raw) {
+        Ok(env) => Ok((env, proto)),
+        Err(_) => Err(json_reply(
+            400,
+            "bad env",
+            serde_json::json!({ "error": "bad_env" }),
+        )),
+    }
+}
+
 fn peer_view(row: &PeerRow) -> PeerView {
     PeerView {
         peer_id: row.id,
         device_id: row.device_id,
-        env: row.env.to_string(),
         proto: proto_wire_name(&row.proto),
         address: row.address.clone(),
         label: row.label.clone(),
@@ -271,7 +350,6 @@ fn plan_title(plan: Option<&str>) -> String {
 
 fn access_view(row: &AccessRow, used_bytes: i64) -> AccessView {
     AccessView {
-        env: row.env.to_string(),
         plan: row.plan.clone(),
         plan_title: plan_title(row.plan.as_deref()),
         protos: row.protos.iter().map(proto_wire_name).collect(),
@@ -375,7 +453,7 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
         .map(|(pool, (translation, mut nodes))| {
             nodes.sort_by_key(|(uuid, _)| *uuid);
             PoolCard {
-                env: env.to_string(),
+                card_id: card_handle(env, &pool, proto),
                 pool,
                 pool_translation: translation,
                 proto: proto.as_str().to_string(),
@@ -642,18 +720,9 @@ where
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
 {
-    let Some(proto) = PeerProto::parse(&req.proto) else {
-        return json_reply(
-            400,
-            "unknown proto",
-            serde_json::json!({ "error": "unknown_proto" }),
-        );
-    };
-    let env = match Env::from_str(&req.env) {
-        Ok(env) => env,
-        Err(_) => {
-            return json_reply(400, "bad env", serde_json::json!({ "error": "bad_env" }));
-        }
+    let (env, proto) = match resolve_card(&req.card_id, req.env.as_deref(), req.proto.as_deref()) {
+        Ok(pair) => pair,
+        Err(reply) => return reply,
     };
 
     if let Some(key) = req.public_key.as_deref() {

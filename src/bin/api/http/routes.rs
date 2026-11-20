@@ -529,6 +529,29 @@ where
             .and(warp::header::optional::<String>("authorization"))
             .and_then(admin_api_put_shard_handler);
 
+        let admin_api_shards_delete = warp::delete()
+            .and(warp::path!("admin" / "api" / "shards" / String))
+            .and(warp::path::end())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(
+                |env: String,
+                 q: std::collections::HashMap<String, String>,
+                 sync: MemSync<N, C, S>,
+                 enabled: bool,
+                 token: String,
+                 auth: Option<String>| async move {
+                    let force = q
+                        .get("force")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                    admin_api_delete_shard_handler(env, force, sync, enabled, token, auth).await
+                },
+            );
+
         // Selfhosted caps of one account (servers / users).
         let admin_api_selfhosted_limits_route = warp::put()
             .and(warp::path!(
@@ -634,6 +657,7 @@ where
             .or(admin_api_extend_subscription_route)
             .or(admin_api_shards_get)
             .or(admin_api_shards_put)
+            .or(admin_api_shards_delete)
             .or(admin_api_selfhosted_limits_route)
             .or(admin_api_alert_chat_put)
             .or(admin_api_alert_chat_get)
