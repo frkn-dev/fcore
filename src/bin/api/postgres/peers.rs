@@ -355,8 +355,14 @@ impl PgPeers {
         let env = match existing.first() {
             Some(row) => row.get::<_, String>("env"),
             None => {
-                // Least loaded among the shards that actually have machines.
-                let mut best: Option<(String, i64)> = None;
+                // Shards with room first, then the least loaded of them by fill
+                // ratio — a shard whose users were revoked is filled again at
+                // once, because only live grants are counted. A shard at its own
+                // `max_subscriptions` is a soft cap: it is skipped while any
+                // other shard has room, and only an all-full plan lands here.
+                let mut best: Option<(String, f64)> = None;
+                let mut overflow_pick: Option<(String, i64)> = None;
+
                 for (candidate, limit) in shards {
                     let used: i64 = tx
                         .query_one(
@@ -369,19 +375,40 @@ impl PgPeers {
                         )
                         .await?
                         .get("used");
+
+                    if *limit > 0 && used >= *limit {
+                        let better = match &overflow_pick {
+                            None => true,
+                            Some((env, used_best)) => {
+                                used < *used_best || (used == *used_best && candidate < env)
+                            }
+                        };
+                        if better {
+                            overflow_pick = Some((candidate.clone(), used));
+                        }
+                        continue;
+                    }
+
+                    let ratio = if *limit > 0 {
+                        used as f64 / *limit as f64
+                    } else {
+                        // No cap on this shard: compare absolute counts, which is
+                        // the same ordering with an unknown denominator.
+                        used as f64
+                    };
                     let better = match &best {
                         None => true,
-                        Some((best_env, best_used)) => {
-                            used < *best_used || (used == *best_used && candidate < best_env)
+                        Some((env, best_ratio)) => {
+                            ratio < *best_ratio || (ratio == *best_ratio && candidate < env)
                         }
                     };
                     if better {
-                        best = Some((candidate.clone(), used));
+                        best = Some((candidate.clone(), ratio));
                     }
-                    let _ = limit;
                 }
-                match best {
-                    Some((env, _)) => env,
+
+                match best.map(|(env, _)| env).or(overflow_pick.map(|(env, _)| env)) {
+                    Some(env) => env,
                     None => return Ok(None),
                 }
             }

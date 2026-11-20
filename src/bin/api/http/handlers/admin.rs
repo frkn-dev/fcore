@@ -1334,6 +1334,10 @@ pub struct AdminShardRequest {
     pub kind: Option<String>,
     #[serde(default)]
     pub max_subscriptions: Option<i32>,
+    /// Address blocks to give this shard (`["10.96.0.0/16"]`). Added live, so a
+    /// new shard needs no api restart — the config stays the bootstrap path.
+    #[serde(default)]
+    pub subnets: Option<Vec<String>>,
     #[serde(default = "admin_shard_enabled_default")]
     pub enabled: bool,
 }
@@ -1493,6 +1497,58 @@ where
             ),
             StatusCode::INTERNAL_SERVER_ERROR,
         )));
+    }
+
+    // Blocks first: a shard with no addresses is not usable, and a bad CIDR or an
+    // overlap must fail the call before the policy row looks approved.
+    if let Some(subnets) = req.subnets.as_ref() {
+        for raw in subnets {
+            let block = match raw.parse::<fcore::IpAddrMask>() {
+                Ok(block) => block,
+                Err(_) => {
+                    return Ok(Box::new(warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": 400,
+                            "message": format!("{} is not a CIDR", raw),
+                            "error": "bad_subnet",
+                        })),
+                        StatusCode::BAD_REQUEST,
+                    )));
+                }
+            };
+            match memory.db.peers().insert_env_block(&env, &block).await {
+                Ok(crate::postgres::peers::Inserted::Done) => {
+                    memory
+                        .memory
+                        .write()
+                        .await
+                        .peers_state
+                        .env_networks
+                        .entry(env.clone())
+                        .or_default()
+                        .push(block.to_string());
+                }
+                Ok(crate::postgres::peers::Inserted::Conflict) => {
+                    return Ok(Box::new(warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": 409,
+                            "message": format!("{} is already held by another shard", block),
+                            "error": "subnet_taken",
+                        })),
+                        StatusCode::CONFLICT,
+                    )));
+                }
+                Err(e) => {
+                    error!("admin: cannot add {} to shard {}: {}", block, env, e);
+                    return Ok(Box::new(warp::reply::with_status(
+                        warp::reply::json(
+                            &serde_json::json!({ "status": 500, "message": "cannot add the block" }),
+                        ),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )));
+                }
+            }
+        }
     }
 
     // Write through to the cache: a shard declared now must be assignable on the
