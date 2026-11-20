@@ -403,6 +403,18 @@ fn grant_of(row: &AccessRow) -> Grant {
 
 // ------------------------------------------------------------------ pools
 
+/// Endpoints one node contributes to a card: one per entry IP.
+///
+/// A node with several addresses (`[node] node_ips`) serves the same config on
+/// all of them, and the app may dial any — reducing the card to the primary
+/// address silently hides the rest of the node's entry points.
+fn card_endpoints(hosts: Vec<String>, port: u16) -> Vec<String> {
+    hosts
+        .into_iter()
+        .map(|host| format!("{}:{}", host, port))
+        .collect()
+}
+
 /// Group the live nodes of one env into the cards the client shows.
 ///
 /// A card is a `pool`: all its nodes share the client-facing parameters
@@ -433,7 +445,13 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
             continue;
         };
 
-        let (server_public_key, mtu, dns, keepalive, obfuscation) = match proto {
+        let (server_public_key, mtu, dns, keepalive, obfuscation): (
+            String,
+            u16,
+            Vec<String>,
+            Option<u16>,
+            Option<serde_json::Value>,
+        ) = match proto {
             PeerProto::Amnezia => {
                 let Some(awg) = inbound.awg.as_ref() else {
                     continue;
@@ -468,7 +486,6 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
             }
         };
 
-        let endpoint = format!("{}:{}", node.address, inbound.port);
         let pool_name = node.pool.clone().unwrap_or_else(|| "default".to_string());
         let declared = node
             .pool_country_code
@@ -489,18 +506,24 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
         if entry.translation.is_none() {
             entry.translation = node.pool_translation.clone();
         }
-        entry.nodes.push((
-            *uuid,
-            PoolNode {
-                endpoint,
-                country: node.country.clone(),
-                server_public_key,
-                mtu,
-                dns,
-                keepalive,
-                obfuscation,
-            },
-        ));
+        // A node may have several entry IPs (`[node] node_ips`): one config
+        // stays valid for every address, so the card carries one entry per IP
+        // instead of only the primary one — otherwise the client silently
+        // loses the extra addresses of a node.
+        for endpoint in card_endpoints(node.entry_ips(), inbound.port) {
+            entry.nodes.push((
+                *uuid,
+                PoolNode {
+                    endpoint,
+                    country: node.country.clone(),
+                    server_public_key: server_public_key.clone(),
+                    mtu,
+                    dns: dns.clone(),
+                    keepalive,
+                    obfuscation: obfuscation.clone(),
+                },
+            ));
+        }
     }
 
     let mut cards: Vec<PoolCard> = grouped
@@ -1962,6 +1985,23 @@ mod tests {
 
         // A tunnel from before `peers.pool` existed has no card to name.
         assert!(peer_view(&peer_row(None)).card_id.is_none());
+    }
+
+    /// A node with two entry IPs must not be reduced to its primary address:
+    /// the card would silently lose an endpoint the client is meant to dial.
+    #[test]
+    fn a_card_carries_every_entry_ip_of_a_node() {
+        let endpoints = card_endpoints(
+            vec![
+                "132.243.203.40".to_string(),
+                "132.243.203.41".to_string(),
+            ],
+            443,
+        );
+        assert_eq!(
+            endpoints,
+            vec!["132.243.203.40:443", "132.243.203.41:443"]
+        );
     }
 
     #[test]
