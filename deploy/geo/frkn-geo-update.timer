@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily refresh of the FRKN RU IPv4 zone list
+
+[Timer]
+# ipdeny rebuilds the aggregated list once a day. 04:30 UTC leaves margin
+# after their rebuild; the delay spreads the request and the disk write.
+OnCalendar=*-*-* 04:30:00 UTC
+RandomizedDelaySec=30m
+# A host that was off at 04:30 catches up on the next boot.
+Persistent=true
+Unit=frkn-geo-update.service
+
+[Install]
+WantedBy=timers.target

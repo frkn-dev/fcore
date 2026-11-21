@@ -15,9 +15,9 @@ use super::{
     crypto::{self, AesContext},
     filters::*,
     handlers::{
-        admin::*, amnezia::*, catalog::*, cluster::*, connection::*, healthcheck_handler, iap::*,
-        key::*, metrics::*, node::*, peers as peers_handlers, premium::*,
-        premium_inventory::*, private::*, score::*, share::*, subscription::*,
+        admin::*, amnezia::*, catalog::*, cluster::*, connection::*, geo as geo_handlers,
+        healthcheck_handler, iap::*, key::*, metrics::*, node::*, peers as peers_handlers,
+        premium::*, premium_inventory::*, private::*, score::*, share::*, subscription::*,
     },
     param::*,
     rejection,
@@ -1006,6 +1006,13 @@ where
             .and(with_sync(self.sync.clone()))
             .and(with_param_vec(params.key_sign_token.clone()))
             .and_then(post_key_handler);
+
+        // Public geo lists for the OpenWrt router image (`/router/geo/*`):
+        // plain text, no AGW envelope, no auth — the same shape as
+        // `/sub/<token>`. The daily `frkn-geo-update` timer (deploy/geo/)
+        // replaces the file atomically; `If-None-Match` keeps router polling
+        // at a 304 most of the time.
+        let geo_routes = geo_handlers::routes(params.geo_dir.clone());
 
         let activate_conn_resolver = params.conn_resolver();
         let mrkting_config = params.mrkting.clone();
@@ -2193,6 +2200,8 @@ where
             .or(post_key_route)
             .or(post_activate_key_route)
             .or(post_activate_peers_route)
+            // Public geo lists (OpenWrt /router/geo/*)
+            .or(geo_routes)
             // Amnezia
             .or(post_amnezia_services_route)
             .or(post_amnezia_account_route)

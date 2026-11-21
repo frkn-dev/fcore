@@ -4,6 +4,7 @@ pub mod amnezia;
 pub mod catalog;
 pub mod cluster;
 pub mod connection;
+pub(crate) mod geo;
 pub mod iap;
 pub mod key;
 pub mod metrics;

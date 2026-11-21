@@ -17,6 +17,11 @@ base_url = "https://frkn.org"
 # Public base URL of this api instance — used for machine-facing links
 # (share feed /sub/<token>). Defaults to base_url when unset.
 api_url = "https://api.frkn.org"
+# Public geo lists for the OpenWrt router image: /router/geo/ru.zone and
+# /router/geo/ru.zone.sha256 are served from this directory. The daily
+# frkn-geo-update timer (deploy/geo/) writes ru.zone here atomically.
+# Default: /var/lib/frkn/geo. See docs/router-geo.md.
+# geo_dir = "/var/lib/frkn/geo"
 admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"

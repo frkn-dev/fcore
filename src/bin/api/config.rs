@@ -142,6 +142,13 @@ fn default_log_level() -> String {
     "debug".to_string()
 }
 
+/// Directory of the public geo lists served at `/router/geo/*`. The daily
+/// `frkn-geo-update` timer writes `ru.zone` (and `ru.zone.sha256`) here
+/// atomically; see `docs/router-geo.md`.
+fn default_geo_dir() -> String {
+    "/var/lib/frkn/geo".to_string()
+}
+
 /// Protocols with per-connection traffic accounting; the only ones allowed
 /// while a subscription runs on its traffic balance (traffic mode).
 fn default_metered_conns() -> Vec<String> {
@@ -330,6 +337,11 @@ pub struct ServiceConfig {
     /// City-база: даёт город клиента («Владивосток»). Опциональна.
     #[serde(default)]
     pub geoip_city_path: Option<String>,
+    /// Directory of the public geo lists served at `/router/geo/*`
+    /// (`ru.zone`, `ru.zone.sha256`). Written atomically by the daily
+    /// `frkn-geo-update` timer (`deploy/geo/`), see `docs/router-geo.md`.
+    #[serde(default = "default_geo_dir")]
+    pub geo_dir: String,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     /// Connections created for lite (traffic-only) key activations, same

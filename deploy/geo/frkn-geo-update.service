@@ -1,0 +1,18 @@
+[Unit]
+Description=FRKN geo lists: refresh the public RU IPv4 zone (api.frkn.org /router/geo/ru.zone)
+Documentation=https://github.com/frkn-dev/fcore/blob/main/docs/router-geo.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/frkn/geo/update-ru-zone.sh
+Environment=GEO_DIR=/var/lib/frkn/geo
+# The updater only writes its own directory; the rest of the filesystem is
+# read-only for it. PrivateTmp is safe: temp files are created inside GEO_DIR
+# so the final rename stays atomic.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/frkn/geo
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true

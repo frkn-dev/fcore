@@ -11,6 +11,7 @@
 - [Управление нодами](#управление-нодами)
 - [Кластеры](#кластеры)
 - [Ключи активации](#ключи-активации)
+- [Гео-листы роутера](#гео-листы-роутера)
 - [Trial](#trial)
 - [Amnezia gateway](#amnezia-gateway)
 - [Admin panel](#admin-panel)
@@ -26,7 +27,7 @@
 | **Service token** | Управление подписками, нодами, ключами, подключениями | `Authorization: Bearer <settings.service.token>` |
 | **Admin token** | Admin API и страница `/admin` | `Authorization: Bearer <settings.service.admin_token>` (API) или `?token=<admin_token>` (страница) |
 | **Premium token** | Premium panel | `Authorization: Bearer <subscription.premium_token>` |
-| **Без auth** | Публичные endpoint'ы: `/healthcheck`, `/sub`, `/subscription/*`, `/status`, `/clusters/*`, `/info/connections/*`, `/key/validate`, `/key/activate`, `/trial`, `/v1/*` | — |
+| **Без auth** | Публичные endpoint'ы: `/healthcheck`, `/sub`, `/subscription/*`, `/status`, `/clusters/*`, `/info/connections/*`, `/key/validate`, `/key/activate`, `/trial`, `/router/geo/*`, `/v1/*` | — |
 
 ---
 
@@ -435,6 +436,30 @@ VMess и Hysteria2). WG-семейство и `mtproto` в подписках н
 — так создаётся отдельная подписка. Проверка выполняется до изменения срока
 подписки, списания ключа и создания подключений. Если для env тарифа не задан
 протокол (`env_proto_templates`), активация отвечает `500`, ключ не расходуется.
+
+---
+
+## Гео-листы роутера
+
+Публичные plain-text ручки для OpenWrt-прошивки: свежий список российских
+IPv4-подсетей (ipdeny `ru-aggregated.zone`), который обновляется раз в сутки.
+Подробности — [`docs/router-geo.md`](router-geo.md).
+
+### `GET /router/geo/ru.zone` (+ `HEAD`)
+
+- **Auth:** нет
+- **Ответ:** `200 OK`, `text/plain; charset=utf-8`, один CIDR на строку
+- **Заголовки:** `ETag: "sha256:<hex>"` (сильный, от содержимого файла),
+  `Last-Modified`, `Cache-Control: public, max-age=3600`
+- **`If-None-Match`** с текущим ETag → `304 Not Modified` без тела
+- `404` — файл ещё не опубликован, `503` — файл не прошёл валидацию (обрезанный
+  список не отдаётся никогда)
+- Файл: `[service] geo_dir` (по умолчанию `/var/lib/frkn/geo/ru.zone`)
+
+### `GET /router/geo/ru.zone.sha256` (+ `HEAD`)
+
+- **Ответ:** `200 OK`, `text/plain; charset=utf-8`, тело `<sha256>  ru.zone\n`
+  (формат `sha256sum`), те же кэш-заголовки и `If-None-Match` → `304`
 
 ---
 
@@ -1086,6 +1111,23 @@ curl -s -X POST http://localhost:8080/key/activate \
     "code": "XXXXX-XXXXX-XXXXX",
     "subscription_id": "<subscription_id>"
   }'
+```
+
+---
+
+## Гео-листы роутера
+
+```bash
+# Заголовки (ETag, Last-Modified, Content-Length) без скачивания файла
+curl -sI https://api.frkn.org/router/geo/ru.zone
+
+# Контрольная сумма в формате sha256sum
+curl -s https://api.frkn.org/router/geo/ru.zone.sha256
+
+# Условный GET: 304, если список не менялся
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'If-None-Match: "sha256:<hex>"' \
+  https://api.frkn.org/router/geo/ru.zone
 ```
 
 ---
