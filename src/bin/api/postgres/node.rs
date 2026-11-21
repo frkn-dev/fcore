@@ -15,6 +15,43 @@ use fcore::{
 
 use super::pg::PgClientManager;
 
+/// Node upsert shared by registration and private-node insert. Kept as a
+/// constant so the COALESCE semantics below are testable without a database.
+const NODE_UPSERT_SQL: &str = "
+        INSERT INTO nodes (
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, pool_country_code, pool_country_name, node_weights, bench_url
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19, $20, $21, $22
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            uuid = EXCLUDED.uuid,
+            env = EXCLUDED.env,
+            hostname = EXCLUDED.hostname,
+            address = EXCLUDED.address,
+            status = EXCLUDED.status,
+            modified_at = EXCLUDED.modified_at,
+            label = EXCLUDED.label,
+            interface = EXCLUDED.interface,
+            cores = EXCLUDED.cores,
+            max_bandwidth_bps = EXCLUDED.max_bandwidth_bps,
+            country = EXCLUDED.country,
+            node_type = EXCLUDED.node_type,
+            cluster = EXCLUDED.cluster,
+            node_ips = EXCLUDED.node_ips,
+            pool = COALESCE(EXCLUDED.pool, nodes.pool),
+            pool_translation = COALESCE(EXCLUDED.pool_translation, nodes.pool_translation),
+            -- The pool country describes the card, not this machine: a node that
+            -- does not declare it must not erase what a sibling already sent.
+            pool_country_code = COALESCE(EXCLUDED.pool_country_code, nodes.pool_country_code),
+            pool_country_name = COALESCE(EXCLUDED.pool_country_name, nodes.pool_country_name),
+            node_weights = EXCLUDED.node_weights,
+            -- The bench URL may still be set by hand or by an older node build
+            -- that does not send it: absent keeps the stored value, an explicit
+            -- one overwrites it.
+            bench_url = COALESCE(EXCLUDED.bench_url, nodes.bench_url)
+    ";
+
 pub struct PgNode {
     pub manager: Arc<Mutex<PgClientManager>>,
 }
@@ -98,36 +135,7 @@ impl PgNode {
             serde_json::to_value(&node.node_weights).ok()
         };
 
-        let node_query = "
-        INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, pool_country_code, pool_country_name, node_weights
-        )
-        VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19, $20, $21
-        )
-        ON CONFLICT (id) DO UPDATE SET
-            uuid = EXCLUDED.uuid,
-            env = EXCLUDED.env,
-            hostname = EXCLUDED.hostname,
-            address = EXCLUDED.address,
-            status = EXCLUDED.status,
-            modified_at = EXCLUDED.modified_at,
-            label = EXCLUDED.label,
-            interface = EXCLUDED.interface,
-            cores = EXCLUDED.cores,
-            max_bandwidth_bps = EXCLUDED.max_bandwidth_bps,
-            country = EXCLUDED.country,
-            node_type = EXCLUDED.node_type,
-            cluster = EXCLUDED.cluster,
-            node_ips = EXCLUDED.node_ips,
-            pool = COALESCE(EXCLUDED.pool, nodes.pool),
-            pool_translation = COALESCE(EXCLUDED.pool_translation, nodes.pool_translation),
-            -- The pool country describes the card, not this machine: a node that
-            -- does not declare it must not erase what a sibling already sent.
-            pool_country_code = COALESCE(EXCLUDED.pool_country_code, nodes.pool_country_code),
-            pool_country_name = COALESCE(EXCLUDED.pool_country_name, nodes.pool_country_name),
-            node_weights = EXCLUDED.node_weights
-    ";
+        let node_query = NODE_UPSERT_SQL;
 
         tx.execute(
             node_query,
@@ -153,6 +161,7 @@ impl PgNode {
                 &node.pool_country_code,
                 &node.pool_country_name,
                 &node_weights,
+                &node.bench_url,
             ],
         )
         .await?;
@@ -639,5 +648,53 @@ impl PgNode {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NODE_UPSERT_SQL;
+
+    // A registration without the field (old node build, a node with no bench,
+    // or a value set by hand in SQL) must keep `nodes.bench_url`: only the
+    // explicit incoming value may overwrite it.
+    #[test]
+    fn node_upsert_keeps_stored_bench_url_when_absent() {
+        assert!(
+            NODE_UPSERT_SQL.contains("bench_url = COALESCE(EXCLUDED.bench_url, nodes.bench_url)"),
+            "bench_url must be merged with COALESCE, got:\n{NODE_UPSERT_SQL}"
+        );
+        assert!(
+            !NODE_UPSERT_SQL.contains("bench_url = EXCLUDED.bench_url"),
+            "a bare EXCLUDED assignment would wipe the stored bench URL"
+        );
+    }
+
+    // bench_url is inserted on the first registration too, and every column of
+    // the upsert has a bind parameter: a missing one only fails at runtime.
+    #[test]
+    fn node_upsert_binds_bench_url_parameter() {
+        let columns = NODE_UPSERT_SQL
+            .split_once("INSERT INTO nodes (")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(cols, _)| cols)
+            .expect("node upsert INSERT column list");
+        assert!(
+            columns.split(',').any(|c| c.trim() == "bench_url"),
+            "bench_url must be in the INSERT column list"
+        );
+
+        let max_param = NODE_UPSERT_SQL
+            .split('$')
+            .filter_map(|part| {
+                let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse::<usize>().ok()
+            })
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_param, 22,
+            "bench_url binds $22; upsert takes 22 parameters"
+        );
     }
 }

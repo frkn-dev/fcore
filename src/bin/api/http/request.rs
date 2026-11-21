@@ -7,8 +7,8 @@ use std::str::FromStr;
 use std::collections::HashSet;
 
 use fcore::{
-    normalize_pool_country, normalize_pool_country_name, Env, Error, Inbound, Node, NodeStatus,
-    NodeType, Tag,
+    normalize_bench_url, normalize_pool_country, normalize_pool_country_name, Env, Error, Inbound,
+    Node, NodeStatus, NodeType, Tag,
 };
 
 /// Normalizes an optional `pool_translation` map received from a node (or a
@@ -209,6 +209,11 @@ pub struct NodeRequest {
     /// Human name of `pool_country_code` (`[node] pool_country_name`).
     #[serde(default)]
     pub pool_country_name: Option<String>,
+    /// Base URL of the node's own speed-test endpoint (`[node] bench_url`).
+    /// Absent (old node binaries, a node without a bench) must never clear the
+    /// stored `nodes.bench_url`; an explicit value overwrites it.
+    #[serde(default)]
+    pub bench_url: Option<String>,
 }
 
 impl NodeRequest {
@@ -229,6 +234,16 @@ impl NodeRequest {
                     ));
                 }
                 _ => {}
+            }
+        }
+        // Normalised in `as_node`; here we only refuse a non-empty value that
+        // is not an http(s) URL with a host, so the operator learns about a
+        // typo at registration instead of silently publishing no bench.
+        if let Some(url) = &self.bench_url {
+            if !url.trim().is_empty() && normalize_bench_url(Some(url.clone())).is_none() {
+                return Err(Error::Custom(
+                    "bench_url must be http(s)://<host>[:port][/path]".into(),
+                ));
             }
         }
         Ok(())
@@ -272,9 +287,10 @@ impl NodeRequest {
                 .filter(|(ip, w)| **w > 0 && ip.parse::<Ipv4Addr>().is_ok())
                 .map(|(ip, w)| (ip.trim().to_string(), *w))
                 .collect(),
-            // The bench URL is api-side state (nodes.bench_url): a node does not
-            // know its bench name and must not be able to overwrite it.
-            bench_url: None,
+            // The node declares its bench (config.toml `[node] bench_url`).
+            // Absent stays None here; the upsert COALESCEs it so a node without
+            // the field never wipes a value stored another way.
+            bench_url: normalize_bench_url(self.bench_url.clone()),
         }
     }
 }
@@ -821,6 +837,51 @@ mod tests {
         assert!(req.node_ips.is_none());
         assert!(req.validate().is_ok());
         assert!(req.as_node().node_ips.is_none());
+    }
+
+    // A node without the field (old build, no bench) parses and stays absent,
+    // so the upsert keeps whatever `nodes.bench_url` already holds.
+    #[test]
+    fn node_request_without_bench_url_is_absent() {
+        let req: NodeRequest = serde_json::from_value(node_request_json("")).unwrap();
+        assert!(req.bench_url.is_none());
+        assert!(req.validate().is_ok());
+        assert!(req.as_node().bench_url.is_none());
+    }
+
+    // The node declares its bench at startup: parsed, normalised (no trailing
+    // slash) and carried into the Node the api persists.
+    #[test]
+    fn node_request_bench_url_is_normalized_and_carried() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"bench_url": "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443/"}"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_ok());
+        assert_eq!(
+            req.as_node().bench_url.as_deref(),
+            Some("https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443")
+        );
+    }
+
+    // A typo must fail the registration (400) instead of silently leaving the
+    // node with no bench in /status.
+    #[test]
+    fn node_request_rejects_unusable_bench_url() {
+        for bad in [
+            r#"{"bench_url": "ncr-nl-ams-bench-01:19443"}"#,
+            r#"{"bench_url": "https://"}"#,
+            r#"{"bench_url": "ftp://host"}"#,
+            r#"{"bench_url": "https://host with space"}"#,
+        ] {
+            let req: NodeRequest = serde_json::from_value(node_request_json(bad)).unwrap();
+            assert!(req.validate().is_err(), "must reject {bad}");
+        }
+        // Blank is "no bench", not an error: old/partial configs stay valid.
+        let blank: NodeRequest =
+            serde_json::from_value(node_request_json(r#"{"bench_url": "  "}"#)).unwrap();
+        assert!(blank.validate().is_ok());
+        assert!(blank.as_node().bench_url.is_none());
     }
 
     #[test]

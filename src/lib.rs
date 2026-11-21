@@ -41,8 +41,8 @@ pub use config::{
     inbound::{Inbound, InboundConnLink, Network, Settings as XraySettings},
     mtproto::MtprotoSettings,
     settings::{
-        normalize_pool_country, normalize_pool_country_name, ApiAccessConfig, MetricsTxConfig,
-        NodeConfig, NodeConfigRaw, Settings,
+        normalize_bench_url, normalize_pool_country, normalize_pool_country_name, ApiAccessConfig,
+        MetricsTxConfig, NodeConfig, NodeConfigRaw, Settings,
     },
     wireguard::{WireguardServerConfig, WireguardSettings},
 };

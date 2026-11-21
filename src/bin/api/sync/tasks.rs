@@ -210,10 +210,11 @@ where
         // Validate input
         node.validate()?;
 
-        // Api-side state that a node cannot report must survive re-registration:
-        // bench_url lives only in the database (nodes.bench_url), and a node that
-        // restarts sends a Node without it. Without this the public /status lost
-        // speedtest_url for every node that ever re-registered.
+        // Api-side state that a node may not report must survive
+        // re-registration: a node with no `[node] bench_url` (old build, or a
+        // node whose bench is set by hand in SQL) sends a Node without the
+        // field. The upsert COALESCEs it, and this keeps the in-memory copy —
+        // which /status is built from — from losing the value too.
         let mut node = node;
         {
             let memory = self.memory.read().await;

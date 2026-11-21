@@ -68,6 +68,11 @@ pub struct NodeConfig {
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
     /// address from `node_ips`; an unlisted address weighs 100.
     pub node_weights: Option<BTreeMap<String, i32>>,
+    /// Base URL of the node's own speed-test endpoint (`[node] bench_url`,
+    /// e.g. `https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443`).
+    /// Absent = the node serves no bench (premium slots). Registered with the
+    /// api, which publishes it verbatim as `speedtest_url` in `/status`.
+    pub bench_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -111,6 +116,10 @@ pub struct NodeConfigRaw {
     /// key or a non-positive weight is dropped.
     #[serde(default)]
     pub node_weights: Option<BTreeMap<String, i32>>,
+    /// Base URL of the node's own bench (`[node] bench_url`): where this node
+    /// serves its speed-test files. Absent or blank = the node has no bench.
+    #[serde(default)]
+    pub bench_url: Option<String>,
 }
 
 /// Keeps only usable per-IP weights: the key must parse as IPv4 (the same
@@ -155,6 +164,41 @@ pub fn normalize_pool_country(code: Option<String>) -> Option<String> {
 /// Pool country name (`[node] pool_country_name`): trimmed, blank means absent.
 pub fn normalize_pool_country_name(name: Option<String>) -> Option<String> {
     name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
+}
+
+/// Bench URL (`[node] bench_url`): trimmed, with any trailing slashes dropped
+/// so it stays the *base* a consumer appends `/speedtest/...` to. Only
+/// `http(s)://<host>[:port][/path]` survives: a typo must not publish an
+/// address no client can dial. Blank = absent (the node has no bench).
+pub fn normalize_bench_url(url: Option<String>) -> Option<String> {
+    let trimmed = url?.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let usable = strip_scheme(&trimmed).is_some_and(|rest| {
+        // Authority = everything before the path, query or fragment.
+        let end = rest
+            .find(|c| c == '/' || c == '?' || c == '#')
+            .unwrap_or(rest.len());
+        let authority = &rest[..end];
+        !authority.is_empty()
+            && !authority.contains('@')
+            && !trimmed.chars().any(|c| c.is_whitespace() || c.is_control())
+    });
+    if !usable {
+        tracing::warn!(
+            value = %trimmed,
+            hint = "некорректный bench_url: нужен http(s)://<host>[:port][/path]",
+            "config_invalid_bench_url"
+        );
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn strip_scheme(url: &str) -> Option<&str> {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
 }
 
 /// Normalizes a `pool_translation` map: trims keys/values, lowercases the
@@ -218,6 +262,7 @@ impl NodeConfig {
             pool_country_code: normalize_pool_country(raw.pool_country_code),
             pool_country_name: normalize_pool_country_name(raw.pool_country_name),
             node_weights: normalize_node_weights(raw.node_weights),
+            bench_url: normalize_bench_url(raw.bench_url),
         })
     }
 }
@@ -367,5 +412,34 @@ mod tests {
             Some("Netherlands")
         );
         assert!(normalize_pool_country_name(Some("  ".to_string())).is_none());
+    }
+
+    /// The bench URL is published to clients verbatim, who append
+    /// `/speedtest/...`: a trailing slash would double it, and a value without
+    /// http(s) and a host is not an address anyone can dial.
+    #[test]
+    fn bench_url_keeps_only_a_dialable_base() {
+        assert_eq!(
+            normalize_bench_url(Some(
+                " https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443/ ".to_string()
+            ))
+            .as_deref(),
+            Some("https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443")
+        );
+        assert_eq!(
+            normalize_bench_url(Some("http://10.0.0.5:8080".to_string())).as_deref(),
+            Some("http://10.0.0.5:8080")
+        );
+        // Absent / blank = "no bench", not an empty string on the wire.
+        assert!(normalize_bench_url(None).is_none());
+        assert!(normalize_bench_url(Some("   ".to_string())).is_none());
+        assert!(normalize_bench_url(Some("///".to_string())).is_none());
+        // No scheme, no host, a path-only value or a stray space: dropped.
+        assert!(normalize_bench_url(Some("ncr-nl-ams-bench-01:19443".to_string())).is_none());
+        assert!(normalize_bench_url(Some("https://".to_string())).is_none());
+        assert!(normalize_bench_url(Some("https:///speedtest".to_string())).is_none());
+        assert!(normalize_bench_url(Some("https://host with space".to_string())).is_none());
+        assert!(normalize_bench_url(Some("ftp://host".to_string())).is_none());
+        assert!(normalize_bench_url(Some("https://user@host".to_string())).is_none());
     }
 }

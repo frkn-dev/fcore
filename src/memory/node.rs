@@ -234,9 +234,10 @@ pub struct Node {
     pub node_weights: BTreeMap<String, i32>,
     /// Base URL of the node's own speed-test endpoint
     /// (`https://<hoster>-<cc>-<city>-bench-<nn>.bench.beacon.frkn.org:19443`).
-    /// Lives only in the api database (`nodes.bench_url`) — a node does not know
-    /// its bench name and never sends this field, so registration must not clear
-    /// it. Exposed as `speedtest_url` in the public `/status`.
+    /// Declared by the node (`[node] bench_url`) and persisted as
+    /// `nodes.bench_url`; a node that does not declare one keeps the stored
+    /// value on re-registration, and the api never derives it from the
+    /// hostname. Exposed as `speedtest_url` in the public `/status`.
     #[serde(default)]
     pub bench_url: Option<String>,
 }
@@ -449,7 +450,7 @@ impl Node {
             pool_country_code: settings.pool_country_code,
             pool_country_name: settings.pool_country_name,
             node_weights: settings.node_weights.unwrap_or_default(),
-            bench_url: None,
+            bench_url: settings.bench_url,
         }
     }
 

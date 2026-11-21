@@ -8,6 +8,11 @@
 --
 -- Run once per environment after 0017_node_bench_url.sql:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f deploy/seed-nodes-bench-url.sql
+--
+-- Superseded for nodes that declare `[node] bench_url` in their config.toml:
+-- fnode now sends the value at registration and the api upserts it (COALESCE —
+-- a node without the field keeps the stored one). This seed stays useful as a
+-- one-off for nodes that have not been updated yet.
 
 UPDATE nodes SET bench_url = 'https://mis-at-vie-bench-01.bench.beacon.frkn.org:19443'
  WHERE hostname = 'at.frkn.org' AND bench_url IS DISTINCT FROM 'https://mis-at-vie-bench-01.bench.beacon.frkn.org:19443';

@@ -815,6 +815,40 @@ mod tests {
         assert!(json["speedtest_url"].is_null());
     }
 
+    // A node that registers a new bench URL must show it in /status right
+    // away: the NodeRequest -> Node path carries the value, so the in-memory
+    // node the status row is built from is updated without an api restart.
+    #[test]
+    fn registration_updates_speedtest_url_in_status() {
+        let req: crate::http::request::NodeRequest = serde_json::from_value(serde_json::json!({
+            "env": "dev",
+            "hostname": "eu01.frkn.org",
+            "address": "185.156.108.232",
+            "inbounds": {},
+            "uuid": uuid::Uuid::new_v4(),
+            "label": "NL AWG EU-01",
+            "interface": "eth0",
+            "cores": 4,
+            "max_bandwidth_bps": 1000000000i64,
+            "country": "EU",
+            "type": "Node",
+            "bench_url": "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443"
+        }))
+        .unwrap();
+        assert!(req.validate().is_ok());
+
+        let row = node_status_public(&req.as_node());
+        assert_eq!(
+            row.speedtest_url.as_deref(),
+            Some("https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443")
+        );
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            json["speedtest_url"],
+            "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443"
+        );
+    }
+
     // Personal (self-hosted) nodes stay out of the public list.
     #[test]
     fn personal_nodes_are_not_listed() {

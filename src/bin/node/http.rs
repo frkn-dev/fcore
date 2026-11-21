@@ -50,6 +50,12 @@ pub struct NodeRequest {
     /// address from `node_ips`. Old api builds ignore the unknown field.
     #[serde(default)]
     pub node_weights: BTreeMap<String, i32>,
+    /// Base URL this node serves its speed-test files from (config.toml
+    /// `[node] bench_url`). Omitted when the node has no bench, so a
+    /// re-registration never clears a value the api already stores. Old api
+    /// builds ignore the unknown field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +337,7 @@ where
             pool_country_code: node.pool_country_code.clone(),
             pool_country_name: node.pool_country_name.clone(),
             node_weights: node.node_weights.clone(),
+            bench_url: node.bench_url.clone(),
         };
 
         let res = HttpClient::new()
@@ -394,4 +401,60 @@ fn load_runtime_token(config_token: &str) -> String {
 
 fn persist_node_token(token: &str) -> std::io::Result<()> {
     std::fs::write(runtime_token_path(), token.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NodeRequest;
+    use fcore::{Env, NodeType};
+    use std::collections::HashMap;
+
+    fn request(bench_url: Option<&str>) -> NodeRequest {
+        NodeRequest {
+            env: Env::Ru,
+            hostname: "msk-tw.frkn.org".to_string(),
+            address: "185.156.108.232".parse().unwrap(),
+            inbounds: HashMap::new(),
+            uuid: uuid::Uuid::new_v4(),
+            label: "RU MSK".to_string(),
+            interface: "eth0".to_string(),
+            cores: 4,
+            max_bandwidth_bps: 1_000_000_000,
+            country: "RU".to_string(),
+            r#type: NodeType::Node,
+            cluster: None,
+            node_ips: None,
+            pool: None,
+            pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
+            node_weights: Default::default(),
+            bench_url: bench_url.map(str::to_string),
+        }
+    }
+
+    // A node that declares its bench publishes it in the registration payload,
+    // so the api can store it (`nodes.bench_url` -> `/status` `speedtest_url`).
+    #[test]
+    fn registration_carries_bench_url() {
+        let json = serde_json::to_value(request(Some(
+            "https://tw-ru-msk-bench-01.bench.beacon.frkn.org:19443",
+        )))
+        .unwrap();
+        assert_eq!(
+            json["bench_url"],
+            "https://tw-ru-msk-bench-01.bench.beacon.frkn.org:19443"
+        );
+    }
+
+    // Absent means "no bench here", not "clear the stored one": the key must
+    // not appear at all, so an old api / another node cannot wipe the value.
+    #[test]
+    fn registration_omits_absent_bench_url() {
+        let json = serde_json::to_value(request(None)).unwrap();
+        assert!(
+            json.get("bench_url").is_none(),
+            "bench_url must be omitted, not sent as null: {json}"
+        );
+    }
 }

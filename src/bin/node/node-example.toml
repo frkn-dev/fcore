@@ -103,6 +103,15 @@ type = "common"
 # api hands the client `node_weights{ip: weight}` and the client splits traffic
 # by these numbers. Missing address = 100. Zero/negative = "not set" (100).
 # node_weights = { "192.168.1.100" = 75, "192.168.1.101" = 25 }
+# Optional base URL of THIS node's speed-test endpoint: where the bench serves
+# `/speedtest/1mb.test`, `/speedtest/10mb.test`, `/speedtest/ping.txt`. The node
+# sends it at registration; the api stores it (`nodes.bench_url`) and publishes
+# it verbatim as `speedtest_url` in the public `/status`. Must be
+# `http(s)://<host>[:port][/path]` — a trailing slash is stripped, a value
+# without http(s) or a host is ignored with a warning. Omit the key when the
+# node has no bench (premium slots): absent means "do not change the stored
+# value", so a re-registration never wipes a URL set another way.
+# bench_url = "https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443"
 
 [api]
 endpoint = "http://127.0.0.1:3000"
