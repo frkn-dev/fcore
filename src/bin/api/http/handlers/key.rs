@@ -535,7 +535,8 @@ where
             }
 
             // A renewal must not leave the grants behind: they carry their own
-            // `expires_at`, and a stale one would kill the tunnels of a payer.
+            // `expires_at`, and a stale one would kill the tunnels of a payer —
+            // or keep them dead after `expire_grants` closed the shard.
             if flow == ActivationFlow::Peers {
                 // The new term lives on the subscription row just extended.
                 let new_expiry = memory
@@ -547,26 +548,7 @@ where
                     .flatten()
                     .and_then(|s| s.expires_at());
                 if let Some(expires_at) = new_expiry {
-                    match memory.db.peers().extend_grants(sub_id, expires_at).await {
-                        Ok(rows) if !rows.is_empty() => {
-                            tracing::info!(
-                                "activation: extended {} grant(s) of {} to {}",
-                                rows.len(),
-                                sub_id,
-                                expires_at
-                            );
-                            let mut state = memory.memory.write().await;
-                            for row in rows {
-                                state.peers_state.access.insert(sub_id, row);
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::error!(
-                            "activation: cannot extend grants of {}: {}",
-                            sub_id,
-                            e
-                        ),
-                    }
+                    super::peers::renew_grant_access(&memory, sub_id, expires_at).await;
                 }
             }
 

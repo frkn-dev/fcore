@@ -167,11 +167,13 @@ fn default_metered_conns() -> Vec<String> {
 pub struct PeersConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Default cap of live tunnels per installation (a phone keeps one per
-    /// shard it uses). A per-subscription override in `subscription_limits`
-    /// wins over this.
-    #[serde(default = "default_peers_max_per_device")]
-    pub max_per_device: i64,
+    /// Default cap of live tunnels per physical device, counted by its X25519
+    /// public key across every subscription and env — a phone keeps one, a
+    /// router may keep three up for failover. A per-subscription override in
+    /// `subscription_limits.peers_per_device` wins over this. `0` (or no key)
+    /// means 3. The old name `max_per_device` is still read.
+    #[serde(default = "default_peers_per_device", alias = "max_per_device")]
+    pub peers_per_device: i64,
     /// Default cap of live devices (installations) per subscription.
     #[serde(default = "default_peers_max_devices_per_subscription")]
     pub max_devices_per_subscription: i64,
@@ -228,7 +230,7 @@ pub struct PeersConfig {
     pub prune_max_per_tick: usize,
 }
 
-fn default_peers_max_per_device() -> i64 {
+fn default_peers_per_device() -> i64 {
     3
 }
 
@@ -265,7 +267,7 @@ impl Default for PeersConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_per_device: default_peers_max_per_device(),
+            peers_per_device: default_peers_per_device(),
             max_per_subscription: default_peers_max_per_subscription(),
             max_devices_per_subscription: default_peers_max_devices_per_subscription(),
             subnets: HashMap::new(),
@@ -419,6 +421,11 @@ pub struct TasksConfig {
     pub heartbeat_node_offline_threshold_sec: u64,
     #[serde(default = "default_traffic_persist_interval_sec")]
     pub traffic_persist_interval_sec: u64,
+    /// How often peer traffic is read from the metrics bus and persisted.
+    /// Absent or `0` inherits `traffic_persist_interval_sec`, so one knob tunes
+    /// both the v1 connection and the peer persister.
+    #[serde(default)]
+    pub peer_traffic_persist_interval_sec: Option<u64>,
     /// How often lite subscriptions are checked against their traffic limit.
     #[serde(default = "default_traffic_limit_interval_sec")]
     pub traffic_limit_interval_sec: u64,
@@ -442,6 +449,18 @@ pub struct TasksConfig {
     /// itself is counted in days, so an hourly tick is plenty.
     #[serde(default = "default_stale_device_interval_sec")]
     pub stale_device_interval_sec: u64,
+}
+
+impl TasksConfig {
+    /// Cadence of the peer traffic persister: the explicit
+    /// `peer_traffic_persist_interval_sec` when set, otherwise the same value
+    /// the v1 connection persister uses.
+    pub fn peer_traffic_interval_sec(&self) -> u64 {
+        match self.peer_traffic_persist_interval_sec {
+            Some(secs) if secs > 0 => secs.max(5),
+            _ => self.traffic_persist_interval_sec.max(5),
+        }
+    }
 }
 
 impl ServiceConfig {
@@ -510,8 +529,12 @@ pub struct MetricsRxConfig {
     pub snapshot_path: String,
 }
 
+/// Default cadence of traffic persistence for connections and peers alike.
+/// A card's `used_bytes` may lag by one interval, so this is minutes, not
+/// hours: an hourly tick left a paying user's usage ~9 KB behind after 90+ KB
+/// had actually flowed.
 fn default_traffic_persist_interval_sec() -> u64 {
-    3600
+    300
 }
 
 fn default_traffic_limit_interval_sec() -> u64 {
@@ -611,5 +634,49 @@ mod tests {
         let second = cfg.shards.get(&Env::Named("1001".into())).expect("1001");
         assert_eq!(second.plan, "lite");
         assert_eq!(second.title.as_deref(), Some("Super Duper"));
+    }
+
+    fn tasks_from(toml_src: &str) -> TasksConfig {
+        toml::from_str(toml_src).expect("tasks config must parse")
+    }
+
+    const TASKS_REQUIRED: &str = r#"
+        db_sync_interval_sec = 1000
+        subscription_restore_interval = 600
+        subscription_expire_interval = 600
+        connection_expire_interval = 600
+        monitor_nodes_interval = 60
+        heartbeat_node_offline_threshold_sec = 120
+    "#;
+
+    #[test]
+    fn traffic_persist_defaults_to_300_for_connections_and_peers() {
+        let cfg = tasks_from(TASKS_REQUIRED);
+        assert_eq!(cfg.traffic_persist_interval_sec, 300);
+        // No peer key: the peer persister follows the connection cadence.
+        assert_eq!(cfg.peer_traffic_persist_interval_sec, None);
+        assert_eq!(cfg.peer_traffic_interval_sec(), 300);
+    }
+
+    #[test]
+    fn peer_traffic_interval_inherits_the_connection_key() {
+        let cfg = tasks_from(&format!("{TASKS_REQUIRED}\ntraffic_persist_interval_sec = 600\n"));
+        assert_eq!(cfg.traffic_persist_interval_sec, 600);
+        assert_eq!(cfg.peer_traffic_interval_sec(), 600);
+    }
+
+    #[test]
+    fn peer_traffic_interval_can_be_tuned_alone() {
+        let cfg = tasks_from(&format!(
+            "{TASKS_REQUIRED}\ntraffic_persist_interval_sec = 600\npeer_traffic_persist_interval_sec = 120\n"
+        ));
+        assert_eq!(cfg.traffic_persist_interval_sec, 600);
+        assert_eq!(cfg.peer_traffic_interval_sec(), 120);
+
+        // `0` is the documented "inherit" value, not a 0-second tick.
+        let inherit = tasks_from(&format!(
+            "{TASKS_REQUIRED}\ntraffic_persist_interval_sec = 600\npeer_traffic_persist_interval_sec = 0\n"
+        ));
+        assert_eq!(inherit.peer_traffic_interval_sec(), 600);
     }
 }

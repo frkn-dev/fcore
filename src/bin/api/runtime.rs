@@ -216,7 +216,8 @@ where
 
         if self.settings.service.peers.enabled {
             spawn_task("persist_peer_traffic", {
-                let interval = self.settings.tasks.traffic_persist_interval_sec;
+                // Separate knob, same default as the connection persister.
+                let interval = self.settings.tasks.peer_traffic_interval_sec();
                 let service = Arc::clone(&self);
 
                 async move {

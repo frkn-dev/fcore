@@ -31,6 +31,15 @@ pub struct AccessRow {
     pub traffic_limit: Option<i64>,
 }
 
+/// What a renewal did to one grant row: the row to write into memory, whether
+/// it came back from a revocation, and why it had been revoked.
+#[derive(Clone, Debug)]
+pub struct RenewedGrant {
+    pub row: AccessRow,
+    pub revived: bool,
+    pub revoked_reason: Option<String>,
+}
+
 /// One row of `shard_overview`: a declared shard with its live numbers.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ShardRow {
@@ -81,6 +90,19 @@ pub struct PeerRow {
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub revoke_reason: Option<String>,
+}
+
+/// Watermark of the peer traffic persister: how far the peer's traffic has been
+/// booked and the totals already written. The peer-side counterpart of
+/// `ConnWatermark` (`connections.uplink/downlink/last_traffic_persist_at`).
+#[derive(Clone, Debug)]
+pub struct PeerWatermark {
+    pub peer_id: Uuid,
+    pub subscription_id: Uuid,
+    pub env: Env,
+    pub uplink: i64,
+    pub downlink: i64,
+    pub last_persist_at: DateTime<Utc>,
 }
 
 /// What an insert actually did. `Conflict` means the unique index refused it;
@@ -784,33 +806,143 @@ impl PgPeers {
     /// Renewal: a grant keeps its own `expires_at` (each shard right has its own
     /// term), so extending the subscription must move the grants too —
     /// otherwise a paying user loses their tunnels the day the old term ends.
-    pub async fn extend_grants(
+    ///
+    /// A grant holds its own term, so `expire_grants` closes it with reason
+    /// `expired` (or `quota`) the moment that term runs out. Without reviving
+    /// those rows here, paying for another month would move the subscription
+    /// and leave the user without a tunnel forever — hence one row here is
+    /// either extended (live) or revived (revoked by the clock or the meter),
+    /// never re-assigned: the env, pool and protos of the shard stay the same.
+    ///
+    /// Explicit revocations (`user`, `subscription_ended`) and rows of a
+    /// subscription that never had a grant are left alone. Rows are locked
+    /// `FOR UPDATE` so a concurrent expiry tick cannot revoke between the read
+    /// and the write.
+    pub async fn renew_grants(
         &self,
         subscription_id: Uuid,
         expires_at: chrono::DateTime<Utc>,
-    ) -> Result<Vec<AccessRow>> {
+    ) -> Result<Vec<RenewedGrant>> {
+        // A "renewal" into the past is not a renewal: reviving a grant with an
+        // already-over term would just be revoked again by the next tick.
+        if expires_at <= Utc::now() {
+            return Ok(Vec::new());
+        }
+
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
 
-        let rows = client
+        let rows = tx
             .query(
                 r#"
-                UPDATE subscription_access
-                   SET expires_at = $2, updated_at = now()
+                SELECT id, env, plan, protos, sources, expires_at, traffic_limit,
+                       revoked_at, revoked_reason
+                  FROM subscription_access
                  WHERE subscription_id = $1
-                   AND revoked_at IS NULL
-                   AND expires_at IS NOT NULL
-                   AND expires_at < $2
-                RETURNING *
+                 ORDER BY env
+                 FOR UPDATE
                 "#,
-                &[&subscription_id, &expires_at],
+                &[&subscription_id],
             )
             .await?;
 
-        Ok(rows.iter().map(access_from_row).collect())
+        // A live row for an env wins over a revoked one: reviving the second
+        // would break the `WHERE revoked_at IS NULL` unique index.
+        let live_envs: Vec<String> = rows
+            .iter()
+            .filter(|row| row.get::<_, Option<DateTime<Utc>>>("revoked_at").is_none())
+            .map(|row| row.get::<_, String>("env"))
+            .collect();
+
+        let mut renewed = Vec::new();
+        for row in &rows {
+            let id: Uuid = row.get("id");
+            let env_raw: String = row.get("env");
+            let revoked_reason: Option<String> = row.get("revoked_reason");
+            let was_live = row.get::<_, Option<DateTime<Utc>>>("revoked_at").is_none();
+
+            let access = access_from_row(row);
+            let state = if was_live {
+                crate::peers::GrantState::live(crate::peers::Grant {
+                    env: access.env.clone(),
+                    protos: access.protos.clone(),
+                    sources: access.sources.clone(),
+                    expires_at: access.expires_at,
+                    traffic_limit: access.traffic_limit,
+                })
+            } else {
+                crate::peers::GrantState::revoked(
+                    crate::peers::Grant {
+                        env: access.env.clone(),
+                        protos: access.protos.clone(),
+                        sources: access.sources.clone(),
+                        expires_at: access.expires_at,
+                        traffic_limit: access.traffic_limit,
+                    },
+                    revoked_reason.as_deref(),
+                )
+            };
+
+            if !was_live && live_envs.contains(&env_raw) {
+                continue;
+            }
+
+            // Traffic is summed lifetime, like `over_quota_grants` does: a
+            // revived quota row must not be spent already, or the next tick
+            // would revoke it again.
+            let used = if !was_live && revoked_reason.as_deref() == Some(crate::peers::REVOKE_QUOTA)
+            {
+                tx.query_one(
+                    r#"
+                    SELECT COALESCE(SUM(uplink_bytes + downlink_bytes), 0)::BIGINT AS used
+                      FROM subscription_traffic
+                     WHERE subscription_id = $1 AND env = $2 AND period = 'day'
+                    "#,
+                    &[&subscription_id, &env_raw],
+                )
+                .await?
+                .get("used")
+            } else {
+                0
+            };
+
+            let Some(next) = state.renewed(expires_at, used) else {
+                continue;
+            };
+
+            tx.execute(
+                r#"
+                UPDATE subscription_access
+                   SET expires_at = $2, revoked_at = NULL, revoked_reason = NULL,
+                       updated_at = now()
+                 WHERE id = $1
+                "#,
+                &[&id, &next.expires_at],
+            )
+            .await?;
+
+            renewed.push(RenewedGrant {
+                row: AccessRow {
+                    expires_at: next.expires_at,
+                    ..access
+                },
+                revived: !was_live,
+                revoked_reason,
+            });
+        }
+
+        tx.commit().await?;
+
+        Ok(renewed)
     }
 
-    pub async fn revoke_grant(&self, subscription_id: Uuid, env: &Env) -> Result<bool> {
+    pub async fn revoke_grant(
+        &self,
+        subscription_id: Uuid,
+        env: &Env,
+        reason: &str,
+    ) -> Result<bool> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
@@ -818,10 +950,10 @@ impl PgPeers {
             .execute(
                 r#"
                 UPDATE subscription_access
-                SET revoked_at = now(), updated_at = now()
+                SET revoked_at = now(), revoked_reason = $3, updated_at = now()
                 WHERE subscription_id = $1 AND env = $2 AND revoked_at IS NULL
                 "#,
-                &[&subscription_id, &env.to_string()],
+                &[&subscription_id, &env.to_string(), &reason],
             )
             .await?;
 
@@ -1195,7 +1327,9 @@ impl PgPeers {
             .batch_execute(
                 "ALTER TABLE peers ADD COLUMN IF NOT EXISTS pool text;
                  CREATE INDEX IF NOT EXISTS peers_pool_live
-                     ON peers (env, pool) WHERE revoked_at IS NULL;",
+                     ON peers (env, pool) WHERE revoked_at IS NULL;
+                 ALTER TABLE subscription_access
+                     ADD COLUMN IF NOT EXISTS revoked_reason text;",
             )
             .await?;
 
@@ -1330,26 +1464,71 @@ impl PgPeers {
         Ok(rows.iter().map(peer_from_row).collect())
     }
 
-    /// Accumulate peer traffic into one day bucket. Daily rows are the
-    /// canonical lifetime total; monthly rows are not written for peers.
-    pub async fn upsert_peer_traffic(
+    /// Accumulate peer traffic for one window: advance the peer's watermark and
+    /// add the window's bytes to `peer_traffic` in a single transaction.
+    ///
+    /// Both rows the connection path writes are written here as well — `day`
+    /// (the canonical lifetime total the card's `used_bytes` reads) and
+    /// `month` (`/sub/` and the traffic screen). Returns `false` without
+    /// touching anything when the watermark has already moved past `from`:
+    /// that is what makes a replay of the same window (a crash between the two
+    /// writes, two api instances, an in-memory origin reset) a no-op instead of
+    /// a double count.
+    pub async fn book_peer_traffic(
         &self,
         peer_id: Uuid,
         subscription_id: Uuid,
         env: &Env,
-        bucket: DateTime<Utc>,
-        uplink: i64,
-        downlink: i64,
-    ) -> Result<()> {
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        segments: &[crate::traffic::SegmentTraffic],
+    ) -> Result<bool> {
+        let rows = crate::traffic::booking_rows(segments);
+        let total_up: i64 = segments.iter().map(|s| s.uplink as i64).sum();
+        let total_down: i64 = segments.iter().map(|s| s.downlink as i64).sum();
+
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
 
-        client
+        let advanced = tx
             .execute(
+                r#"
+                INSERT INTO peer_watermarks
+                    (peer_id, subscription_id, env, uplink, downlink, last_persist_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (peer_id) DO UPDATE
+                SET uplink = peer_watermarks.uplink + EXCLUDED.uplink,
+                    downlink = peer_watermarks.downlink + EXCLUDED.downlink,
+                    last_persist_at = EXCLUDED.last_persist_at,
+                    updated_at = now()
+                WHERE peer_watermarks.last_persist_at <= $7
+                "#,
+                &[
+                    &peer_id,
+                    &subscription_id,
+                    &env.to_string(),
+                    &total_up,
+                    &total_down,
+                    &to,
+                    &from,
+                ],
+            )
+            .await?;
+
+        if advanced == 0 {
+            // Another tick (or the previous instance) already booked this
+            // window. Nothing to add.
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        for row in &rows {
+            tx.execute(
                 r#"
                 INSERT INTO peer_traffic
                     (peer_id, subscription_id, env, period, bucket, uplink_bytes, downlink_bytes)
-                VALUES ($1, $2, $3, 'day', $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (peer_id, period, bucket) DO UPDATE
                 SET uplink_bytes = peer_traffic.uplink_bytes + EXCLUDED.uplink_bytes,
                     downlink_bytes = peer_traffic.downlink_bytes + EXCLUDED.downlink_bytes,
@@ -1359,14 +1538,37 @@ impl PgPeers {
                     &peer_id,
                     &subscription_id,
                     &env.to_string(),
-                    &bucket,
-                    &uplink,
-                    &downlink,
+                    &row.period,
+                    &row.bucket,
+                    &(row.uplink as i64),
+                    &(row.downlink as i64),
                 ],
             )
             .await?;
+        }
 
-        Ok(())
+        tx.commit().await?;
+
+        Ok(true)
+    }
+
+    /// Watermark of every peer the persister has booked at least once. A peer
+    /// missing from this list has no row yet and starts from its `created_at`.
+    pub async fn all_peer_watermarks(&self) -> Result<Vec<PeerWatermark>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT peer_id, subscription_id, env, uplink, downlink, last_persist_at
+                FROM peer_watermarks
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows.iter().map(peer_watermark_from_row).collect())
     }
 
     /// Every live tunnel of an env — the authoritative set a node receives on
@@ -1620,5 +1822,17 @@ fn peer_from_row(row: &tokio_postgres::Row) -> PeerRow {
         created_at: row.get("created_at"),
         revoked_at: row.get("revoked_at"),
         revoke_reason: row.get("revoke_reason"),
+    }
+}
+
+fn peer_watermark_from_row(row: &tokio_postgres::Row) -> PeerWatermark {
+    let env: String = row.get("env");
+    PeerWatermark {
+        peer_id: row.get("peer_id"),
+        subscription_id: row.get("subscription_id"),
+        env: Env::from_str(env.as_str()).unwrap_or(Env::Custom(env)),
+        uplink: row.get("uplink"),
+        downlink: row.get("downlink"),
+        last_persist_at: row.get("last_persist_at"),
     }
 }

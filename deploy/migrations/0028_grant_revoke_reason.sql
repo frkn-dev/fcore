@@ -1,0 +1,11 @@
+-- Why a grant was revoked, so a renewal can tell an automatic close from an
+-- explicit one.
+--
+-- `expire_grants` revokes with `expired` (term over) or `quota` (limit spent);
+-- both are undone by a renewal (`renew_grants`). `user` and
+-- `subscription_ended` are explicit decisions and stay revoked.
+--
+-- Rows revoked before this column existed have NULL here: they are judged by
+-- their own `expires_at` — a term already over was an expiry, a term still
+-- running means the revocation was deliberate.
+ALTER TABLE subscription_access ADD COLUMN IF NOT EXISTS revoked_reason text;

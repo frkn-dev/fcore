@@ -1693,7 +1693,7 @@ where
         let peers_cfg = self.settings.service.peers.clone();
         let peers_enabled = peers_cfg.enabled;
         let peers_remember_days = peers_cfg.remember_days as u64;
-        let peers_per_device = peers_cfg.max_per_device as u64;
+        let peers_per_device = peers_cfg.peers_per_device as u64;
         let peers_per_subscription = peers_cfg.max_per_subscription as u64;
         let peers_devices_per_subscription = peers_cfg.max_devices_per_subscription as u64;
         let peers_auto_prefix = peers_cfg.auto_subnet_prefix as u64;

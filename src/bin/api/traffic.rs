@@ -141,6 +141,22 @@ pub fn connection_deltas_between(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Vec<SegmentTraffic> {
+    segments_between(created_at, from, to, |start, end| {
+        metrics.get_connection_delta_traffic(conn_id, start, end)
+    })
+}
+
+/// Same split as [`connection_deltas_between`], for a peer or any other series
+/// keyed by its own id: `delta` returns the (uplink, downlink) of one window.
+pub fn segments_between<F>(
+    created_at: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    mut delta: F,
+) -> Vec<SegmentTraffic>
+where
+    F: FnMut(i64, i64) -> (u64, u64),
+{
     if from >= to {
         return Vec::new();
     }
@@ -175,7 +191,7 @@ pub fn connection_deltas_between(
     for window in points.windows(2) {
         let seg_start = window[0].timestamp_millis();
         let seg_end = window[1].timestamp_millis();
-        let (uplink, downlink) = metrics.get_connection_delta_traffic(conn_id, seg_start, seg_end);
+        let (uplink, downlink) = delta(seg_start, seg_end);
         if uplink == 0 && downlink == 0 {
             continue;
         }
@@ -188,6 +204,65 @@ pub fn connection_deltas_between(
     }
 
     result
+}
+
+/// Booking window of one peer for one persister tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerWindow {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
+/// Window the peer persister has to book now.
+///
+/// `last_persist_at` is the value stored in `peer_watermarks`; `None` means the
+/// peer was never booked and the window starts at its creation. It is never
+/// derived from `now` or `now - interval`: that in-memory origin reset on every
+/// restart and re-counted up to one interval of already persisted traffic.
+/// `None` is returned when the stored point is already at or past `now`, so a
+/// window that was booked can never be booked again.
+pub fn peer_window(
+    created_at: DateTime<Utc>,
+    last_persist_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<PeerWindow> {
+    let from = last_persist_at.unwrap_or(created_at).max(created_at);
+    if from >= now {
+        return None;
+    }
+    Some(PeerWindow { from, to: now })
+}
+
+/// One row written to `peer_traffic` / `connection_traffic`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BookingRow {
+    pub period: &'static str,
+    pub bucket: DateTime<Utc>,
+    pub uplink: u64,
+    pub downlink: u64,
+}
+
+/// Rows a booking writes for a window: one `day` and one `month` row per
+/// segment, exactly like the v1 connection path. Both periods are needed —
+/// `/sub/` and the traffic screen read `month`, the card's lifetime total
+/// reads `day`.
+pub fn booking_rows(segments: &[SegmentTraffic]) -> Vec<BookingRow> {
+    let mut rows = Vec::with_capacity(segments.len() * 2);
+    for seg in segments {
+        rows.push(BookingRow {
+            period: "day",
+            bucket: seg.day_bucket,
+            uplink: seg.uplink,
+            downlink: seg.downlink,
+        });
+        rows.push(BookingRow {
+            period: "month",
+            bucket: seg.month_bucket,
+            uplink: seg.uplink,
+            downlink: seg.downlink,
+        });
+    }
+    rows
 }
 
 /// Parse an env string. There is no fallback on purpose: booking traffic to

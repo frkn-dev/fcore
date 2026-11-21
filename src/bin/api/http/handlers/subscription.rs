@@ -308,31 +308,13 @@ where
 
             // payment-gw extends a renewal through this handler (PUT /subscription),
             // not through key activation: a shard grant carries its own `expires_at`,
-            // so the grants must move with the subscription or a payer loses the
-            // tunnels at the old term.
+            // so the grants must move with the subscription — and a grant the
+            // expiry task already revoked has to come back — or a payer loses
+            // the tunnels at the old term.
             match memory.db.sub().find(&sub_id).await {
                 Ok(Some(sub)) => {
                     if let Some(expires_at) = sub.expires_at() {
-                        match memory.db.peers().extend_grants(sub_id, expires_at).await {
-                            Ok(rows) if !rows.is_empty() => {
-                                tracing::info!(
-                                    "renewal: extended {} grant(s) of {} to {}",
-                                    rows.len(),
-                                    sub_id,
-                                    expires_at
-                                );
-                                let mut state = memory.memory.write().await;
-                                for row in rows {
-                                    state.peers_state.access.insert(sub_id, row);
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(err) => tracing::error!(
-                                "renewal: cannot extend grants of {}: {}",
-                                sub_id,
-                                err
-                            ),
-                        }
+                        super::peers::renew_grant_access(&memory, sub_id, expires_at).await;
                     }
                 }
                 Ok(None) => {}

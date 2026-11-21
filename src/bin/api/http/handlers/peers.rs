@@ -72,7 +72,7 @@ fn refusal_reply(refusal: Refusal) -> Box<dyn warp::Reply> {
     }
 
     let detail = match refusal {
-        Refusal::DeviceLimit(limit) | Refusal::SubscriptionLimit(limit) => Some(limit),
+        Refusal::PeersLimit(limit) | Refusal::SubscriptionLimit(limit) => Some(limit),
         _ => None,
     };
     let body = ErrorBody {
@@ -907,6 +907,19 @@ where
         None => return refusal_reply(Refusal::DeviceNotFound),
     };
 
+    // Write-through of the device row: the per-device peer cap counts tunnels
+    // through `devices.public_key`, so a device this request just created must
+    // be visible in memory — otherwise it would look like it has no tunnels at
+    // all (and `devices_per_subscription` would not see it either) until the
+    // next restart.
+    memory
+        .memory
+        .write()
+        .await
+        .peers_state
+        .devices
+        .insert(device.clone());
+
     // Grant decides whether this env/protocol is allowed at all.
     let grant = {
         let mem = memory.memory.read().await;
@@ -926,28 +939,15 @@ where
         }
     }
 
-    let (per_device, per_subscription) = {
-        let mem = memory.memory.read().await;
-        mem.peers_state.limits_for(&req.subscription_id)
-    };
-    let limits = Limits::resolve(default_limits, per_device, per_subscription);
-    let (device_live, sub_live) = {
-        let mem = memory.memory.read().await;
-        mem.peers_state.peers.counts(&req.subscription_id, &device.id)
-    };
-    if let Err(refusal) = limits.check_device(device_live as i64) {
-        return refusal_reply(refusal);
-    }
-    if let Err(refusal) = limits.check_subscription(sub_live as i64) {
-        return refusal_reply(refusal);
-    }
-
     let public_key = req
         .public_key
         .clone()
         .unwrap_or_else(|| device.public_key.clone());
 
-    // Idempotency: the same key in the same env is the same tunnel.
+    // Idempotency first: the same key in the same env is the same tunnel, and a
+    // re-create must not be refused by a cap it already occupies. A client
+    // retrying after a timeout lands here and gets its peer back, even at the
+    // limit.
     let existing = {
         let mem = memory.memory.read().await;
         mem.peers_state
@@ -972,6 +972,32 @@ where
         }
         Some(_) => return refusal_reply(Refusal::KeyTaken),
         None => {}
+    }
+
+    let (per_device, per_subscription) = {
+        let mem = memory.memory.read().await;
+        mem.peers_state.limits_for(&req.subscription_id)
+    };
+    let limits = Limits::resolve(default_limits, per_device, per_subscription);
+    // The peer cap is per physical device, not per subscription: every live
+    // tunnel of this X25519 key counts, including the ones a second
+    // subscription (another device row, same key) or an extra router channel
+    // opened.
+    let (device_live, sub_live) = {
+        let mem = memory.memory.read().await;
+        (
+            mem.peers_state.peers_of_device_key(&device.public_key),
+            mem.peers_state
+                .peers
+                .counts(&req.subscription_id, &device.id)
+                .1 as i64,
+        )
+    };
+    if let Err(refusal) = limits.check_device_peers(device_live) {
+        return refusal_reply(refusal);
+    }
+    if let Err(refusal) = limits.check_subscription(sub_live) {
+        return refusal_reply(refusal);
     }
 
     let (mut blocks, mut used) = {
@@ -1165,7 +1191,7 @@ where
     };
     match peer {
         Some(peer) if peer.subscription_id == req.subscription_id => {
-            match db.revoke_peer(peer_id, "user").await {
+            match db.revoke_peer(peer_id, peers::REVOKE_USER).await {
                 Ok(true) => {
                     memory
                         .memory
@@ -1299,7 +1325,7 @@ where
                     .collect()
             };
             for peer in &doomed {
-                if db.revoke_peer(peer.id, "user").await.is_ok() {
+                if db.revoke_peer(peer.id, peers::REVOKE_USER).await.is_ok() {
                     memory
                         .memory
                         .write()
@@ -1583,7 +1609,14 @@ where
         Err(_) => return json_reply(400, "bad env", serde_json::json!({ "error": "bad_env" })),
     };
 
-    match revoke_env_access(&memory, req.subscription_id, &env, "subscription_ended").await {
+    match revoke_env_access(
+        &memory,
+        req.subscription_id,
+        &env,
+        peers::REVOKE_SUBSCRIPTION_ENDED,
+    )
+    .await
+    {
         Ok(Some((peers_revoked, conns_revoked))) => json_reply(
             200,
             "grant revoked",
@@ -1628,7 +1661,7 @@ where
 {
     let db = memory.db.peers();
     let had_grant = db
-        .revoke_grant(subscription_id, env)
+        .revoke_grant(subscription_id, env, reason)
         .await
         .map_err(|e| e.to_string())?;
     if !had_grant {
@@ -1709,6 +1742,75 @@ where
     }
 
     Ok(Some((peers_revoked, conns_revoked)))
+}
+
+/// A successful date extension — payment-gw `PUT /subscription`, support days,
+/// Apple IAP, key renewal — must reach the grants, not just the subscription
+/// row: each grant carries its own `expires_at`, and `expire_grants` closes it
+/// on that clock. This extends the live ones and revives the ones the clock
+/// (`expired`) or the meter (`quota`) took away.
+///
+/// A revoked grant stays on the same env, pool and protos, so the client lands
+/// on the same shard. Explicit revocations (`user`, `subscription_ended`) are
+/// not touched, and a subscription without grants is a no-op (a v1 user gets
+/// nothing new here — creating grants is the activation path's decision).
+///
+/// Peers revoked by that same expiry are *not* un-revoked: the api already
+/// told the nodes to drop them, so the client gets a fresh tunnel from the
+/// next `POST /v1/peers` instead of a row nobody programmed.
+pub(crate) async fn renew_grant_access<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: Uuid,
+    expires_at: DateTime<Utc>,
+) where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static + From<Subscription>,
+{
+    match memory
+        .db
+        .peers()
+        .renew_grants(subscription_id, expires_at)
+        .await
+    {
+        Ok(rows) if rows.is_empty() => {}
+        Ok(rows) => {
+            let mut state = memory.memory.write().await;
+            for renewed in rows {
+                let env = renewed.row.env.clone();
+                if renewed.revived {
+                    tracing::info!(
+                        "renewal: grant revived for subscription {} env {} until {} (was revoked: {}), peers are reissued on the next POST /v1/peers",
+                        subscription_id,
+                        env,
+                        expires_at,
+                        renewed.revoked_reason.as_deref().unwrap_or("no reason, term was over")
+                    );
+                } else {
+                    tracing::info!(
+                        "renewal: grant extended for subscription {} env {} until {}",
+                        subscription_id,
+                        env,
+                        expires_at
+                    );
+                }
+                state.peers_state.access.insert(subscription_id, renewed.row);
+            }
+        }
+        Err(err) => tracing::error!(
+            "renewal: cannot renew grants of {}: {}",
+            subscription_id,
+            err
+        ),
+    }
 }
 
 /// `GET /cabinet/<subscription_id>` — плоский JSON для ЛК (без конверта, как

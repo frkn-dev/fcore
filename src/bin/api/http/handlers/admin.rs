@@ -920,9 +920,24 @@ where
     }
 
     match SyncOp::add_days(&memory, &subscription_id, req.days).await {
-        Ok(Status::Updated(_)) => Ok(Box::new(warp::reply::json(
-            &serde_json::json!({"id": subscription_id, "days_added": req.days}),
-        ))),
+        Ok(Status::Updated(_)) => {
+            // Support added paid time: the grants carry their own term, so
+            // they have to move with the subscription and a shard the expiry
+            // task already closed has to come back — otherwise the user keeps
+            // answering `grant_expired` with a paid subscription.
+            let expires_at = {
+                let mem = memory.memory.read().await;
+                mem.subscriptions
+                    .find_by_id(&subscription_id)
+                    .and_then(|sub| sub.expires_at())
+            };
+            if let Some(expires_at) = expires_at {
+                super::peers::renew_grant_access(&memory, subscription_id, expires_at).await;
+            }
+            Ok(Box::new(warp::reply::json(
+                &serde_json::json!({"id": subscription_id, "days_added": req.days}),
+            )))
+        }
         Ok(Status::NotFound(_)) => Ok(Box::new(warp::reply::with_status(
             warp::reply::json(
                 &serde_json::json!({"status": 404, "message": "Subscription not found"}),

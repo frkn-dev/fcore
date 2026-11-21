@@ -71,7 +71,10 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # stays reserved so a burst of re-issues never hits the last host.
 # [service.peers]
 # enabled = false
-# max_per_device = 3
+# # Live tunnels per physical device, counted by its X25519 public key across
+# # every subscription and env: a phone keeps one, a router may keep three up
+# # for failover. 0 or no key means 3. Old name: max_per_device.
+# peers_per_device = 3
 # max_devices_per_subscription = 15
 # max_per_subscription = 45
 # remember_days = 7

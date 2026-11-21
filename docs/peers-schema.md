@@ -37,6 +37,7 @@
 | `expires_at` | timestamptz | yes | `NULL` = бессрочно (квотный тариф) |
 | `traffic_limit` | bigint | yes | `NULL` = без квоты (срочный тариф) |
 | `revoked_at` | timestamptz | yes | отозван |
+| `revoked_reason` | text | yes | почему: `expired`/`quota` (продление возвращает), `user`/`subscription_ended` (продление не трогает); `NULL` у живых и у строк до миграции `0028` |
 
 ### `peers` — туннель
 
@@ -64,7 +65,9 @@
 
 ### `subscription_limits` — override лимитов одной подписки
 
-`subscription_id`, `peers_per_device`, `peers_per_subscription`, `updated_at`.
+`subscription_id`, `peers_per_device`, `peers_per_subscription`, `updated_at`. Оба лимита —
+override дефолтов конфига для этой подписки; `peers_per_device` считается по устройству
+(X25519-ключ) суммарно по всем подпискам.
 
 ### `pools` — реестр пулов (для админки; карточки строятся по живым нодам)
 
@@ -84,7 +87,7 @@
 ```toml
 [service.peers]
 enabled = true
-max_per_device = 3
+peers_per_device = 3            # живые туннели одного устройства (по X25519-ключу), по всем подпискам
 max_devices_per_subscription = 15
 max_per_subscription = 45
 remember_days = 7

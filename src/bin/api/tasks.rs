@@ -14,7 +14,7 @@ use fcore::{
 use super::{
     http::handlers::connection::{create_connection_inner, ensure_enabled_connections},
     mrkting,
-    postgres::{connection::ConnWatermark, pg::Tasks as MemoryCacheTasks},
+    postgres::{connection::ConnWatermark, peers::PeerWatermark, pg::Tasks as MemoryCacheTasks},
     service::{Cache, Service},
     subscription_audit,
     sync::tasks::{
@@ -1681,17 +1681,19 @@ where
     Connection: From<C>,
     Vec<(uuid::Uuid, Connection)>: FromIterator<(uuid::Uuid, C)>,
 {
-    /// Persist peer traffic into `peer_traffic`.
+    /// Persist peer traffic into `peer_traffic` — the peer counterpart of
+    /// [`Self::persist_connection_traffic`].
     ///
-    /// Peers have no watermark table: the window is simply "since the last
-    /// tick", kept in memory. A restart therefore re-reads at most one
-    /// interval (bounded by `interval_sec`), which is cheaper than a table
-    /// write per peer per tick and never double counts persisted data.
+    /// The origin of the window comes from `peer_watermarks`, never from
+    /// memory: a restart continues where the last successful booking stopped
+    /// instead of re-reading `now - interval` and counting that traffic a
+    /// second time. Each booking writes the `day` and the `month` row and
+    /// advances the watermark in one transaction, so replaying a window is a
+    /// no-op rather than a double count.
     pub async fn persist_peer_traffic(&self, interval_sec: u64) {
         use std::collections::HashMap;
 
         let mut interval_timer = tokio::time::interval(Duration::from_secs(interval_sec.max(5)));
-        let mut watermarks: HashMap<uuid::Uuid, DateTime<Utc>> = HashMap::new();
 
         loop {
             interval_timer.tick().await;
@@ -1705,39 +1707,82 @@ where
                 }
             };
 
+            if peers.is_empty() {
+                continue;
+            }
+
+            let watermarks = match self.sync.db.peers().all_peer_watermarks().await {
+                Ok(watermarks) => watermarks,
+                Err(e) => {
+                    error!("Failed to load peer traffic watermarks: {}", e);
+                    continue;
+                }
+            };
+            let watermark_map: HashMap<uuid::Uuid, PeerWatermark> =
+                watermarks.into_iter().map(|w| (w.peer_id, w)).collect();
+
+            let mut booked = 0usize;
+
             for peer in peers {
-                let from = watermarks
-                    .get(&peer.id)
-                    .copied()
-                    .unwrap_or(now - chrono::Duration::seconds(interval_sec as i64));
-                if from >= now {
+                let created_at = {
+                    let memory = self.sync.memory.read().await;
+                    memory
+                        .subscriptions
+                        .find_by_id(&peer.subscription_id)
+                        .map(|s| s.created_at())
+                };
+                let Some(created_at) = created_at else {
                     continue;
-                }
-                let (uplink, downlink) = self.metrics.get_peer_delta_traffic(
-                    &peer.id,
-                    from.timestamp_millis(),
-                    now.timestamp_millis(),
+                };
+
+                let last_persist_at = watermark_map.get(&peer.id).map(|w| w.last_persist_at);
+                let Some(window) = traffic::peer_window(created_at, last_persist_at, now) else {
+                    // Already booked up to `now`: nothing new to read.
+                    continue;
+                };
+
+                // Same day/month split as the connection path, from the
+                // subscription's own monthly anchor.
+                let segments = traffic::segments_between(
+                    created_at,
+                    window.from,
+                    window.to,
+                    |start, end| self.metrics.get_peer_delta_traffic(&peer.id, start, end),
                 );
-                watermarks.insert(peer.id, now);
-                if uplink == 0 && downlink == 0 {
+
+                if segments.is_empty() {
+                    // No traffic since the watermark. Leave the watermark where
+                    // it is: the window is empty, so re-reading it is free and
+                    // no row is written for an idle peer.
                     continue;
                 }
-                if let Err(e) = self
+
+                match self
                     .sync
                     .db
                     .peers()
-                    .upsert_peer_traffic(
+                    .book_peer_traffic(
                         peer.id,
                         peer.subscription_id,
                         &peer.env,
-                        crate::traffic::day_start(now),
-                        uplink as i64,
-                        downlink as i64,
+                        window.from,
+                        window.to,
+                        &segments,
                     )
                     .await
                 {
-                    error!("Failed to persist traffic of peer {}: {}", peer.id, e);
+                    Ok(true) => booked += 1,
+                    Ok(false) => {
+                        debug!("Peer {} traffic window was already booked", peer.id);
+                    }
+                    Err(e) => {
+                        error!("Failed to persist traffic of peer {}: {}", peer.id, e);
+                    }
                 }
+            }
+
+            if booked > 0 {
+                info!("Persisted traffic for {} peers", booked);
             }
         }
     }

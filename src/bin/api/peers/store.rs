@@ -139,6 +139,12 @@ impl PeerStore {
             .unwrap_or_default()
     }
 
+    /// Live tunnels of one device row. Used by the per-device cap, which
+    /// unions the rows of the same physical device (one per subscription).
+    pub fn count_of_device(&self, device_id: &Uuid) -> usize {
+        self.by_device.get(device_id).map_or(0, |ids| ids.len())
+    }
+
     /// Revoke every live tunnel of one subscription in one env (grant
     /// withdrawn or expired). Returns what was removed so the caller can
     /// publish a `Delete` for each of them.
@@ -181,6 +187,10 @@ pub struct DeviceStore {
     by_id: HashMap<Uuid, DeviceRow>,
     by_uid: HashMap<(Uuid, Uuid), Uuid>,
     by_support: HashMap<String, Uuid>,
+    /// Device public key → device rows. The X25519 key is the identity of the
+    /// physical machine: the same phone on a second subscription gets a second
+    /// row with the same key, and its tunnels must count as one device.
+    by_key: HashMap<String, HashSet<Uuid>>,
 }
 
 impl DeviceStore {
@@ -196,6 +206,10 @@ impl DeviceStore {
         self.by_uid
             .insert((row.subscription_id, row.device_uid), row.id);
         self.by_support.insert(row.support_tag.clone(), row.id);
+        self.by_key
+            .entry(row.public_key.clone())
+            .or_default()
+            .insert(row.id);
         self.by_id.insert(row.id, row);
     }
 
@@ -209,6 +223,16 @@ impl DeviceStore {
         self.by_support
             .get(&tag.to_uppercase())
             .and_then(|id| self.by_id.get(id))
+    }
+
+    /// Device rows that carry this X25519 key, across every subscription. A
+    /// machine that bought a second subscription has one row per subscription
+    /// and one key, so its tunnels must be counted together.
+    pub fn ids_by_public_key(&self, key: &str) -> Vec<Uuid> {
+        self.by_key
+            .get(key)
+            .map(|ids| ids.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     pub fn get(&self, id: &Uuid) -> Option<&DeviceRow> {
@@ -228,6 +252,12 @@ impl DeviceStore {
         let row = self.by_id.remove(id)?;
         self.by_uid.remove(&(row.subscription_id, row.device_uid));
         self.by_support.remove(&row.support_tag);
+        if let Some(ids) = self.by_key.get_mut(&row.public_key) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.by_key.remove(&row.public_key);
+            }
+        }
         Some(row)
     }
 }
@@ -356,12 +386,28 @@ impl PeersState {
             .copied()
             .unwrap_or((None, None))
     }
+
+    /// Live tunnels of the physical device that carries `device_key`, counted
+    /// across every subscription and env.
+    ///
+    /// The key is `devices.public_key`: one installation keeps one X25519 pair,
+    /// so the same machine on a second subscription is the same device and must
+    /// not get a second allowance. Peers of the router's extra channels carry
+    /// their own keys but belong to the same device rows, so they are counted
+    /// too — otherwise the three-tunnel router case would never reach the cap.
+    pub fn peers_of_device_key(&self, device_key: &str) -> i64 {
+        self.devices
+            .ids_by_public_key(device_key)
+            .iter()
+            .map(|id| self.peers.count_of_device(id) as i64)
+            .sum()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peers::Limits;
+    use crate::peers::{Limits, Refusal};
     use chrono::Utc;
 
     fn peer(id: Uuid, env: Env, key: &str, addr: &str, sub: Uuid, dev: Uuid) -> PeerRow {
@@ -555,13 +601,197 @@ mod tests {
             Some(1),
             None,
         );
-        let (device_live, _) = state.peers.counts(&sub, &device);
-        assert!(limits.check_device(device_live as i64).is_err());
+        let mut dev_row = device_row(sub, "DEVKEY", "7K2M-9XQ4P");
+        dev_row.id = device;
+        state.devices.insert(dev_row);
+        assert!(limits
+            .check_device_peers(state.peers_of_device_key("DEVKEY"))
+            .is_err());
 
         // Revocation gives the address back to the allocator.
         state.peers.remove_live(row.id);
         assert!(state.peers.used_in(&Env::Ru).is_empty());
         assert_eq!(state.peers.counts(&sub, &device), (0, 0));
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 0);
+    }
+
+    fn device_row(sub: Uuid, key: &str, tag: &str) -> DeviceRow {
+        DeviceRow {
+            id: Uuid::new_v4(),
+            subscription_id: sub,
+            device_uid: Uuid::new_v4(),
+            device_name: Some("iPhone".into()),
+            public_key: key.to_string(),
+            platform: None,
+            support_tag: tag.to_string(),
+            created_at: Utc::now(),
+            rotated_at: None,
+        }
+    }
+
+    /// The cap is per physical device, not per subscription: a second
+    /// subscription of the same machine (same X25519 key, its own device row)
+    /// must not hand out another allowance. Counting per subscription would
+    /// miss exactly this case — each subscription holds only one of the three
+    /// tunnels.
+    #[test]
+    fn a_device_cap_counts_across_subscriptions_and_envs() {
+        let sub_a = Uuid::new_v4();
+        let sub_b = Uuid::new_v4();
+        let mut state = PeersState::default();
+        let dev_a = device_row(sub_a, "DEVKEY", "7K2M-9XQ4P");
+        let dev_b = device_row(sub_b, "DEVKEY", "8QZ3-AAAAA");
+        let id_a = dev_a.id;
+        let id_b = dev_b.id;
+        state.devices.insert(dev_a);
+        state.devices.insert(dev_b);
+
+        // Two tunnels on the first subscription, in two different envs.
+        state.peers.insert(peer(
+            Uuid::new_v4(),
+            Env::Ru,
+            "K1",
+            "10.88.0.2",
+            sub_a,
+            id_a,
+        ));
+        state.peers.insert(peer(
+            Uuid::new_v4(),
+            Env::Wl,
+            "K2",
+            "10.89.0.2",
+            sub_a,
+            id_a,
+        ));
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 2);
+
+        // The third tunnel lives on the second subscription: the cap of three
+        // is full even though neither subscription is near its own ceiling.
+        state.peers.insert(peer(
+            Uuid::new_v4(),
+            Env::Ru,
+            "K3",
+            "10.88.0.3",
+            sub_b,
+            id_b,
+        ));
+        let limits = Limits {
+            per_device: 3,
+            per_subscription: 45,
+            devices_per_subscription: 15,
+        };
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 3);
+        assert_eq!(
+            limits.check_device_peers(state.peers_of_device_key("DEVKEY")),
+            Err(Refusal::PeersLimit(3))
+        );
+
+        // Another device with its own key keeps its full allowance.
+        state
+            .devices
+            .insert(device_row(sub_a, "OTHERKEY", "9ZZZ-BBBBB"));
+        assert_eq!(state.peers_of_device_key("OTHERKEY"), 0);
+        assert!(limits.check_device_peers(0).is_ok());
+    }
+
+    /// A router keeps three tunnels up on one device: extra channels carry
+    /// their own peer keys but belong to the same device row, so they must be
+    /// counted or the failover case would never reach the cap.
+    #[test]
+    fn extra_channels_of_one_device_count_towards_its_cap() {
+        let sub = Uuid::new_v4();
+        let mut state = PeersState::default();
+        let device = device_row(sub, "DEVKEY", "7K2M-9XQ4P");
+        let device_id = device.id;
+        state.devices.insert(device);
+        state.peers.insert(peer(
+            Uuid::new_v4(),
+            Env::Ru,
+            "DEVKEY",
+            "10.88.0.2",
+            sub,
+            device_id,
+        ));
+        // Second and third channels of the same router, own keys and labels.
+        state.peers.insert(peer(
+            Uuid::new_v4(),
+            Env::Ru,
+            "CHANNEL2",
+            "10.88.0.3",
+            sub,
+            device_id,
+        ));
+        state.peers.insert(peer(
+            Uuid::new_v4(),
+            Env::Wl,
+            "CHANNEL3",
+            "10.89.0.2",
+            sub,
+            device_id,
+        ));
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 3);
+        assert_eq!(
+            Limits {
+                per_device: 3,
+                per_subscription: 45,
+                devices_per_subscription: 15,
+            }
+            .check_device_peers(state.peers_of_device_key("DEVKEY")),
+            Err(Refusal::PeersLimit(3))
+        );
+    }
+
+    /// Re-creating a tunnel for `(device, env)` reuses the live row: the count
+    /// does not move, so at the cap a repeat of the same request is still the
+    /// idempotent 200 the client relies on after a timeout.
+    #[test]
+    fn recreating_the_same_peer_does_not_add_to_the_device_count() {
+        let sub = Uuid::new_v4();
+        let mut state = PeersState::default();
+        let device = device_row(sub, "DEVKEY", "7K2M-9XQ4P");
+        let device_id = device.id;
+        state.devices.insert(device);
+        let row = peer(
+            Uuid::new_v4(),
+            Env::Ru,
+            "DEVKEY",
+            "10.88.0.2",
+            sub,
+            device_id,
+        );
+        state.peers.insert(row.clone());
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 1);
+
+        // The handler finds this row by (env, public_key) and answers 200
+        // without inserting; if it did insert the same row, the ids are equal
+        // and the index sets stay the same size.
+        let existing = state
+            .peers
+            .live_by_key(&Env::Ru, "DEVKEY")
+            .map(|p| p.id)
+            .expect("the live tunnel is found again");
+        assert_eq!(existing, row.id);
+        state.peers.insert(row);
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 1);
+    }
+
+    /// Revoked rows leave every index, so a tunnel the user deleted hands its
+    /// slot back instead of holding the cap forever.
+    #[test]
+    fn revoked_peers_are_not_counted_against_the_device() {
+        let sub = Uuid::new_v4();
+        let mut state = PeersState::default();
+        let device = device_row(sub, "DEVKEY", "7K2M-9XQ4P");
+        let device_id = device.id;
+        state.devices.insert(device);
+        let first = peer(Uuid::new_v4(), Env::Ru, "K1", "10.88.0.2", sub, device_id);
+        let second = peer(Uuid::new_v4(), Env::Wl, "K2", "10.89.0.2", sub, device_id);
+        state.peers.insert(first.clone());
+        state.peers.insert(second);
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 2);
+
+        state.peers.remove_live(first.id);
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 1);
+        assert!(state.peers.live_by_key(&Env::Ru, "K1").is_none());
     }
 }
-

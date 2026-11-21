@@ -198,6 +198,11 @@ where
         ));
     }
 
+    // Renewal is a date extension, so the grants move with it — and a shard
+    // the expiry task revoked comes back. Without this an App Store renewal
+    // extends the subscription but the user keeps `grant_expired`.
+    super::peers::renew_grant_access(memory, *sub_id, expires_at).await;
+
     if was_inactive {
         // IAP renewal extends the paid time, so the subscription is not in
         // traffic mode: revive all restorable connections.

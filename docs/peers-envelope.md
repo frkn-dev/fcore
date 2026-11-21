@@ -126,10 +126,11 @@ let post_locations_route = warp::post()
 1. HTTP-статус ответа = `Refusal::status()`: 400/402/403/404/409/503 (`api/peers/mod.rs:139-152`).
    Не заворачивать в 200 с полем `status` в теле — приложение читает реальный код ответа.
 2. `response.error` — стабильная строка из `Refusal::code()`: `quota_exhausted`,
-   `grant_expired`, `no_grant`, `proto_not_granted`, `env_not_served`, `device_limit`,
+   `grant_expired`, `no_grant`, `proto_not_granted`, `env_not_served`, `peers_limit`,
    `subscription_limit`, `key_taken`, `label_taken`, `no_free_address`, `device_not_found`,
    `peer_not_found`. Приложение различает 402 «кончился трафик» и 402 «истёк срок» только по
-   ней — по статусу они одинаковые.
+   ней — по статусу они одинаковые. `peers_limit` — лимит туннелей одного устройства (по
+   X25519-ключу, по всем подпискам), `devices_limit` — лимит числа устройств подписки.
 3. Ошибка конверта (`keyPayload missing`, битый AES) остаётся 400 — приложение трактует это
    как «апи не тот», а не как сетевую ошибку.
 4. `/v1/activate` при 503 обязан отдавать `error: "no_live_shard"` / `"plan_not_configured"`
