@@ -1141,6 +1141,9 @@ where
     }
 
     async fn get_state_from_db(&self) -> Result<()> {
+        // Do not replace the live cache with a snapshot taken before an
+        // installation connection was committed and published.
+        let _connection_write = self.sync.connection_write.lock().await;
         let db = self.sync.db.clone();
 
         let node_repo = db.node();

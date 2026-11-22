@@ -25,6 +25,8 @@ api_url = "https://api.frkn.org"
 admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"
+# Opt in to per-installation AWG and AWG Mobile credentials for self-hosted users.
+# installation_keys_enabled = false
 # mrkting = { endpoint = "https://api.frkn.org", token = "change-me" }
 # enabled_conns = { dev = ["Hysteria2", "VlessTcpReality"], wl = ["VlessXhttpCdn"], ru = ["Wireguard", "Hysteria2"] }
 # Mobile AmneziaWG (dedicated pool): add "AmneziaWgMobile" to the env list, e.g.

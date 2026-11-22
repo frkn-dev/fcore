@@ -16,8 +16,9 @@ use super::{
     filters::*,
     handlers::{
         admin::*, amnezia::*, catalog::*, cluster::*, connection::*, geo as geo_handlers,
-        healthcheck_handler, iap::*, key::*, metrics::*, node::*, peers as peers_handlers,
-        premium::*, premium_inventory::*, private::*, score::*, share::*, subscription::*,
+        healthcheck_handler, iap::*, installation::*, key::*, metrics::*, node::*,
+        peers as peers_handlers, premium::*, premium_inventory::*, private::*, score::*, share::*,
+        subscription::*,
     },
     param::*,
     rejection,
@@ -290,6 +291,24 @@ where
             .and(with_sync(self.sync.clone()))
             .and_then(delete_private_user_handler);
 
+        let installation_path = warp::path("private")
+            .and(warp::path("users"))
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path("devices"));
+        let private_list_installations_route = warp::get()
+            .and(installation_path)
+            .and(warp::path::end())
+            .and(warp::query::<PrivateNodesQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(list_private_user_installations);
+        let private_revoke_installation_route = warp::delete()
+            .and(installation_path)
+            .and(warp::path::param::<Uuid>())
+            .and(warp::path::end())
+            .and(warp::query::<PrivateNodesQuery>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(revoke_private_user_installation);
+
         let private_routes = private_mint_install_token_route
             .or(private_create_account_route)
             .or(private_register_node_route)
@@ -301,7 +320,9 @@ where
             .or(private_delete_node_route)
             .or(private_create_user_route)
             .or(private_list_users_route)
-            .or(private_delete_user_route);
+            .or(private_delete_user_route)
+            .or(private_list_installations_route)
+            .or(private_revoke_installation_route);
 
         let get_clusters_route = warp::get()
             .and(warp::path("clusters"))
@@ -1092,19 +1113,22 @@ where
                 let metered = params.metered_conns.clone();
                 move || metered.clone()
             }))
+            .and(with_param_bool(params.installation_keys_enabled))
             .and_then(
                 |req: GatewayServicesRequest,
                  ctx: Option<AesContext>,
                  sync: MemSync<N, C, S>,
                  labels: GatewayLabels,
                  traffic_mode_enabled: bool,
-                 metered_conns: Vec<String>| async move {
+                 metered_conns: Vec<String>,
+                 installation_keys_enabled: bool| async move {
                     let response = gateway_services_handler(
                         req,
                         sync,
                         labels,
                         traffic_mode_enabled,
                         metered_conns,
+                        installation_keys_enabled,
                     )
                     .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await
@@ -1528,6 +1552,14 @@ where
         let share_feed_rate_limiter =
             Arc::new(RateLimiter::new(30, std::time::Duration::from_secs(60)));
 
+        let installation_networks =
+            params
+                .installation_keys_enabled
+                .then(|| InstallationNetworks {
+                    wg: params.wireguard_network.clone(),
+                    awg: params.amnezia_wireguard_network.clone(),
+                    mobile: params.amnezia_wireguard_mobile_network.clone(),
+                });
         let post_amnezia_config_route = warp::post()
             .and(warp::path("v1"))
             .and(warp::path("config"))
@@ -1544,6 +1576,7 @@ where
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("x-forwarded-for"))
             .and(with_share_limiter.clone())
+            .and(warp::any().map(move || installation_networks.clone()))
             .and_then(
                 |req: GatewayConfigRequest,
                  ctx: Option<AesContext>,
@@ -1552,7 +1585,8 @@ where
                  metered_conns: Vec<String>,
                  remote: Option<std::net::SocketAddr>,
                  x_forwarded_for: Option<String>,
-                 rate_limiter: Arc<RateLimiter>| async move {
+                 rate_limiter: Arc<RateLimiter>,
+                 installation_networks: Option<InstallationNetworks>| async move {
                     let response = gateway_config_handler(
                         req,
                         sync,
@@ -1561,6 +1595,7 @@ where
                         remote,
                         x_forwarded_for,
                         rate_limiter,
+                        installation_networks,
                     )
                     .await?;
                     crypto::encrypt_gateway_reply(response, ctx).await

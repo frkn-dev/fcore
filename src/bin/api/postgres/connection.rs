@@ -10,6 +10,7 @@ use fcore::{
 };
 
 use super::pg::PgClientManager;
+use crate::sync::tasks::DELETE_REASON_DEVICE_KICK;
 
 /// Marks a connection created by the tariff ensure step (activation or
 /// renewal of a subscription): `connections.issued_via = 'plan'`. Distinct
@@ -17,6 +18,8 @@ use super::pg::PgClientManager;
 /// (`postgres::share::ISSUED_VIA_SHARE`). Plan-issued connections are the
 /// owner's own devices: unlike share children they are listed as usual.
 pub const ISSUED_VIA_PLAN: &str = "plan";
+/// A peer provisioned for one installation and hidden from the subscription catalog.
+pub const ISSUED_VIA_INSTALLATION: &str = "installation";
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ConnRow {
@@ -149,6 +152,11 @@ pub struct ConnWatermark {
     pub uplink: i64,
     pub downlink: i64,
     pub last_persist_at: DateTime<Utc>,
+}
+
+pub struct InstallationConnections {
+    pub revoked: bool,
+    pub connections: Vec<(uuid::Uuid, uuid::Uuid)>,
 }
 
 pub struct PgConn {
@@ -334,9 +342,21 @@ impl PgConn {
     }
 
     pub async fn insert(&self, conn: ConnRow) -> Result<()> {
+        if conn.issued_via.as_deref() == Some(ISSUED_VIA_INSTALLATION) {
+            return Err(Error::Custom(
+                "Installation connections require a device binding".into(),
+            ));
+        }
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
+        Self::insert_row(&*client, &conn).await
+    }
+
+    async fn insert_row(
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        conn: &ConnRow,
+    ) -> Result<()> {
         let query = "
         INSERT INTO connections (
             id,
@@ -403,6 +423,195 @@ impl PgConn {
                 Err(Error::Database(e))
             }
         }
+    }
+
+    pub async fn installation_connections(
+        &self,
+        subscription_id: &uuid::Uuid,
+        installation_id: &uuid::Uuid,
+    ) -> Result<Option<InstallationConnections>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT i.revoked_at IS NOT NULL AS revoked, c.base_conn_id, c.conn_id
+                 FROM device_installations i
+                 LEFT JOIN device_installation_connections c USING (sub_id, installation_uuid)
+                 WHERE i.sub_id = $1 AND i.installation_uuid = $2",
+                &[subscription_id, installation_id],
+            )
+            .await?;
+
+        Ok(rows.first().map(|first| InstallationConnections {
+            revoked: first.get("revoked"),
+            connections: rows
+                .iter()
+                .filter_map(|row| {
+                    let base_conn_id: Option<uuid::Uuid> = row.get("base_conn_id");
+                    let conn_id: Option<uuid::Uuid> = row.get("conn_id");
+                    base_conn_id.zip(conn_id)
+                })
+                .collect(),
+        }))
+    }
+
+    pub async fn list_installations(
+        &self,
+        subscription_id: &uuid::Uuid,
+    ) -> Result<Vec<(uuid::Uuid, bool)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT installation_uuid, revoked_at IS NOT NULL AS revoked
+                 FROM device_installations WHERE sub_id = $1 ORDER BY installation_uuid",
+                &[subscription_id],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("installation_uuid"), row.get("revoked")))
+            .collect())
+    }
+
+    pub async fn insert_installation_connection(
+        &self,
+        conn: ConnRow,
+        installation_id: uuid::Uuid,
+        base_conn_id: uuid::Uuid,
+    ) -> Result<()> {
+        let subscription_id = conn.subscription_id.ok_or_else(|| {
+            Error::Custom("Installation connection must have a subscription".into())
+        })?;
+        if conn.is_deleted
+            || conn.include_in_main
+            || conn.issued_via.as_deref() != Some(ISSUED_VIA_INSTALLATION)
+            || !matches!(conn.proto, Tag::AmneziaWg | Tag::AmneziaWgMobile)
+        {
+            return Err(Error::Custom("Invalid installation connection".into()));
+        }
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
+
+        // Take the subscription lock before the installation lock here and on revoke.
+        if tx
+            .query_opt(
+                "SELECT id FROM subscriptions
+                 WHERE id = $1 AND NOT is_deleted
+                   AND parent_id IS NOT NULL AND plan_kind = 'selfhosted'
+                   AND (expires_at IS NULL OR expires_at > now())
+                 FOR UPDATE",
+                &[&subscription_id],
+            )
+            .await?
+            .is_none()
+        {
+            return Err(Error::Custom(
+                "Installation subscription is not active".into(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO device_installations (sub_id, installation_uuid)
+             VALUES ($1, $2) ON CONFLICT (sub_id, installation_uuid) DO NOTHING",
+            &[&subscription_id, &installation_id],
+        )
+        .await?;
+        let revoked: bool = tx
+            .query_one(
+                "SELECT revoked_at IS NOT NULL AS revoked FROM device_installations
+                 WHERE sub_id = $1 AND installation_uuid = $2 FOR UPDATE",
+                &[&subscription_id, &installation_id],
+            )
+            .await?
+            .get("revoked");
+        if revoked {
+            return Err(Error::Custom("Installation was revoked".into()));
+        }
+
+        let base = tx
+            .query_opt(
+                "SELECT env FROM connections
+                 WHERE id = $1 AND subscription_id = $2 AND NOT is_deleted
+                   AND (expires_at IS NULL OR expires_at > now())
+                   AND proto = $3 AND node_id IS NOT DISTINCT FROM $4
+                   AND include_in_main
+                   AND issued_via IS DISTINCT FROM 'share'
+                   AND issued_via IS DISTINCT FROM 'shared_sub'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM device_installation_connections WHERE conn_id = $1
+                   )
+                 FOR UPDATE",
+                &[&base_conn_id, &subscription_id, &conn.proto, &conn.node_id],
+            )
+            .await?
+            .ok_or_else(|| Error::Custom("Installation base connection is not active".into()))?;
+        let base_env: String = base.get("env");
+        if base_env.parse::<fcore::Env>()? != conn.env.parse::<fcore::Env>()? {
+            return Err(Error::Custom(
+                "Installation connection environment mismatch".into(),
+            ));
+        }
+
+        Self::insert_row(&tx, &conn).await?;
+        tx.execute(
+            "INSERT INTO device_installation_connections
+             (sub_id, installation_uuid, base_conn_id, conn_id)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &subscription_id,
+                &installation_id,
+                &base_conn_id,
+                &conn.conn_id,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn revoke_installation(
+        &self,
+        subscription_id: &uuid::Uuid,
+        installation_id: &uuid::Uuid,
+    ) -> Result<Vec<uuid::Uuid>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
+        tx.query_one(
+            "SELECT id FROM subscriptions
+             WHERE id = $1 AND parent_id IS NOT NULL AND plan_kind = 'selfhosted'
+             FOR UPDATE",
+            &[subscription_id],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO device_installations (sub_id, installation_uuid, revoked_at)
+             VALUES ($1, $2, now())
+             ON CONFLICT (sub_id, installation_uuid) DO UPDATE
+             SET revoked_at = COALESCE(device_installations.revoked_at, EXCLUDED.revoked_at)",
+            &[subscription_id, installation_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE connections c SET is_deleted = true, deleted_reason = $3, modified_at = now()
+             FROM device_installation_connections d
+             WHERE d.sub_id = $1 AND d.installation_uuid = $2 AND c.id = d.conn_id
+               AND (NOT c.is_deleted OR c.deleted_reason IS DISTINCT FROM $3)",
+            &[subscription_id, installation_id, &DELETE_REASON_DEVICE_KICK],
+        )
+        .await?;
+        // Include previously deleted connections so retries can finish publishing revocations.
+        let rows = tx
+            .query(
+                "SELECT conn_id FROM device_installation_connections
+                 WHERE sub_id = $1 AND installation_uuid = $2",
+                &[subscription_id, installation_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|row| row.get("conn_id")).collect())
     }
 
     pub async fn all_watermarks(&self) -> Result<Vec<ConnWatermark>> {

@@ -310,6 +310,53 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    let _connection_write = memory.connection_write.lock().await;
+    create_connection(
+        env,
+        proto,
+        subscription_id,
+        days,
+        label,
+        node_id,
+        issued_via,
+        include_in_main,
+        memory,
+        wg_network,
+        awg_network,
+        awg_mobile_network,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn create_connection<N, C, S>(
+    env: &fcore::Env,
+    proto: fcore::Tag,
+    subscription_id: Option<uuid::Uuid>,
+    days: Option<u16>,
+    label: Option<String>,
+    node_id: Option<uuid::Uuid>,
+    issued_via: Option<String>,
+    include_in_main: bool,
+    memory: &MemSync<N, C, S>,
+    wg_network: &IpAddrMask,
+    awg_network: &IpAddrMask,
+    awg_mobile_network: &Option<IpAddrMask>,
+    installation: Option<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<(uuid::Uuid, Connection), String>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
     // Grants, when present, are the only entitlement: a subscription with
     // rights must not receive a connection the payer did not buy.
     if let Some(sub_id) = subscription_id {
@@ -452,6 +499,7 @@ where
         node_id,
         issued_via,
         include_in_main,
+        installation,
     )
     .await
     {
@@ -905,6 +953,7 @@ where
             || conn.get_subscription_id() != Some(req.subscription_id)
             || !named
             || mem.share_conns.contains(&conn_id)
+            || mem.installation_conns.contains(&conn_id)
         {
             return Ok(Box::new(http::not_found("Connection not found")));
         }
@@ -1233,7 +1282,10 @@ where
             }
 
             // Same scope/exclusion as the WG handler above.
-            if req.conn.is_some_and(|cid| cid != conn_id) || mem.share_conns.contains(&conn_id) {
+            if req.conn.is_some_and(|cid| cid != conn_id)
+                || mem.share_conns.contains(&conn_id)
+                || mem.installation_conns.contains(&conn_id)
+            {
                 continue;
             }
             if !main_feed_connection_visible(

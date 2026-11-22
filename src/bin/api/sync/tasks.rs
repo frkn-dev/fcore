@@ -89,6 +89,7 @@ where
         node_id: Option<uuid::Uuid>,
         issued_via: Option<String>,
         include_in_main: bool,
+        installation: Option<(uuid::Uuid, uuid::Uuid)>,
     ) -> SyncResult<Status>;
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status>;
     async fn delete_connection(
@@ -361,6 +362,7 @@ where
         node_id: Option<uuid::Uuid>,
         issued_via: Option<String>,
         include_in_main: bool,
+        installation: Option<(uuid::Uuid, uuid::Uuid)>,
     ) -> SyncResult<Status> {
         info!("Adding connection: {}", conn_id);
 
@@ -377,8 +379,16 @@ where
         conn_row.issued_via = issued_via;
         conn_row.include_in_main = include_in_main;
 
-        // Insert into database first
-        if let Err(e) = self.db.conn().insert(conn_row).await {
+        // Installations and their credentials must become visible atomically.
+        let database = self.db.conn();
+        let inserted = if let Some((installation_id, base_conn_id)) = installation {
+            database
+                .insert_installation_connection(conn_row, installation_id, base_conn_id)
+                .await
+        } else {
+            database.insert(conn_row).await
+        };
+        if let Err(e) = inserted {
             error!(
                 "Failed to insert connection {} into database: {}",
                 conn_id, e
@@ -394,6 +404,9 @@ where
             }
             if let Some(node_id) = node_id {
                 memory.conn_nodes.insert(*conn_id, node_id);
+            }
+            if installation.is_some() {
+                memory.installation_conns.insert(*conn_id);
             }
             if include_in_main {
                 memory.main_feed_excluded_conns.remove(conn_id);

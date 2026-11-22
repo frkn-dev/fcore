@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use super::{postgres::pg::PgContext, Cache};
 use fcore::{
@@ -19,6 +19,7 @@ where
     pub memory: Arc<RwLock<Cache<N, C, S>>>,
     pub db: PgContext,
     pub publisher: Publisher,
+    pub connection_write: Arc<Mutex<()>>,
 }
 
 impl<N, C, S> MemSync<N, C, S>
@@ -39,6 +40,7 @@ where
             memory,
             db,
             publisher,
+            connection_write: Arc::new(Mutex::new(())),
         }
     }
 }

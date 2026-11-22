@@ -374,6 +374,10 @@ pub struct ServiceConfig {
     pub admin_token: Option<String>,
     #[serde(default)]
     pub agw_private_key_path: Option<String>,
+    /// Issue distinct AWG and AWG Mobile credentials to each installation of
+    /// a self-hosted child subscription through the existing gateway.
+    #[serde(default)]
+    pub installation_keys_enabled: bool,
     #[serde(default)]
     pub mrkting: Option<MrktingConfig>,
     #[serde(default)]

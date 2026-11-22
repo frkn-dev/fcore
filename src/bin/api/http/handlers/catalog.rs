@@ -218,6 +218,7 @@ mod tests {
             subscriptions: Default::default(),
             conn_labels: HashMap::new(),
             share_conns: HashSet::new(),
+            installation_conns: HashSet::new(),
             conn_nodes: HashMap::new(),
             main_feed_nodes: HashSet::new(),
             main_feed_excluded_conns: HashSet::new(),

@@ -415,10 +415,11 @@ where
     let (env, proto) = {
         let mem = memory.memory.read().await;
 
-        let source = mem
-            .connections
-            .get(&req.connection_uuid)
-            .filter(|c| !c.get_deleted() && c.get_subscription_id() == Some(sub_id));
+        let source = mem.connections.get(&req.connection_uuid).filter(|c| {
+            !c.get_deleted()
+                && c.get_subscription_id() == Some(sub_id)
+                && !mem.installation_conns.contains(&req.connection_uuid)
+        });
         let Some(source) = source else {
             return Ok(http::not_found("connection_not_found").into_response());
         };
@@ -853,7 +854,7 @@ where
         + From<Connection>
         + PartialEq,
     Connection: From<C>,
-    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<fcore::Subscription>,
 {
     let ip = client_ip(remote, x_forwarded_for.as_deref());
     if !rate_limiter.check(ip) {
@@ -936,7 +937,9 @@ where
         node_id: Some(node_id),
     };
 
-    match build_gateway_config_response(&memory, &row.subscription_id, &params, false, &[]).await {
+    match build_gateway_config_response(&memory, &row.subscription_id, &params, false, &[], None)
+        .await
+    {
         Ok(mut resp) => {
             // The recipient has no /v1/services access — include the display
             // fields the app needs to render the imported server.
@@ -1061,7 +1064,7 @@ where
         let conn = mem
             .connections
             .get(&req.connection_id)
-            .filter(|c| !c.get_deleted());
+            .filter(|c| !c.get_deleted() && !mem.installation_conns.contains(&req.connection_id));
         let Some(conn) = conn else {
             return Ok(http::not_found("connection_not_found").into_response());
         };
@@ -1215,8 +1218,11 @@ where
                     .connections
                     .get_by_subscription_id(&req.subscription_id)
                     .map(|cs| {
-                        cs.iter()
-                            .any(|(_, c)| !c.get_deleted() && c.get_env() == env)
+                        cs.iter().any(|(conn_id, c)| {
+                            !c.get_deleted()
+                                && c.get_env() == env
+                                && !mem.installation_conns.contains(conn_id)
+                        })
                     })
                     .unwrap_or(false)
         };

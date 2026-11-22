@@ -218,6 +218,9 @@ where
         if issued_via.as_deref() == Some(ISSUED_VIA_SHARE) {
             self.share_conns.insert(conn_id);
         }
+        if issued_via.as_deref() == Some(super::connection::ISSUED_VIA_INSTALLATION) {
+            self.installation_conns.insert(conn_id);
+        }
         if !include_in_main {
             self.main_feed_excluded_conns.insert(conn_id);
         }

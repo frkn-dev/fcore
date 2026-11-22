@@ -91,6 +91,8 @@ where
     /// minted for share token recipients, not the owner's devices: every
     /// owner-facing listing filters them out.
     pub share_conns: std::collections::HashSet<uuid::Uuid>,
+    #[serde(default)]
+    pub installation_conns: std::collections::HashSet<uuid::Uuid>,
     /// Node pins of named-device connections, keyed by conn_id; the value
     /// is the node's uuid (nodes.uuid). Loaded from the PG-only
     /// `connections.node_id` column and maintained on create/delete/full
@@ -144,6 +146,7 @@ where
             subscriptions: Subscriptions::default(),
             conn_labels: std::collections::HashMap::new(),
             share_conns: std::collections::HashSet::new(),
+            installation_conns: std::collections::HashSet::new(),
             conn_nodes: std::collections::HashMap::new(),
             main_feed_nodes: std::collections::HashSet::new(),
             main_feed_excluded_conns: std::collections::HashSet::new(),
