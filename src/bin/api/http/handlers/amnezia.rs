@@ -1334,13 +1334,14 @@ fn build_vless_server_config(
 // Handlers
 // ============================================================================
 
-fn gateway_installation_revision(revision: Option<String>, enabled: bool) -> Option<String> {
-    revision.map(|rev| {
-        if enabled {
-            format!("{rev}-installation-v1")
-        } else {
-            rev
-        }
+fn gateway_installation_revision(
+    revision: Option<String>,
+    idle_generation: Option<i64>,
+) -> Option<String> {
+    revision.map(|rev| match idle_generation {
+        None => rev,
+        Some(0) => format!("{rev}-installation-v1"),
+        Some(generation) => format!("{rev}-installation-v1-{generation}"),
     })
 }
 
@@ -1499,14 +1500,25 @@ where
         conns_slice,
         !req.pool_off,
     ));
-    if installation_keys_enabled
-        && share_row.is_none()
-        && sub.as_ref().is_some_and(|sub| sub.is_selfhosted_user())
-    {
+    let installation_sub_id = sub_id.filter(|_| {
+        installation_keys_enabled
+            && share_row.is_none()
+            && sub.is_some_and(|sub| sub.is_selfhosted_user())
+    });
+    drop(mem);
+
+    if let Some(sub_id) = installation_sub_id {
+        let generation = match memory.db.conn().installation_idle_generation(&sub_id).await {
+            Ok(generation) => generation,
+            Err(err) => {
+                tracing::error!(%err, "Installation revision lookup failed");
+                return Ok(http::internal_error("installation lookup failed").into_response());
+            }
+        };
         for connection in &mut connections {
             if matches!(connection.service_protocol.as_str(), "awg" | "awg-mobile") {
                 connection.config_rev =
-                    gateway_installation_revision(connection.config_rev.take(), true);
+                    gateway_installation_revision(connection.config_rev.take(), Some(generation));
             }
         }
     }
@@ -1952,25 +1964,22 @@ where
         // Одиночная нода: порт один и он уже в конфиге — карта не нужна.
         (ips, None, gateway_node_weights(&node))
     };
-    let config_rev = gateway_installation_revision(
-        config_rev(
-            &node,
-            conn.get_proto().proto(),
-            node_ips.as_deref().unwrap_or(&[]),
-        ),
-        provision.is_some(),
+    let config_rev = config_rev(
+        &node,
+        conn.get_proto().proto(),
+        node_ips.as_deref().unwrap_or(&[]),
     );
 
     // From here on only owned clones are used; release the read lock so the
     // WireGuard branch can take a write lock for peer registration.
     drop(mem);
 
-    let conn = if let Some((raw_id, networks)) = provision {
+    let (conn, idle_generation) = if let Some((raw_id, networks)) = provision {
         let installation_id = uuid::Uuid::parse_str(raw_id)
             .ok()
             .filter(|id| id.get_version_num() == 4)
             .ok_or_else(|| http::bad_request("invalid installation_uuid").into_response())?;
-        installation_connection(
+        let (conn, generation) = installation_connection(
             memory,
             *sub_id,
             installation_id,
@@ -1979,10 +1988,12 @@ where
             node_pin,
             networks,
         )
-        .await?
+        .await?;
+        (conn, Some(generation))
     } else {
-        conn
+        (conn, None)
     };
+    let config_rev = gateway_installation_revision(config_rev, idle_generation);
 
     // Build the config for the protocol of the chosen connection, not of the
     // service card: an explicitly requested connection may be of either type.
@@ -2122,7 +2133,7 @@ async fn installation_connection<N, C, S>(
     base: Connection,
     node_pin: Option<uuid::Uuid>,
     networks: &InstallationNetworks,
-) -> Result<Connection, warp::reply::Response>
+) -> Result<(Connection, i64), warp::reply::Response>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -2150,17 +2161,26 @@ where
                 tracing::error!(%err, "Installation lookup failed");
                 http::internal_error("installation lookup failed").into_response()
             })?;
+        if existing.as_ref().is_some_and(|existing| existing.revoked) {
+            return Err(share::forbidden("installation revoked"));
+        }
+        let generation = memory
+            .db
+            .conn()
+            .installation_idle_generation(&subscription_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(%err, "Installation revision lookup failed");
+                http::internal_error("installation lookup failed").into_response()
+            })?;
         if let Some(existing) = existing {
-            if existing.revoked {
-                return Err(share::forbidden("installation revoked"));
-            }
             if let Some((_, conn_id)) = existing.connections.iter().find(|(id, _)| *id == base_id) {
                 let mem = memory.memory.read().await;
                 return mem
                     .connections
                     .get(conn_id)
                     .filter(|conn| !conn.get_deleted())
-                    .map(|conn| conn.clone().into())
+                    .map(|conn| (conn.clone().into(), generation))
                     .ok_or_else(|| {
                         http::not_found("installation connection unavailable").into_response()
                     });
@@ -2183,7 +2203,7 @@ where
             Some((installation_id, base_id)),
         )
         .await
-        .map(|(_, conn)| conn)
+        .map(|(_, conn)| (conn, generation))
         .map_err(|err| {
             tracing::error!(%err, "Installation provisioning failed");
             http::internal_error("installation provisioning failed").into_response()

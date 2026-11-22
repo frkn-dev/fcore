@@ -406,6 +406,8 @@ CREATE TABLE IF NOT EXISTS device_installations (
     sub_id uuid NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
     installation_uuid uuid NOT NULL,
     revoked_at timestamptz,
+    issued_at timestamptz NOT NULL DEFAULT now(),
+    idle_generation bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (sub_id, installation_uuid)
 );
 
@@ -422,3 +424,12 @@ CREATE TABLE IF NOT EXISTS device_installation_connections (
 
 CREATE INDEX IF NOT EXISTS device_installation_connections_base
     ON device_installation_connections (base_conn_id);
+
+CREATE TABLE IF NOT EXISTS installation_observations (
+    conn_id uuid NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    node_id uuid NOT NULL,
+    sampled_at timestamptz NOT NULL,
+    observed_since timestamptz NOT NULL,
+    last_online_at timestamptz,
+    PRIMARY KEY (conn_id, node_id)
+);

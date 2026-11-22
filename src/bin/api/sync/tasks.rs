@@ -23,6 +23,7 @@ pub const DELETE_REASON_EXPIRED: &str = "expired";
 pub const DELETE_REASON_MANUAL: &str = "manual";
 pub const DELETE_REASON_TRAFFIC_EXHAUSTED: &str = "traffic_exhausted";
 pub const DELETE_REASON_DEVICE_KICK: &str = "device_kick";
+pub const DELETE_REASON_DEVICE_IDLE: &str = "device_idle";
 /// The subscription lost the right this connection was issued for (a grant was
 /// revoked, or a migration moved it to another shard). Never restorable: if the
 /// right comes back, `ensure` issues a fresh credential instead of reviving a
@@ -1051,6 +1052,11 @@ mod tests {
             Some(DELETE_REASON_DEVICE_KICK),
             0,
             Some(100)
+        ));
+        assert!(!connection_restorable(
+            Some(DELETE_REASON_DEVICE_IDLE),
+            0,
+            None
         ));
         assert!(!connection_restorable(Some("something_else"), 0, None));
     }

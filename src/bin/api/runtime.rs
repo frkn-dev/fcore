@@ -297,15 +297,43 @@ where
             }
         });
 
+        let idle_timeout = self.settings.tasks.installation_idle_timeout_sec;
+        let metrics_max_age = self
+            .settings
+            .tasks
+            .installation_metrics_max_age_sec
+            .min(crate::config::INSTALLATION_OBSERVATION_MAX_GAP_SEC);
+        let idle_expiry_enabled = self.settings.service.installation_keys_enabled
+            && idle_timeout > 0
+            && metrics_max_age > 0;
+        if idle_expiry_enabled {
+            spawn_task("expire_installation_keys", {
+                let service = Arc::clone(&self);
+                let interval = self
+                    .settings
+                    .tasks
+                    .installation_idle_check_interval_sec
+                    .max(1);
+                async move {
+                    service
+                        .expire_installation_keys(interval, idle_timeout, metrics_max_age)
+                        .await;
+                }
+            });
+        }
+
         spawn_task("metric_worker", {
             let metrics = Arc::clone(&self.metrics);
             let receiver = self.settings.metrics.reciever.clone();
             let usage = self.sync.db.usage();
+            let installation_observer = idle_expiry_enabled
+                .then(|| (self.sync.db.conn(), metrics_max_age.saturating_mul(1_000)));
 
             async move {
                 match Subscriber::new_bound(&receiver, vec![Topic::Metrics, Topic::Entries]) {
                     Ok(subscriber) => {
-                        MetricWorker::start(metrics, subscriber, usage).await;
+                        MetricWorker::start(metrics, subscriber, usage, installation_observer)
+                            .await;
                     }
                     Err(err) => {
                         error!("Failed to start MetricWorker: {}", err);
