@@ -730,8 +730,27 @@ impl PgConn {
             &[sub_id, installation_id],
         )
         .await?;
+        // A missing counter row must abort expiry along with the catalog update.
+        tx.query_one(
+            "UPDATE installation_idle_catalog SET revision = revision + 1
+             WHERE singleton RETURNING revision",
+            &[],
+        )
+        .await?;
         tx.commit().await?;
         Ok(rows.into_iter().map(|row| row.get("id")).collect())
+    }
+
+    pub async fn installation_idle_catalog_revision(&self) -> Result<i64> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        Ok(client
+            .query_one(
+                "SELECT revision FROM installation_idle_catalog WHERE singleton",
+                &[],
+            )
+            .await?
+            .get("revision"))
     }
 
     pub async fn installation_idle_generation(&self, sub_id: &Uuid) -> Result<i64> {

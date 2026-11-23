@@ -359,6 +359,7 @@ where
             .and(warp::path("version"))
             .and(warp::path::end())
             .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(params.installation_keys_enabled))
             .and_then(get_catalog_version_handler);
 
         let get_subscription_info_route = warp::get()
