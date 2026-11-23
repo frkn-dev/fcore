@@ -6,6 +6,7 @@ pub mod cluster;
 pub mod connection;
 pub(crate) mod geo;
 pub mod iap;
+pub mod installation;
 pub mod key;
 pub mod metrics;
 pub mod node;

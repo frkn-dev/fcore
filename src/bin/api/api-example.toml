@@ -25,6 +25,8 @@ api_url = "https://api.frkn.org"
 admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"
+# Opt in to per-installation AWG and AWG Mobile credentials for self-hosted users.
+# installation_keys_enabled = false
 # mrkting = { endpoint = "https://api.frkn.org", token = "change-me" }
 # enabled_conns = { dev = ["Hysteria2", "VlessTcpReality"], wl = ["VlessXhttpCdn"], ru = ["Wireguard", "Hysteria2"] }
 # Mobile AmneziaWG (dedicated pool): add "AmneziaWgMobile" to the env list, e.g.
@@ -165,6 +167,11 @@ traffic_persist_interval_sec = 3600
 # Peers: how often installations with no live tunnel get reaped (default 3600).
 # The threshold itself is `[service.peers] stale_device_days`.
 # stale_device_interval_sec = 3600
+# Individual AWG/Mobile installation keys expire after 90 days of observed
+# inactivity. Set the timeout to 0 to disable expiry.
+# installation_idle_timeout_sec = 7776000
+# installation_idle_check_interval_sec = 86400
+# installation_metrics_max_age_sec = 180
 connection_expire_interval = 600
 monitor_nodes_interval = 60
 heartbeat_node_offline_threshold_sec = 120

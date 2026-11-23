@@ -10,10 +10,11 @@ use super::super::super::service::Cache;
 use super::super::super::sync::MemSync;
 use super::super::request::normalized_pool;
 
-/// Cheap change detector for the server catalog. The hash moves when an
-/// online node's server config revision changes, or when a node joins or
-/// leaves the online set. Labels, countries and subscription rows do not.
-pub fn catalog_version<N, C, S>(mem: &Cache<N, C, S>) -> (String, usize)
+/// Change detector for the online server catalog and idle key rotations.
+pub fn catalog_version<N, C, S>(
+    mem: &Cache<N, C, S>,
+    installation_idle_revision: Option<i64>,
+) -> (String, usize)
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -28,6 +29,10 @@ where
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
     let mut hasher = Sha256::new();
+    if let Some(revision) = installation_idle_revision {
+        hasher.update(b"installation-idle-v1\x00");
+        hasher.update(revision.to_be_bytes());
+    }
 
     let mut nodes: Vec<_> = mem.nodes.iter_nodes().collect();
     nodes.sort_by_key(|(id, _)| *id);
@@ -132,6 +137,7 @@ where
 
 pub async fn get_catalog_version_handler<N, C, S>(
     memory: MemSync<N, C, S>,
+    installation_keys_enabled: bool,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -146,8 +152,28 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
+    let idle_revision = if installation_keys_enabled {
+        match memory.db.conn().installation_idle_catalog_revision().await {
+            Ok(revision) => Some(revision),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to read installation catalog revision");
+                let status = StatusCode::SERVICE_UNAVAILABLE;
+                let response = ResponseMessage::<Option<()>> {
+                    status: status.as_u16(),
+                    message: "Catalog version unavailable".to_string(),
+                    response: None,
+                };
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&response),
+                    status,
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let mem = memory.memory.read().await;
-    let (version, nodes) = catalog_version(&mem);
+    let (version, nodes) = catalog_version(&mem, idle_revision);
 
     let response = ResponseMessage {
         status: StatusCode::OK.as_u16(),
@@ -218,11 +244,24 @@ mod tests {
             subscriptions: Default::default(),
             conn_labels: HashMap::new(),
             share_conns: HashSet::new(),
+            installation_conns: HashSet::new(),
             conn_nodes: HashMap::new(),
             main_feed_nodes: HashSet::new(),
             main_feed_excluded_conns: HashSet::new(),
             peers_state: Default::default(),
         }
+    }
+
+    #[test]
+    fn catalog_version_changes_on_idle_expiry_with_same_topology() {
+        let cache = test_cache();
+        let (legacy, _) = catalog_version(&cache, None);
+        let (before, nodes_before) = catalog_version(&cache, Some(0));
+        let (after, nodes_after) = catalog_version(&cache, Some(1));
+        assert_ne!(legacy, before);
+        assert_ne!(before, after);
+        assert_eq!(nodes_before, nodes_after);
+        assert_eq!((after, nodes_after), catalog_version(&cache, Some(1)));
     }
 
     #[test]
@@ -235,31 +274,31 @@ mod tests {
         let node_id = node.uuid;
         cache.nodes.entry(Env::Ru).or_default().push(node);
 
-        let (v1, n1) = catalog_version(&cache);
+        let (v1, n1) = catalog_version(&cache, None);
         assert_eq!(n1, 1);
 
         // same state, same hash
-        let (v1_again, _) = catalog_version(&cache);
+        let (v1_again, _) = catalog_version(&cache, None);
         assert_eq!(v1, v1_again);
 
         cache.nodes.get_mut(&Env::Ru).unwrap()[0].label = "Renamed".into();
-        let (v_label, _) = catalog_version(&cache);
+        let (v_label, _) = catalog_version(&cache, None);
         assert_eq!(v1, v_label);
 
         cache.nodes.get_mut(&Env::Ru).unwrap()[0].address = "203.0.113.9".parse().unwrap();
-        let (v_ip, _) = catalog_version(&cache);
+        let (v_ip, _) = catalog_version(&cache, None);
         assert_ne!(v1, v_ip);
         cache.nodes.get_mut(&Env::Ru).unwrap()[0].address = "192.168.1.100".parse().unwrap();
 
         cache.nodes.get_mut(&Env::Ru).unwrap()[0].status = NodeStatus::Offline;
-        let (v2, _) = catalog_version(&cache);
+        let (v2, _) = catalog_version(&cache, None);
         assert_ne!(v1, v2);
 
         cache.nodes.get_mut(&Env::Ru).unwrap()[0].status = NodeStatus::Online;
-        let (v3, _) = catalog_version(&cache);
+        let (v3, _) = catalog_version(&cache, None);
         assert_eq!(v1, v3);
         cache.main_feed_nodes.insert(node_id);
-        let (v4, _) = catalog_version(&cache);
+        let (v4, _) = catalog_version(&cache, None);
         assert_eq!(v1, v4);
     }
 
@@ -282,25 +321,25 @@ mod tests {
         cache.nodes.entry(Env::Ru).or_default().push(a);
         cache.nodes.entry(Env::Ru).or_default().push(b);
 
-        let (pooled, _) = catalog_version(&cache);
+        let (pooled, _) = catalog_version(&cache, None);
 
         // Same online set, same addresses, same per-node configs — only the pool
         // membership changed. Without it the client keeps the stale single-address
         // row and has nothing to fail over to, so the version must move.
         cache.nodes.get_mut(&Env::Ru).unwrap()[1].pool = None;
-        let (single, _) = catalog_version(&cache);
+        let (single, _) = catalog_version(&cache, None);
         assert_ne!(
             pooled, single,
             "pool membership must move the catalog version"
         );
 
         cache.nodes.get_mut(&Env::Ru).unwrap()[1].pool = Some("RU Рилзопровод".to_string());
-        let (pooled_again, _) = catalog_version(&cache);
+        let (pooled_again, _) = catalog_version(&cache, None);
         assert_eq!(pooled, pooled_again);
 
         // A renamed pool produces different feed rows as well.
         cache.nodes.get_mut(&Env::Ru).unwrap()[1].pool = Some("RU-2".to_string());
-        let (renamed, _) = catalog_version(&cache);
+        let (renamed, _) = catalog_version(&cache, None);
         assert_ne!(pooled, renamed);
     }
 }

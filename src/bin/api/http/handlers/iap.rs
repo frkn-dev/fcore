@@ -453,7 +453,7 @@ where
 
     // Freshly renewed: the subscription has paid time, so serving access is
     // Full regardless of the traffic-mode flag — no need to plumb it here.
-    match build_gateway_config_response(&memory, &sub_id, &params, false, &[]).await {
+    match build_gateway_config_response(&memory, &sub_id, &params, false, &[], None).await {
         Ok(response) => Ok(warp::reply::json(&response).into_response()),
         Err(resp) => Ok(resp),
     }

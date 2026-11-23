@@ -2,14 +2,17 @@ use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use fcore::{
     Connection, ConnectionBaseOperations, Error, IpAddrMask, Proto, Result, Tag, WgKeys, WgParam,
 };
 
 use super::pg::PgClientManager;
+use crate::sync::tasks::{DELETE_REASON_DEVICE_IDLE, DELETE_REASON_DEVICE_KICK};
 
 /// Marks a connection created by the tariff ensure step (activation or
 /// renewal of a subscription): `connections.issued_via = 'plan'`. Distinct
@@ -17,6 +20,8 @@ use super::pg::PgClientManager;
 /// (`postgres::share::ISSUED_VIA_SHARE`). Plan-issued connections are the
 /// owner's own devices: unlike share children they are listed as usual.
 pub const ISSUED_VIA_PLAN: &str = "plan";
+/// A peer provisioned for one installation and hidden from the subscription catalog.
+pub const ISSUED_VIA_INSTALLATION: &str = "installation";
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ConnRow {
@@ -149,6 +154,18 @@ pub struct ConnWatermark {
     pub uplink: i64,
     pub downlink: i64,
     pub last_persist_at: DateTime<Utc>,
+}
+
+pub struct InstallationConnections {
+    pub revoked: bool,
+    pub connections: Vec<(uuid::Uuid, uuid::Uuid)>,
+}
+
+pub struct InstallationSample {
+    pub conn_id: Uuid,
+    pub node_id: Uuid,
+    pub sampled_at: DateTime<Utc>,
+    pub online: bool,
 }
 
 pub struct PgConn {
@@ -334,9 +351,21 @@ impl PgConn {
     }
 
     pub async fn insert(&self, conn: ConnRow) -> Result<()> {
+        if conn.issued_via.as_deref() == Some(ISSUED_VIA_INSTALLATION) {
+            return Err(Error::Custom(
+                "Installation connections require a device binding".into(),
+            ));
+        }
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
+        Self::insert_row(&*client, &conn).await
+    }
+
+    async fn insert_row(
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        conn: &ConnRow,
+    ) -> Result<()> {
         let query = "
         INSERT INTO connections (
             id,
@@ -403,6 +432,486 @@ impl PgConn {
                 Err(Error::Database(e))
             }
         }
+    }
+
+    pub async fn installation_connections(
+        &self,
+        subscription_id: &uuid::Uuid,
+        installation_id: &uuid::Uuid,
+    ) -> Result<Option<InstallationConnections>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT i.revoked_at IS NOT NULL AS revoked, c.base_conn_id, c.conn_id
+                 FROM device_installations i
+                 LEFT JOIN device_installation_connections c USING (sub_id, installation_uuid)
+                 WHERE i.sub_id = $1 AND i.installation_uuid = $2",
+                &[subscription_id, installation_id],
+            )
+            .await?;
+
+        Ok(rows.first().map(|first| InstallationConnections {
+            revoked: first.get("revoked"),
+            connections: rows
+                .iter()
+                .filter_map(|row| {
+                    let base_conn_id: Option<uuid::Uuid> = row.get("base_conn_id");
+                    let conn_id: Option<uuid::Uuid> = row.get("conn_id");
+                    base_conn_id.zip(conn_id)
+                })
+                .collect(),
+        }))
+    }
+
+    pub async fn list_installations(
+        &self,
+        subscription_id: &uuid::Uuid,
+    ) -> Result<Vec<(uuid::Uuid, bool)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT installation_uuid, revoked_at IS NOT NULL AS revoked
+                 FROM device_installations WHERE sub_id = $1 ORDER BY installation_uuid",
+                &[subscription_id],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("installation_uuid"), row.get("revoked")))
+            .collect())
+    }
+
+    pub async fn record_installation_samples(
+        &self,
+        samples: &[InstallationSample],
+        max_gap_ms: i64,
+    ) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        if max_gap_ms <= 0 {
+            return Err(Error::Custom("Invalid installation sample gap".into()));
+        }
+        let conn_ids: Vec<_> = samples.iter().map(|sample| sample.conn_id).collect();
+        let node_ids: Vec<_> = samples.iter().map(|sample| sample.node_id).collect();
+        let sampled_at: Vec<_> = samples.iter().map(|sample| sample.sampled_at).collect();
+        let online: Vec<_> = samples.iter().map(|sample| sample.online).collect();
+
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
+        // Serialize samples with other batches, issuance, expiry and manual
+        // revocation before inspecting or advancing observation windows.
+        tx.query(
+            "SELECT i.sub_id, i.installation_uuid FROM device_installations i
+             WHERE i.revoked_at IS NULL AND EXISTS (
+                 SELECT 1 FROM device_installation_connections d
+                 JOIN connections c ON c.id = d.conn_id
+                 WHERE d.sub_id = i.sub_id AND d.installation_uuid = i.installation_uuid
+                   AND c.id = ANY($1) AND NOT c.is_deleted
+             )
+             ORDER BY i.sub_id, i.installation_uuid FOR NO KEY UPDATE OF i",
+            &[&conn_ids],
+        )
+        .await?;
+        tx.execute(
+            "WITH input AS (
+                 SELECT conn_id, node_id, sampled_at, bool_or(online) AS online
+                 FROM unnest($1::uuid[], $2::uuid[], $3::timestamptz[], $4::bool[])
+                     AS sample(conn_id, node_id, sampled_at, online)
+                 GROUP BY conn_id, node_id, sampled_at
+             ), eligible AS (
+                 SELECT i.*, o.sampled_at AS stored_sampled_at, o.observed_since
+                 FROM input i
+                 JOIN device_installation_connections d USING (conn_id)
+                 JOIN device_installations inst USING (sub_id, installation_uuid)
+                 JOIN connections c ON c.id = i.conn_id
+                 LEFT JOIN installation_observations o ON o.conn_id = i.conn_id AND o.node_id = i.node_id
+                 WHERE inst.revoked_at IS NULL AND NOT c.is_deleted
+                   AND (c.expires_at IS NULL OR c.expires_at > now())
+             ), later_samples AS (
+                 SELECT *, lag(sampled_at, 1, stored_sampled_at) OVER (
+                     PARTITION BY conn_id, node_id ORDER BY sampled_at
+                 ) AS previous_sampled_at
+                 FROM eligible
+                 WHERE stored_sampled_at IS NULL OR sampled_at > stored_sampled_at
+             ), coverage AS (
+                 SELECT conn_id, node_id, MAX(sampled_at) AS sampled_at,
+                     COALESCE(MAX(sampled_at) FILTER (
+                         WHERE previous_sampled_at IS NULL
+                            OR sampled_at - previous_sampled_at > $5::bigint * interval '1 millisecond'
+                     ), MIN(observed_since)) AS observed_since
+                 FROM later_samples
+                 GROUP BY conn_id, node_id
+             ), positives AS (
+                 SELECT conn_id, node_id, MAX(sampled_at) AS last_online_at
+                 FROM eligible WHERE online GROUP BY conn_id, node_id
+             )
+             INSERT INTO installation_observations (conn_id, node_id, sampled_at, observed_since, last_online_at)
+             SELECT conn_id, node_id, COALESCE(c.sampled_at, o.sampled_at),
+                 COALESCE(c.observed_since, o.observed_since), p.last_online_at
+             FROM coverage c FULL JOIN positives p USING (conn_id, node_id)
+             LEFT JOIN installation_observations o USING (conn_id, node_id)
+             ON CONFLICT (conn_id, node_id) DO UPDATE SET
+                 sampled_at = GREATEST(installation_observations.sampled_at, EXCLUDED.sampled_at),
+                 observed_since = CASE WHEN EXCLUDED.sampled_at > installation_observations.sampled_at
+                     THEN EXCLUDED.observed_since ELSE installation_observations.observed_since END,
+                 last_online_at = GREATEST(installation_observations.last_online_at, EXCLUDED.last_online_at)
+             WHERE EXCLUDED.sampled_at > installation_observations.sampled_at
+                OR GREATEST(installation_observations.last_online_at, EXCLUDED.last_online_at)
+                    IS DISTINCT FROM installation_observations.last_online_at",
+            &[&conn_ids, &node_ids, &sampled_at, &online, &max_gap_ms],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_idle_installation_candidates(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<Vec<(Uuid, Uuid)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        Ok(client
+            .query(
+                "SELECT i.sub_id, i.installation_uuid FROM device_installations i
+                 JOIN subscriptions s ON s.id = i.sub_id
+                 WHERE i.revoked_at IS NULL AND i.issued_at <= $1
+                   AND NOT s.is_deleted AND s.parent_id IS NOT NULL AND s.plan_kind = 'selfhosted'
+                   AND (s.expires_at IS NULL OR s.expires_at > now())
+                   AND EXISTS (
+                       SELECT 1 FROM device_installation_connections d
+                       JOIN connections c ON c.id = d.conn_id
+                       WHERE d.sub_id = i.sub_id AND d.installation_uuid = i.installation_uuid
+                         AND NOT c.is_deleted
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM device_installation_connections d
+                       JOIN installation_observations o USING (conn_id)
+                       WHERE d.sub_id = i.sub_id AND d.installation_uuid = i.installation_uuid
+                         AND o.last_online_at >= $1
+                   )",
+                &[&cutoff],
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.get("sub_id"), row.get("installation_uuid")))
+            .collect())
+    }
+
+    pub async fn expire_idle_installation(
+        &self,
+        sub_id: &Uuid,
+        installation_id: &Uuid,
+        expected: &[(Uuid, Uuid)],
+        now: DateTime<Utc>,
+        timeout_secs: i64,
+        freshness_secs: i64,
+    ) -> Result<Vec<Uuid>> {
+        if expected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let window_start = |seconds| {
+            chrono::Duration::try_seconds(seconds)
+                .filter(|duration| *duration > chrono::Duration::zero())
+                .and_then(|duration| now.checked_sub_signed(duration))
+                .ok_or_else(|| Error::Custom("Invalid installation idle window".into()))
+        };
+        let cutoff = window_start(timeout_secs)?;
+        let fresh_after = window_start(freshness_secs)?.max(cutoff);
+
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
+        // Match the issuance and manual revoke lock order.
+        if tx
+            .query_opt(
+                "SELECT id FROM subscriptions
+                 WHERE id = $1 AND NOT is_deleted
+                   AND parent_id IS NOT NULL AND plan_kind = 'selfhosted'
+                   AND (expires_at IS NULL OR expires_at > $2)
+                 FOR UPDATE",
+                &[sub_id, &now],
+            )
+            .await?
+            .is_none()
+            || tx
+                .query_opt(
+                    "SELECT installation_uuid FROM device_installations
+                     WHERE sub_id = $1 AND installation_uuid = $2
+                       AND revoked_at IS NULL AND issued_at <= $3
+                     FOR UPDATE",
+                    &[sub_id, installation_id, &cutoff],
+                )
+                .await?
+                .is_none()
+        {
+            return Ok(Vec::new());
+        }
+
+        let rows = tx
+            .query(
+                "SELECT c.id, c.node_id, c.is_deleted FROM device_installation_connections d
+                 JOIN connections c ON c.id = d.conn_id
+                 WHERE d.sub_id = $1 AND d.installation_uuid = $2
+                 ORDER BY c.id FOR NO KEY UPDATE OF c",
+                &[sub_id, installation_id],
+            )
+            .await?;
+        let active: HashMap<Uuid, Option<Uuid>> = rows
+            .iter()
+            .filter(|row| !row.get::<_, bool>("is_deleted"))
+            .map(|row| (row.get("id"), row.get("node_id")))
+            .collect();
+        // The worker resolves the full set of serving nodes. Confirm the
+        // database still has exactly the connections it considered.
+        let mut observed = HashSet::new();
+        for (conn_id, node_id) in expected {
+            if !active
+                .get(conn_id)
+                .is_some_and(|pin| pin.is_none_or(|pin| pin == *node_id))
+            {
+                return Ok(Vec::new());
+            }
+            observed.insert(*conn_id);
+        }
+        if observed.len() != active.len() {
+            return Ok(Vec::new());
+        }
+
+        let (conn_ids, node_ids): (Vec<_>, Vec<_>) = expected.iter().copied().unzip();
+        let can_expire: bool = tx
+            .query_one(
+                "SELECT NOT EXISTS (
+                     SELECT 1 FROM unnest($3::uuid[], $4::uuid[]) AS expected(conn_id, node_id)
+                     LEFT JOIN installation_observations o USING (conn_id, node_id)
+                     WHERE o.conn_id IS NULL OR o.observed_since > $5
+                       OR o.sampled_at < $6 OR o.sampled_at > $7
+                 ) AND NOT EXISTS (
+                     SELECT 1 FROM device_installation_connections d
+                     JOIN installation_observations o USING (conn_id)
+                     WHERE d.sub_id = $1 AND d.installation_uuid = $2 AND o.last_online_at >= $5
+                 ) AS can_expire",
+                &[
+                    sub_id,
+                    installation_id,
+                    &conn_ids,
+                    &node_ids,
+                    &cutoff,
+                    &fresh_after,
+                    &now,
+                ],
+            )
+            .await?
+            .get("can_expire");
+        if !can_expire {
+            return Ok(Vec::new());
+        }
+
+        tx.execute(
+            "UPDATE connections c SET is_deleted = true, deleted_reason = $3, modified_at = $4
+             FROM device_installation_connections d
+             WHERE d.sub_id = $1 AND d.installation_uuid = $2 AND c.id = d.conn_id",
+            &[sub_id, installation_id, &DELETE_REASON_DEVICE_IDLE, &now],
+        )
+        .await?;
+        tx.execute(
+            "DELETE FROM device_installation_connections WHERE sub_id = $1 AND installation_uuid = $2",
+            &[sub_id, installation_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE device_installations SET idle_generation = idle_generation + 1
+             WHERE sub_id = $1 AND installation_uuid = $2",
+            &[sub_id, installation_id],
+        )
+        .await?;
+        // A missing counter row must abort expiry along with the catalog update.
+        tx.query_one(
+            "UPDATE installation_idle_catalog SET revision = revision + 1
+             WHERE singleton RETURNING revision",
+            &[],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|row| row.get("id")).collect())
+    }
+
+    pub async fn installation_idle_catalog_revision(&self) -> Result<i64> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        Ok(client
+            .query_one(
+                "SELECT revision FROM installation_idle_catalog WHERE singleton",
+                &[],
+            )
+            .await?
+            .get("revision"))
+    }
+
+    pub async fn installation_idle_generation(&self, sub_id: &Uuid) -> Result<i64> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        Ok(client
+            .query_one(
+                "SELECT COALESCE(SUM(idle_generation), 0)::bigint AS generation
+                 FROM device_installations WHERE sub_id = $1",
+                &[sub_id],
+            )
+            .await?
+            .get("generation"))
+    }
+
+    pub async fn insert_installation_connection(
+        &self,
+        conn: ConnRow,
+        installation_id: uuid::Uuid,
+        base_conn_id: uuid::Uuid,
+    ) -> Result<()> {
+        let subscription_id = conn.subscription_id.ok_or_else(|| {
+            Error::Custom("Installation connection must have a subscription".into())
+        })?;
+        if conn.is_deleted
+            || conn.include_in_main
+            || conn.issued_via.as_deref() != Some(ISSUED_VIA_INSTALLATION)
+            || !matches!(conn.proto, Tag::AmneziaWg | Tag::AmneziaWgMobile)
+        {
+            return Err(Error::Custom("Invalid installation connection".into()));
+        }
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
+
+        // Take the subscription lock before the installation lock here and on revoke.
+        if tx
+            .query_opt(
+                "SELECT id FROM subscriptions
+                 WHERE id = $1 AND NOT is_deleted
+                   AND parent_id IS NOT NULL AND plan_kind = 'selfhosted'
+                   AND (expires_at IS NULL OR expires_at > now())
+                 FOR UPDATE",
+                &[&subscription_id],
+            )
+            .await?
+            .is_none()
+        {
+            return Err(Error::Custom(
+                "Installation subscription is not active".into(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO device_installations (sub_id, installation_uuid)
+             VALUES ($1, $2) ON CONFLICT (sub_id, installation_uuid) DO NOTHING",
+            &[&subscription_id, &installation_id],
+        )
+        .await?;
+        let revoked: bool = tx
+            .query_one(
+                "SELECT revoked_at IS NOT NULL AS revoked FROM device_installations
+                 WHERE sub_id = $1 AND installation_uuid = $2 FOR UPDATE",
+                &[&subscription_id, &installation_id],
+            )
+            .await?
+            .get("revoked");
+        if revoked {
+            return Err(Error::Custom("Installation was revoked".into()));
+        }
+
+        let base = tx
+            .query_opt(
+                "SELECT env FROM connections
+                 WHERE id = $1 AND subscription_id = $2 AND NOT is_deleted
+                   AND (expires_at IS NULL OR expires_at > now())
+                   AND proto = $3 AND node_id IS NOT DISTINCT FROM $4
+                   AND include_in_main
+                   AND issued_via IS DISTINCT FROM 'share'
+                   AND issued_via IS DISTINCT FROM 'shared_sub'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM device_installation_connections WHERE conn_id = $1
+                   )
+                 FOR UPDATE",
+                &[&base_conn_id, &subscription_id, &conn.proto, &conn.node_id],
+            )
+            .await?
+            .ok_or_else(|| Error::Custom("Installation base connection is not active".into()))?;
+        let base_env: String = base.get("env");
+        if base_env.parse::<fcore::Env>()? != conn.env.parse::<fcore::Env>()? {
+            return Err(Error::Custom(
+                "Installation connection environment mismatch".into(),
+            ));
+        }
+
+        tx.execute(
+            "UPDATE device_installations i SET issued_at = now()
+             WHERE i.sub_id = $1 AND i.installation_uuid = $2 AND NOT EXISTS (
+                 SELECT 1 FROM device_installation_connections d
+                 WHERE d.sub_id = i.sub_id AND d.installation_uuid = i.installation_uuid
+             )",
+            &[&subscription_id, &installation_id],
+        )
+        .await?;
+        Self::insert_row(&tx, &conn).await?;
+        tx.execute(
+            "INSERT INTO device_installation_connections
+             (sub_id, installation_uuid, base_conn_id, conn_id)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &subscription_id,
+                &installation_id,
+                &base_conn_id,
+                &conn.conn_id,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn revoke_installation(
+        &self,
+        subscription_id: &uuid::Uuid,
+        installation_id: &uuid::Uuid,
+    ) -> Result<Vec<uuid::Uuid>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
+        tx.query_one(
+            "SELECT id FROM subscriptions
+             WHERE id = $1 AND parent_id IS NOT NULL AND plan_kind = 'selfhosted'
+             FOR UPDATE",
+            &[subscription_id],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO device_installations (sub_id, installation_uuid, revoked_at)
+             VALUES ($1, $2, now())
+             ON CONFLICT (sub_id, installation_uuid) DO UPDATE
+             SET revoked_at = COALESCE(device_installations.revoked_at, EXCLUDED.revoked_at)",
+            &[subscription_id, installation_id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE connections c SET is_deleted = true, deleted_reason = $3, modified_at = now()
+             FROM device_installation_connections d
+             WHERE d.sub_id = $1 AND d.installation_uuid = $2 AND c.id = d.conn_id
+               AND (NOT c.is_deleted OR c.deleted_reason IS DISTINCT FROM $3)",
+            &[subscription_id, installation_id, &DELETE_REASON_DEVICE_KICK],
+        )
+        .await?;
+        // Include previously deleted connections so retries can finish publishing revocations.
+        let rows = tx
+            .query(
+                "SELECT conn_id FROM device_installation_connections
+                 WHERE sub_id = $1 AND installation_uuid = $2",
+                &[subscription_id, installation_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|row| row.get("conn_id")).collect())
     }
 
     pub async fn all_watermarks(&self) -> Result<Vec<ConnWatermark>> {

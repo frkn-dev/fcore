@@ -17,6 +17,7 @@ mod digest;
 mod entitlements;
 mod http;
 mod iap;
+mod installation_idle;
 mod metrics;
 mod mrkting;
 mod peers;

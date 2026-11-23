@@ -376,14 +376,16 @@ where
         )));
     };
 
-    // Share-issued child connections never leak into the owner's device
-    // list (or the location list derived from it).
+    // Share and installation peers are hidden from the owner's device and location lists.
     let connections = mem
         .connections
         .get_by_subscription_id(&subscription_id)
         .map(|cs| {
             cs.into_iter()
-                .filter(|(conn_id, _)| !is_share_connection(&mem.share_conns, conn_id))
+                .filter(|(conn_id, _)| {
+                    !is_share_connection(&mem.share_conns, conn_id)
+                        && !mem.installation_conns.contains(conn_id)
+                })
                 .collect::<Vec<_>>()
         });
     let mut locations = Vec::new();
@@ -974,7 +976,7 @@ where
         .unwrap_or_default()
         .into_iter()
         .filter(|(conn_id, conn)| {
-            if conn.get_deleted() {
+            if conn.get_deleted() || mem.installation_conns.contains(conn_id) {
                 return false;
             }
 

@@ -374,6 +374,10 @@ pub struct ServiceConfig {
     pub admin_token: Option<String>,
     #[serde(default)]
     pub agw_private_key_path: Option<String>,
+    /// Issue distinct AWG and AWG Mobile credentials to each installation of
+    /// a self-hosted child subscription through the existing gateway.
+    #[serde(default)]
+    pub installation_keys_enabled: bool,
     #[serde(default)]
     pub mrkting: Option<MrktingConfig>,
     #[serde(default)]
@@ -461,6 +465,15 @@ pub struct TasksConfig {
     /// itself is counted in days, so an hourly tick is plenty.
     #[serde(default = "default_stale_device_interval_sec")]
     pub stale_device_interval_sec: u64,
+    /// Age of a continuously observed idle installation before its keys expire.
+    /// Nonpositive values disable idle expiry.
+    #[serde(default = "default_installation_idle_timeout_sec")]
+    pub installation_idle_timeout_sec: i64,
+    #[serde(default = "default_installation_idle_check_interval_sec")]
+    pub installation_idle_check_interval_sec: u64,
+    /// Maximum age of the latest sample and maximum gap between samples.
+    #[serde(default = "default_installation_metrics_max_age_sec")]
+    pub installation_metrics_max_age_sec: i64,
 }
 
 impl TasksConfig {
@@ -571,6 +584,21 @@ fn default_tombstone_republish_interval_sec() -> u64 {
 
 fn default_stale_device_interval_sec() -> u64 {
     3600
+}
+
+fn default_installation_idle_timeout_sec() -> i64 {
+    90 * 24 * 60 * 60
+}
+
+fn default_installation_idle_check_interval_sec() -> u64 {
+    24 * 60 * 60
+}
+
+// fnode reports a peer online for three minutes after its latest handshake.
+pub const INSTALLATION_OBSERVATION_MAX_GAP_SEC: i64 = 180;
+
+fn default_installation_metrics_max_age_sec() -> i64 {
+    INSTALLATION_OBSERVATION_MAX_GAP_SEC
 }
 
 #[cfg(test)]

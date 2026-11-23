@@ -1428,7 +1428,7 @@ const ISSUED_VIA_USER: &str = "user";
 /// Shared gate of the `/private/users*` endpoints: the subscription must
 /// exist, be a selfhosted account and not be a user itself (a user cannot
 /// invite users — nested accounts are refused).
-async fn check_user_owner<N, C, S>(
+pub(super) async fn check_user_owner<N, C, S>(
     memory: &MemSync<N, C, S>,
     owner_id: Uuid,
 ) -> Result<(), warp::reply::Response>
@@ -1759,6 +1759,7 @@ where
                     .get_by_subscription_id(&child.id())
                     .unwrap_or_default()
                     .iter()
+                    .filter(|(id, _)| !mem.installation_conns.contains(id))
                     .map(|(id, conn)| (mem.conn_nodes.get(id).copied(), conn.get_deleted()))
                     .collect();
                 let (all_servers, node_ids) = user_node_selection(&conns);
@@ -1810,6 +1811,8 @@ where
     if let Err(reply) = check_user_owner(&memory, query.subscription_id).await {
         return Ok(reply);
     }
+
+    let _connection_write = memory.connection_write.lock().await;
 
     // Only a user of *this* account can be revoked: a foreign uuid, a premium
     // child or an already deleted one answers a uniform 404.

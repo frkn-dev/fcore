@@ -1334,12 +1334,24 @@ fn build_vless_server_config(
 // Handlers
 // ============================================================================
 
+fn gateway_installation_revision(
+    revision: Option<String>,
+    idle_generation: Option<i64>,
+) -> Option<String> {
+    revision.map(|rev| match idle_generation {
+        None => rev,
+        Some(0) => format!("{rev}-installation-v1"),
+        Some(generation) => format!("{rev}-installation-v1-{generation}"),
+    })
+}
+
 pub async fn gateway_services_handler<N, C, S>(
     req: GatewayServicesRequest,
     memory: MemSync<N, C, S>,
     labels: GatewayLabels,
     traffic_mode_enabled: bool,
     metered_conns: Vec<String>,
+    installation_keys_enabled: bool,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1488,6 +1500,28 @@ where
         conns_slice,
         !req.pool_off,
     ));
+    let installation_sub_id = sub_id.filter(|_| {
+        installation_keys_enabled
+            && share_row.is_none()
+            && sub.is_some_and(|sub| sub.is_selfhosted_user())
+    });
+    drop(mem);
+
+    if let Some(sub_id) = installation_sub_id {
+        let generation = match memory.db.conn().installation_idle_generation(&sub_id).await {
+            Ok(generation) => generation,
+            Err(err) => {
+                tracing::error!(%err, "Installation revision lookup failed");
+                return Ok(http::internal_error("installation lookup failed").into_response());
+            }
+        };
+        for connection in &mut connections {
+            if matches!(connection.service_protocol.as_str(), "awg" | "awg-mobile") {
+                connection.config_rev =
+                    gateway_installation_revision(connection.config_rev.take(), Some(generation));
+            }
+        }
+    }
     let countries = available_countries_from_connections(&connections);
 
     let info = GatewayServiceInfo {
@@ -1575,7 +1609,10 @@ where
         return Ok(http::not_found("Subscription expired").into_response());
     }
 
-    let conns = mem.connections.get_by_subscription_id(&sub_id);
+    let conns = mem.connections.get_by_subscription_id(&sub_id).map(|mut rows| {
+        rows.retain(|(conn_id, _)| !mem.installation_conns.contains(conn_id));
+        rows
+    });
     // Share-issued child connections are not the owner's devices.
     let active_devices = conns
         .as_ref()
@@ -1700,6 +1737,7 @@ pub async fn build_gateway_config_response<N, C, S>(
     params: &GatewayConfigParams<'_>,
     traffic_mode_enabled: bool,
     metered_conns: &[String],
+    installation: Option<(&str, &InstallationNetworks)>,
 ) -> Result<GatewayConfigResponse, warp::reply::Response>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -1711,7 +1749,7 @@ where
         + 'static
         + From<Connection>
         + PartialEq,
-    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<fcore::Subscription>,
     Connection: From<C>,
 {
     // Grants, when present, decide what this subscription may be served: a
@@ -1786,7 +1824,7 @@ where
     let mut found_conn_id = None;
 
     for (conn_id, conn) in conns {
-        if conn.get_deleted() {
+        if conn.get_deleted() || mem.installation_conns.contains(&conn_id) {
             continue;
         }
         if !main_feed_connection_visible(
@@ -1876,7 +1914,17 @@ where
         return Err(subscription_expired_response(sub.expires_at()));
     }
 
-    let pinned = mem.conn_nodes.contains_key(&conn_id);
+    let node_pin = mem.conn_nodes.get(&conn_id).copied();
+    let provision = installation.filter(|_| {
+        sub.is_selfhosted_user()
+            && !mem.main_feed_excluded_conns.contains(&conn_id)
+            && !mem.share_conns.contains(&conn_id)
+            && matches!(
+                conn.get_proto().proto(),
+                Tag::AmneziaWg | Tag::AmneziaWgMobile
+            )
+    });
+    let pinned = node_pin.is_some();
     let pool = if pinned {
         None
     } else {
@@ -1925,6 +1973,27 @@ where
     // From here on only owned clones are used; release the read lock so the
     // WireGuard branch can take a write lock for peer registration.
     drop(mem);
+
+    let (conn, idle_generation) = if let Some((raw_id, networks)) = provision {
+        let installation_id = uuid::Uuid::parse_str(raw_id)
+            .ok()
+            .filter(|id| id.get_version_num() == 4)
+            .ok_or_else(|| http::bad_request("invalid installation_uuid").into_response())?;
+        let (conn, generation) = installation_connection(
+            memory,
+            *sub_id,
+            installation_id,
+            conn_id,
+            conn,
+            node_pin,
+            networks,
+        )
+        .await?;
+        (conn, Some(generation))
+    } else {
+        (conn, None)
+    };
+    let config_rev = gateway_installation_revision(config_rev, idle_generation);
 
     // Build the config for the protocol of the chosen connection, not of the
     // service card: an explicitly requested connection may be of either type.
@@ -2049,6 +2118,104 @@ where
     })
 }
 
+#[derive(Clone)]
+pub struct InstallationNetworks {
+    pub wg: fcore::IpAddrMask,
+    pub awg: fcore::IpAddrMask,
+    pub mobile: Option<fcore::IpAddrMask>,
+}
+
+async fn installation_connection<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: uuid::Uuid,
+    installation_id: uuid::Uuid,
+    base_id: uuid::Uuid,
+    base: Connection,
+    node_pin: Option<uuid::Uuid>,
+    networks: &InstallationNetworks,
+) -> Result<(Connection, i64), warp::reply::Response>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<fcore::Subscription>,
+    Connection: From<C>,
+{
+    let memory = memory.clone();
+    let networks = networks.clone();
+    // Finish persistence and publication even if the client cancels its refresh.
+    tokio::spawn(async move {
+        let _connection_write = memory.connection_write.lock().await;
+        let existing = memory
+            .db
+            .conn()
+            .installation_connections(&subscription_id, &installation_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(%err, "Installation lookup failed");
+                http::internal_error("installation lookup failed").into_response()
+            })?;
+        if existing.as_ref().is_some_and(|existing| existing.revoked) {
+            return Err(share::forbidden("installation revoked"));
+        }
+        let generation = memory
+            .db
+            .conn()
+            .installation_idle_generation(&subscription_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(%err, "Installation revision lookup failed");
+                http::internal_error("installation lookup failed").into_response()
+            })?;
+        if let Some(existing) = existing {
+            if let Some((_, conn_id)) = existing.connections.iter().find(|(id, _)| *id == base_id) {
+                let mem = memory.memory.read().await;
+                return mem
+                    .connections
+                    .get(conn_id)
+                    .filter(|conn| !conn.get_deleted())
+                    .map(|conn| (conn.clone().into(), generation))
+                    .ok_or_else(|| {
+                        http::not_found("installation connection unavailable").into_response()
+                    });
+            }
+        }
+
+        super::connection::create_connection(
+            &base.get_env(),
+            base.get_proto().proto(),
+            Some(subscription_id),
+            None,
+            None,
+            node_pin,
+            Some(crate::postgres::connection::ISSUED_VIA_INSTALLATION.to_string()),
+            false,
+            &memory,
+            &networks.wg,
+            &networks.awg,
+            &networks.mobile,
+            Some((installation_id, base_id)),
+        )
+        .await
+        .map(|(_, conn)| (conn, generation))
+        .map_err(|err| {
+            tracing::error!(%err, "Installation provisioning failed");
+            http::internal_error("installation provisioning failed").into_response()
+        })
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(%err, "Installation provisioning task failed");
+        http::internal_error("installation provisioning failed").into_response()
+    })?
+}
+
 pub async fn gateway_config_handler<N, C, S>(
     req: GatewayConfigRequest,
     memory: MemSync<N, C, S>,
@@ -2057,6 +2224,7 @@ pub async fn gateway_config_handler<N, C, S>(
     remote: Option<std::net::SocketAddr>,
     x_forwarded_for: Option<String>,
     rate_limiter: std::sync::Arc<share::RateLimiter>,
+    installation_networks: Option<InstallationNetworks>,
 ) -> Result<warp::reply::Response, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -2068,7 +2236,7 @@ where
         + 'static
         + From<Connection>
         + PartialEq,
-    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<fcore::Subscription>,
     Connection: From<C>,
 {
     // Share-token auth is a separate, tightly scoped branch: the config is
@@ -2138,6 +2306,9 @@ where
         &params,
         traffic_mode_enabled,
         &metered_conns,
+        installation_networks
+            .as_ref()
+            .map(|networks| (req.installation_uuid.as_str(), networks)),
     )
     .await
     {

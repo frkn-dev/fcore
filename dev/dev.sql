@@ -401,3 +401,44 @@ CREATE TABLE IF NOT EXISTS node_access_tokens (
 -- existing translations.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool TEXT;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_translation JSONB;
+
+CREATE TABLE IF NOT EXISTS device_installations (
+    sub_id uuid NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    installation_uuid uuid NOT NULL,
+    revoked_at timestamptz,
+    issued_at timestamptz NOT NULL DEFAULT now(),
+    idle_generation bigint NOT NULL DEFAULT 0,
+    PRIMARY KEY (sub_id, installation_uuid)
+);
+
+CREATE TABLE IF NOT EXISTS device_installation_connections (
+    sub_id uuid NOT NULL,
+    installation_uuid uuid NOT NULL,
+    base_conn_id uuid NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    conn_id uuid NOT NULL UNIQUE REFERENCES connections(id) ON DELETE CASCADE,
+    PRIMARY KEY (sub_id, installation_uuid, base_conn_id),
+    FOREIGN KEY (sub_id, installation_uuid)
+        REFERENCES device_installations(sub_id, installation_uuid) ON DELETE CASCADE,
+    CHECK (base_conn_id <> conn_id)
+);
+
+CREATE INDEX IF NOT EXISTS device_installation_connections_base
+    ON device_installation_connections (base_conn_id);
+
+CREATE TABLE IF NOT EXISTS installation_observations (
+    conn_id uuid NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    node_id uuid NOT NULL,
+    sampled_at timestamptz NOT NULL,
+    observed_since timestamptz NOT NULL,
+    last_online_at timestamptz,
+    PRIMARY KEY (conn_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS installation_idle_catalog (
+    singleton boolean PRIMARY KEY CHECK (singleton),
+    revision bigint NOT NULL CHECK (revision >= 0)
+);
+
+INSERT INTO installation_idle_catalog (singleton, revision)
+VALUES (true, 0)
+ON CONFLICT (singleton) DO NOTHING;
