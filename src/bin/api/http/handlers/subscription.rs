@@ -27,6 +27,8 @@ use super::super::super::{
     subscription_audit,
     sync::{tasks::SyncOp, MemSync},
 };
+use crate::peers::Plane;
+use crate::traffic::{self, SubscriptionTraffic, TrafficValue};
 use super::super::{
     param::SubIdQueryParam,
     request::EnvFilter,
@@ -47,8 +49,6 @@ pub struct TrafficHistoryQuery {
 fn default_traffic_period() -> String {
     "day".to_string()
 }
-
-use crate::traffic::{self, SubscriptionTraffic, TrafficValue};
 
 pub(crate) async fn build_subscription_traffic(
     db: &crate::postgres::pg::PgContext,
@@ -365,6 +365,7 @@ where
         + Send
         + Clone
         + 'static
+        + From<Connection>
         + PartialEq,
 {
     let mem = memory.memory.read().await;
@@ -487,6 +488,23 @@ where
     let expires = sub.expires_at();
     let days = sub.days_remaining().unwrap_or(0);
     let ref_code = sub.refer_code();
+    // A user account of a selfhosted owner: the owner's id is the only thing
+    // the cabinet needs, and nothing else of the parent is exposed.
+    let parent_id = sub.parent_id();
+    // Own-node quota: the capability the cabinet's own-node block keys off.
+    let own_nodes_limit = sub.own_nodes_limit();
+
+    // Migration marker (0030). Read from the row, not the cached model: the
+    // peer insert writes it, so a cached `Subscription` would keep answering
+    // v1 after the first peer until the next reload.
+    let (plane, v2_since) = match memory.db.sub().plane(&sub_id).await {
+        Ok(Some((raw, since))) => (Plane::from_db(Some(&raw)).as_str().to_string(), since),
+        Ok(None) => (Plane::V1.as_str().to_string(), None),
+        Err(e) => {
+            tracing::warn!("subscription {} plane read failed: {}", sub_id, e);
+            (Plane::V1.as_str().to_string(), None)
+        }
+    };
 
     // Safe projection of every connection of the subscription (soft-deleted
     // included, the front hides them) with the user-facing device label
@@ -687,6 +705,43 @@ where
     let mut env_traffic: Vec<EnvTrafficInfo> = env_traffic_map.into_values().collect();
     env_traffic.sort_by(|a, b| a.env.to_string().cmp(&b.env.to_string()));
 
+    // Per-plan rights: `standard` and `lite` («Super Duper») are bought and
+    // paid for separately and each carries its own term and quota, so the app
+    // gets both with their own flags instead of deriving one from the other.
+    let grants = match memory.db.peers().grants(sub_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Not fatal: a deployment without the peers tables still answers
+            // the v1 view, just without per-plan rows.
+            tracing::warn!("Per-plan grants read failed for sub {}: {}", sub_id, e);
+            Vec::new()
+        }
+    };
+    let used_by_env: HashMap<String, i64> = env_traffic
+        .iter()
+        .map(|info| (info.env.to_string(), info.uplink + info.downlink))
+        .collect();
+    let mut purchasable = HashMap::new();
+    for plan in crate::plans::SELLABLE {
+        purchasable.insert(
+            plan.to_string(),
+            !super::peers::live_shards(&memory, plan).await.is_empty(),
+        );
+    }
+    let sub_facts = crate::plans::SubFacts {
+        plan_kind,
+        expires_at: expires,
+        limit_bytes: limit,
+        used_bytes,
+    };
+    let plans = crate::plans::statuses(
+        Some(&sub_facts),
+        &grants,
+        &used_by_env,
+        &purchasable,
+        Utc::now(),
+    );
+
     let sub_resp = SubscriptionResponse {
         id: sub_id,
         expires,
@@ -706,8 +761,18 @@ where
         remaining_bytes: limit.map(|l| l - used_bytes),
         env_traffic,
         connections,
+        plans,
         shared_subs,
         scope,
+        // A user account of a selfhosted owner: the cabinet shows the badge
+        // and never offers the install-token button (the api answers 403).
+        is_child: parent_id.is_some(),
+        // Own nodes are a capability of any account: the cabinet shows the
+        // own-node block on a positive quota, whatever the plan is.
+        own_nodes_limit,
+        parent_id,
+        plane,
+        v2_since,
     };
 
     Ok(Box::new(warp::reply::json(&sub_resp)))
@@ -1581,5 +1646,67 @@ mod tests {
         assert!(super::personal_on_general_list(true, true, true));
         assert!(super::personal_on_general_list(true, false, false));
         assert!(super::personal_on_general_list(false, false, true));
+    }
+
+    /// (d) `GET /subscription/{id}` exposes the migration marker, and a
+    /// payload from an older backend without the fields still deserializes as
+    /// a v1 subscription.
+    #[test]
+    fn subscription_response_carries_the_migration_plane() {
+        use fcore::http::response::SubscriptionResponse;
+
+        let response = SubscriptionResponse {
+            id: uuid::Uuid::nil(),
+            expires: None,
+            days: 0,
+            ref_code: "TEST".to_string(),
+            locations: Vec::new(),
+            downlink: 0,
+            uplink: 0,
+            daily_downlink: 0,
+            daily_uplink: 0,
+            monthly_downlink: 0,
+            monthly_uplink: 0,
+            limit_bytes: 0,
+            plan_kind: fcore::PlanKind::default(),
+            product: fcore::Product::default(),
+            used_bytes: 0,
+            remaining_bytes: None,
+            env_traffic: Vec::new(),
+            connections: Vec::new(),
+            plans: Vec::new(),
+            shared_subs: Vec::new(),
+            scope: None,
+            is_child: false,
+            own_nodes_limit: 0,
+            parent_id: None,
+            plane: "v1".to_string(),
+            v2_since: None,
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["plane"], serde_json::json!("v1"));
+        assert_eq!(value["v2_since"], serde_json::Value::Null);
+
+        let mut moved = response.clone();
+        moved.plane = "v2".to_string();
+        moved.v2_since = Some(chrono::Utc::now());
+        let value = serde_json::to_value(&moved).unwrap();
+        assert_eq!(value["plane"], serde_json::json!("v2"));
+        assert!(!value["v2_since"].is_null());
+
+        // An older backend omits both fields: defaults keep the consumer
+        // working on a v1 subscription.
+        let mut old = serde_json::to_value(&response)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        old.remove("plane");
+        old.remove("v2_since");
+        let restored: SubscriptionResponse =
+            serde_json::from_value(serde_json::Value::Object(old)).unwrap();
+        assert_eq!(restored.plane, "v1");
+        assert!(restored.v2_since.is_none());
     }
 }

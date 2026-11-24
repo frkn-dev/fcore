@@ -228,6 +228,13 @@ where
         KeyKind::Standard => PlanKind::Standard,
         KeyKind::Lite => PlanKind::Lite,
     };
+    // ROLLED BACK to the pre-0.7.33 behaviour on purpose: a lite key targets its
+    // product shard (i.e. `standard`) until the «Super Duper» shard has live
+    // nodes. Routing lite keys to plan `lite` while that shard is empty turned
+    // every new lite activation into `503 no_live_shard`, which is a production
+    // outage for a product we are still selling. Re-enable the lite mapping only
+    // together with live Super Duper nodes, and only with the owner's approval.
+    let plan = key.product.to_string();
     let catalog_map = match resolver.resolve(key_plan_kind, key.product) {
         Ok(map) => map,
         Err(err) => {
@@ -263,7 +270,21 @@ where
         }
     }
 
-    let sub_id = match req.subscription_id {
+    // Where this activation lands, in order:
+    //  * the caller names the subscription (the cabinet/app knows the user);
+    //  * the key itself is issued against a subscription (a key bought while
+    //    the buyer was identified carries it);
+    //  * nobody knows the user — a new subscription, exactly as before.
+    //
+    // The first two add the key's plan as *another grant* on that subscription.
+    // A second subscription for the same person is what this removes: one
+    // subscription holds one grant per plan, not one subscription per plan.
+    // Keys that already carry a subscription keep working as they did (the id
+    // is simply reused instead of a new row being created), and an activation
+    // without any identifier behaves exactly like the legacy path.
+    let target = crate::plans::activation_target(req.subscription_id, key.subscription_id);
+    let merged = target.is_some();
+    let sub_id = match target {
         Some(id) => id,
         None => {
             let sub_id = uuid::Uuid::new_v4();
@@ -350,7 +371,6 @@ where
     // `env_capacity`: before that the feature is not rolled out and activation
     // keeps the legacy path. Once declared, a plan with no live shard is a
     // hard stop (the payer is quarantined instead of silently unserved).
-    let plan = key.product.to_string();
     let declared_shards = memory
         .db
         .peers()
@@ -432,7 +452,7 @@ where
         }
 
         if !protos.is_empty() {
-            let expires_at = memory
+            let sub_expiry = memory
                 .db
                 .sub()
                 .find(&sub_id)
@@ -440,6 +460,43 @@ where
                 .ok()
                 .flatten()
                 .and_then(|s| s.expires_at());
+
+            // What the plan's grant already holds. A lite key on a
+            // subscription that already has this plan is a **top-up**: the
+            // bought volume is added to the grant's quota. Handing the key's
+            // own volume to a plain upsert would shrink a 100 GiB pack to the
+            // 10 GiB key — a paid user losing traffic.
+            let existing = memory
+                .db
+                .peers()
+                .grants(sub_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|grant| grant.plan.as_deref() == Some(plan.as_str()));
+            let existing_terms = existing
+                .as_ref()
+                .map(|grant| (grant.expires_at, grant.traffic_limit));
+
+            let (expires_at, traffic_limit) = match key.kind {
+                // Time plan: the subscription row was just extended, and every
+                // live grant follows it (see `renew_grant_access` below).
+                KeyKind::Standard => (sub_expiry, key.traffic_bytes),
+                KeyKind::Lite => {
+                    let terms = crate::plans::purchase_terms(
+                        &plan,
+                        0,
+                        key.traffic_bytes,
+                        existing_terms,
+                        chrono::Utc::now(),
+                    );
+                    // A volume plan has no term: a lite grant must not inherit
+                    // the standard subscription's date, or Super Duper would
+                    // expire with a plan it was not bought with.
+                    (terms.expires_at, terms.traffic_limit)
+                }
+            };
+
             let shards = crate::http::handlers::peers::live_shards(&memory, &plan).await;
             match memory
                 .db
@@ -450,7 +507,7 @@ where
                     &protos,
                     "payment",
                     expires_at,
-                    key.traffic_bytes,
+                    traffic_limit,
                     &shards,
                 )
                 .await
@@ -710,6 +767,10 @@ where
             if flow == ActivationFlow::Peers {
                 let mut response = serde_json::json!({
                     "subscription_id": sub_id,
+                    // True when the key's plan was added to a subscription that
+                    // already existed: the client then shows «план добавлен», not
+                    // «создана подписка».
+                    "merged": merged,
                     "key": serde_json::to_value(&key).unwrap_or(serde_json::Value::Null),
                 });
                 if let Some((env, used, limit, overflow)) = granted {

@@ -30,15 +30,54 @@ install-token flow below.
 1. Cabinet: `POST /private/install-token` `{ "subscription_id": "<uuid>" }`
    - Ensures personal scope env `custompersonal{uuid_simple}` on the sub when
      `scope_env` is empty (does not overwrite an existing premium scope).
-   - Returns `inst_…` token (TTL 1h, max 3 active unused per sub).
-2. Install (beta for now):
-   `curl -fsSL https://beta.frkn.org/install | bash -s -- --token inst_…`
+   - Allocates the shard's address block on first mint — `<next free /16>` out of
+     `[service.peers].auto_subnet_pool` into `env_networks` (an env that already
+     holds one keeps it) — and returns it as `env_block` (`10.89.0.0/16`).
+   - Returns `inst_…` token (TTL 1h, max 3 active unused per sub), `scope_env`,
+     `env_block` and `node_version` (the node build the api ships with).
+   - `GET /private/install-token/<token>` answers the same `scope_env`,
+     `env_block`, `node_version` without burning the token: the installer needs
+     them *before* it writes the first interface, and a re-run must heal rather
+     than fail. Unknown/expired/used → `401`.
+2. Install:
+   `curl -fsSL https://frkn.org/install | bash -s -- --token inst_…`
+   The installer writes `<env_block>.1/16` on `awg0-peer` (UDP 51821 — 443 stays
+   hysteria2's), NATs exactly `<env_block>` out of the default-route interface
+   (PostUp/PostDown of the enabled `awg-quick@awg0-peer`, uplink read at call
+   time), and puts the full `scope_env` into `[node]` — the bus topic is derived
+   from it, and a wrong env means the node never hears the api.
 3. Node: `POST /private/nodes` with `Authorization: Bearer inst_…`
    - API forces personal env, burns install token, returns durable `node_…`
    - fnode persists it to `api.token` and uses it for `POST /connections/sync`
+   - Registration also (a) grants the subscription the protocols the node
+     announces (`amnezia_peer`, `hysteria2`) so `/v1/locations` has a card,
+     (b) checks the peer interface sits in the shard block (adopting the block
+     the node brings when the shard has none) and (c) publishes the
+     authoritative `peers-init` for `(env, pool)` — on every registration,
+     including the `200` refresh path, so a node that lost its snapshot heals on
+     `systemctl restart fnode` (or `systemctl reload fnode`, SIGHUP: re-register;
+     `fnode config.toml --peers-resync` ignores the local snapshot once).
 4. Cabinet: `GET /private/nodes?subscription_id=…`,
    `DELETE /private/nodes/{uuid}?subscription_id=…`,
    `GET /private/state?subscription_id=…` (used/limit/remaining, see «Limits»).
+
+## Peer isolation of an own shard
+
+An own shard is one account, and the bus is treated as public: topic strings are
+derived from what the installer prints (`peers-update-custompersonal<uuid>-own`),
+so anybody who knows the account uuid can subscribe to them.
+
+- Peers of a personal env are **never** published on the shard-wide stream.
+  `publish_peer` answers a change there by pushing the authoritative
+  `peers-init-<node_uuid>` (unicast, the uuid is a v4 random capability) to every
+  node of that env; the interface is then reconciled as a diff.
+- The peer set is chosen from the env stored for the node (token-derived at
+  registration, env from the row on refresh) and `peers_for_node` filters on it
+  again — a request can never widen it.
+- Subscription-wide streams of shared shards (`peers-update-0001-eu`) are
+  untouched: those are shards we run.
+- Tests: `an_own_shard_sees_only_its_own_subscription` (a mixed slice yields only
+  this account's rows), plus the pool scoping tests.
 
 ## Limits (servers / users)
 

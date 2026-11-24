@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 use std::collections::HashMap;
 
@@ -20,6 +20,7 @@ mod iap;
 mod metrics;
 mod mrkting;
 mod peers;
+mod plans;
 mod postgres;
 mod runtime;
 mod service;

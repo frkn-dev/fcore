@@ -4,7 +4,6 @@ pub mod amnezia;
 pub mod catalog;
 pub mod cluster;
 pub mod connection;
-pub(crate) mod geo;
 pub mod iap;
 pub mod key;
 pub mod metrics;
@@ -96,11 +95,13 @@ where
 /// that owns nodes (self-hosted or resell partner) keeps them even when the
 /// paid term or the traffic balance has ended. Shared configs stay gated —
 /// that check lives on the connection path (`build_gateway_config_response`).
+/// The own-node *quota* is deliberately not consulted: every new account has
+/// one, so keying on it would serve every expired account.
 pub(crate) fn serving_access_owner_aware<S>(sub: &S, traffic_mode_enabled: bool) -> ServingAccess
 where
     S: SubscriptionOperations,
 {
-    if sub.can_own_nodes() || sub.can_resell() {
+    if sub.keeps_own_plane() {
         ServingAccess::Full
     } else {
         serving_access(sub, traffic_mode_enabled)

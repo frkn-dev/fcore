@@ -6,7 +6,10 @@ use std::net::Ipv4Addr;
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::memory::{env::Env, node::Type};
+use crate::memory::{
+    env::Env,
+    node::{Endpoint, Type, DEFAULT_NODE_WEIGHT},
+};
 
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct ApiAccessConfig {
@@ -49,8 +52,20 @@ pub struct NodeConfig {
     pub country: String,
     pub r#type: Type,
     pub cluster: Option<String>,
-    /// Extra entry IPs of the node (node_ips[0] == `address`); None =
-    /// single-address node.
+    /// Entry points of the node (`[[node.endpoints]]`), already normalised and
+    /// always non-empty: a node that declares none gets one endpoint for
+    /// `address`. Single source of truth for addresses, ports and weights.
+    pub endpoints: Option<Vec<Endpoint>>,
+    /// `true` when the config still uses the DEPRECATED `node_ips` /
+    /// `node_weights` keys. Reported to the api (`/status`) so migration
+    /// progress is countable before those keys are removed.
+    pub endpoints_legacy: bool,
+    /// DEPRECATED — use `[[node.endpoints]]`.
+    /// TODO(remove-legacy-endpoints): delete once no node reports
+    /// `endpoints_legacy: true` and no old api build needs the key.
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_ips: Option<Vec<Ipv4Addr>>,
     /// Optional pool/group name (config.toml `[node] pool`). Clients group
     /// identically-named nodes and may localize the title via
@@ -65,8 +80,11 @@ pub struct NodeConfig {
     /// Human name of `pool_country_code` (`[node] pool_country_name`); absent
     /// means the client translates the code itself.
     pub pool_country_name: Option<String>,
-    /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
-    /// address from `node_ips`; an unlisted address weighs 100.
+    /// DEPRECATED — use `[[node.endpoints]]` (`weight` of each entry).
+    /// TODO(remove-legacy-endpoints): delete together with `node_ips`.
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_weights: Option<BTreeMap<String, i32>>,
     /// Base URL of the node's own speed-test endpoint (`[node] bench_url`,
     /// e.g. `https://ncr-nl-ams-bench-01.bench.beacon.frkn.org:19443`).
@@ -91,9 +109,19 @@ pub struct NodeConfigRaw {
     pub r#type: String,
     #[serde(default)]
     pub cluster: Option<String>,
-    /// Extra entry IPs: the first must equal `address` (primary first);
-    /// all IPs share the same ports/keys/inbounds. Absent = single address.
+    /// Entry points of the node (`[[node.endpoints]]`): `ip` plus optional
+    /// `port`, `weight` and `label`. Present → it wins and the DEPRECATED
+    /// `node_ips`/`node_weights` keys are ignored (with a warning). Absent →
+    /// the legacy path runs exactly as before.
     #[serde(default)]
+    pub endpoints: Option<Vec<NodeEndpointRaw>>,
+    /// DEPRECATED — use `[[node.endpoints]]`.
+    /// TODO(remove-legacy-endpoints): delete once no node reports
+    /// `endpoints_legacy: true`. Kept parsed so old configs keep working.
+    #[serde(default)]
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_ips: Option<Vec<Ipv4Addr>>,
     /// Optional pool/group name; a blank value is treated as absent.
     #[serde(default)]
@@ -111,15 +139,140 @@ pub struct NodeConfigRaw {
     /// the client translates the code when it is absent.
     #[serde(default)]
     pub pool_country_name: Option<String>,
-    /// Per-entry weights (config.toml `[node] node_weights`), keyed by address.
-    /// An empty map means every address uses the default (100). An unparsable
-    /// key or a non-positive weight is dropped.
+    /// DEPRECATED — use `[[node.endpoints]]` (`weight` of each entry).
+    /// TODO(remove-legacy-endpoints): delete together with `node_ips`.
     #[serde(default)]
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_weights: Option<BTreeMap<String, i32>>,
     /// Base URL of the node's own bench (`[node] bench_url`): where this node
     /// serves its speed-test files. Absent or blank = the node has no bench.
     #[serde(default)]
     pub bench_url: Option<String>,
+}
+
+/// One `[[node.endpoints]]` entry as written in config.toml.
+///
+/// `port` is `i64` on purpose: `port = 0` and `port = 70000` must produce the
+/// node's own validation error instead of a serde type error that hides which
+/// key is wrong.
+#[derive(Clone, Debug, Deserialize)]
+pub struct NodeEndpointRaw {
+    pub ip: Ipv4Addr,
+    #[serde(default)]
+    pub port: Option<i64>,
+    #[serde(default)]
+    pub weight: Option<i32>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Validates `[[node.endpoints]]` and returns the canonical endpoint list.
+///
+/// Rules (the schema is the same on every level — node config, node→api
+/// announcement, api→client payload):
+/// - `ip` must be a valid IPv4 and unique within the node (a duplicate means a
+///   client would weigh one address twice) — a duplicate is an error;
+/// - `port`, when present, must be in `1..=65535`; absent = the inbound's port;
+/// - `weight <= 0` means "not set" and falls back to [`DEFAULT_NODE_WEIGHT`];
+/// - `label` is trimmed, blank means absent, and is only ever used in logs;
+/// - `endpoints[0].ip` must equal `address`, exactly like the legacy
+///   `node_ips[0]` rule: an old client/consumer reads `address` as the primary
+///   entry and would otherwise dial an address the node does not announce.
+fn normalize_endpoints(
+    raw: Option<Vec<NodeEndpointRaw>>,
+    address: Ipv4Addr,
+) -> Result<Option<Vec<Endpoint>>> {
+    let Some(raw) = raw.filter(|list| !list.is_empty()) else {
+        return Ok(None);
+    };
+    let mut seen: Vec<Ipv4Addr> = Vec::with_capacity(raw.len());
+    let mut endpoints: Vec<Endpoint> = Vec::with_capacity(raw.len());
+    for entry in raw {
+        if seen.contains(&entry.ip) {
+            return Err(Error::Custom(format!(
+                "Validation error: duplicate endpoint ip {}. Every [[node.endpoints]] ip must be unique",
+                entry.ip
+            )));
+        }
+        seen.push(entry.ip);
+        let port = match entry.port {
+            Some(port) if (1..=65535).contains(&port) => Some(port as u16),
+            Some(port) => {
+                return Err(Error::Custom(format!(
+                    "Validation error: endpoint {} port {port} is out of range 1..=65535",
+                    entry.ip
+                )));
+            }
+            None => None,
+        };
+        let weight = match entry.weight {
+            Some(weight) if weight > 0 => weight,
+            Some(weight) => {
+                tracing::warn!(
+                    ip = %entry.ip,
+                    weight,
+                    "config_endpoint_weight_defaulted"
+                );
+                DEFAULT_NODE_WEIGHT
+            }
+            None => DEFAULT_NODE_WEIGHT,
+        };
+        let label = entry
+            .label
+            .map(|label| label.trim().to_string())
+            .filter(|label| !label.is_empty());
+        endpoints.push(Endpoint {
+            ip: entry.ip,
+            port,
+            weight,
+            label,
+        });
+    }
+    if endpoints[0].ip != address {
+        return Err(Error::Custom(format!(
+            "Validation error: endpoints[0] ({}) must equal the node address ({address})",
+            endpoints[0].ip
+        )));
+    }
+    Ok(Some(endpoints))
+}
+
+/// Validates an already-shaped endpoint list (node→api announcement, or a
+/// third-party tool posting the same JSON): unique IPv4 addresses, ports in
+/// `1..=65535`, positive weights, primary == `address`.
+///
+/// The node config goes through [`normalize_endpoints`], which applies the
+/// same rules while parsing TOML; this entry point applies them to the wire
+/// shape so a registration never stores a node the clients cannot dial.
+pub fn validate_endpoint_list(endpoints: &[Endpoint], address: Ipv4Addr) -> Result<()> {
+    if endpoints.is_empty() {
+        return Ok(());
+    }
+    let mut seen: Vec<Ipv4Addr> = Vec::with_capacity(endpoints.len());
+    for endpoint in endpoints {
+        if seen.contains(&endpoint.ip) {
+            return Err(Error::Custom(format!(
+                "Validation error: duplicate endpoint ip {}",
+                endpoint.ip
+            )));
+        }
+        seen.push(endpoint.ip);
+        if matches!(endpoint.port, Some(0)) {
+            return Err(Error::Custom(format!(
+                "Validation error: endpoint {} port is out of range 1..=65535",
+                endpoint.ip
+            )));
+        }
+        if endpoints[0].ip != address {
+            return Err(Error::Custom(format!(
+                "Validation error: endpoints[0] ({}) must equal the node address ({address})",
+                endpoints[0].ip
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Keeps only usable per-IP weights: the key must parse as IPv4 (the same
@@ -231,6 +384,7 @@ fn normalize_pool_translation(
 }
 
 impl NodeConfig {
+    #[allow(deprecated)]
     pub fn from_raw(raw: NodeConfigRaw) -> Result<NodeConfig> {
         let num_cpus = std::thread::available_parallelism()?.get();
         let hostname = if raw.hostname.is_none() {
@@ -242,6 +396,67 @@ impl NodeConfig {
             }
         } else {
             raw.hostname.unwrap()
+        };
+
+        let declared = normalize_endpoints(raw.endpoints, raw.address)?;
+        // A config that still carries the DEPRECATED keys keeps working
+        // unchanged; it is only counted (`endpoints_legacy`) and warned about,
+        // so `journalctl` shows which machine is not migrated yet.
+        let legacy_used = raw.node_ips.is_some() || raw.node_weights.is_some();
+        let (node_ips, node_weights, endpoints, endpoints_legacy) = match declared {
+            Some(endpoints) => {
+                if legacy_used {
+                    tracing::warn!(
+                        address = %raw.address,
+                        "config_legacy_endpoints_ignored: [[node.endpoints]] is present, node_ips/node_weights are ignored"
+                    );
+                }
+                // Legacy mirror, derived from the new section so every old
+                // consumer (old api build, old client) still sees the fields
+                // it has always read.
+                let ips: Vec<Ipv4Addr> = endpoints.iter().map(|endpoint| endpoint.ip).collect();
+                let node_ips = if ips.len() > 1 { Some(ips) } else { None };
+                let weights: BTreeMap<String, i32> = endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.weight != DEFAULT_NODE_WEIGHT)
+                    .map(|endpoint| (endpoint.ip.to_string(), endpoint.weight))
+                    .collect();
+                let node_weights = if weights.is_empty() {
+                    None
+                } else {
+                    Some(weights)
+                };
+                (node_ips, node_weights, Some(endpoints), false)
+            }
+            None => {
+                if legacy_used {
+                    tracing::warn!(
+                        address = %raw.address,
+                        "deprecated legacy endpoints: node_ips/node_weights — migrate to [[node.endpoints]] (env/dev/scripts/migrate-node-endpoints.py)"
+                    );
+                }
+                let node_ips = raw.node_ips.clone();
+                let node_weights = normalize_node_weights(raw.node_weights.clone());
+                // Same shape as an explicit `[[node.endpoints]]` section: the
+                // rest of the node only ever reads `endpoints`.
+                let ips: Vec<Ipv4Addr> = node_ips
+                    .clone()
+                    .filter(|ips| !ips.is_empty())
+                    .unwrap_or_else(|| vec![raw.address]);
+                let endpoints: Vec<Endpoint> = ips
+                    .iter()
+                    .map(|ip| Endpoint {
+                        ip: *ip,
+                        port: None,
+                        weight: node_weights
+                            .as_ref()
+                            .and_then(|weights| weights.get(&ip.to_string()).copied())
+                            .unwrap_or(DEFAULT_NODE_WEIGHT),
+                        label: None,
+                    })
+                    .collect();
+                (node_ips, node_weights, Some(endpoints), legacy_used)
+            }
         };
 
         Ok(NodeConfig {
@@ -256,12 +471,14 @@ impl NodeConfig {
             country: raw.country,
             r#type: raw.r#type.parse().unwrap_or(Type::Node),
             cluster: raw.cluster,
-            node_ips: raw.node_ips,
+            endpoints,
+            endpoints_legacy,
+            node_ips,
             pool: normalize_pool(raw.pool),
             pool_translation: normalize_pool_translation(raw.pool_translation),
             pool_country_code: normalize_pool_country(raw.pool_country_code),
             pool_country_name: normalize_pool_country_name(raw.pool_country_name),
-            node_weights: normalize_node_weights(raw.node_weights),
+            node_weights,
             bench_url: normalize_bench_url(raw.bench_url),
         })
     }
@@ -355,8 +572,20 @@ pub trait Settings: Sized {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
+
+    /// Parses the same layout the fleet uses: the node settings live in the
+    /// `[node]` table of config.toml, so `[[node.endpoints]]` is nested in it.
+    fn parse_node(text: &str) -> Result<NodeConfig> {
+        #[derive(Deserialize)]
+        struct Doc {
+            node: NodeConfigRaw,
+        }
+        let doc: Doc = toml::from_str(text).expect("test toml parses");
+        NodeConfig::from_raw(doc.node)
+    }
 
     #[test]
     fn pool_translation_normalizes_ua_and_blanks() {
@@ -441,5 +670,259 @@ mod tests {
         assert!(normalize_bench_url(Some("https://host with space".to_string())).is_none());
         assert!(normalize_bench_url(Some("ftp://host".to_string())).is_none());
         assert!(normalize_bench_url(Some("https://user@host".to_string())).is_none());
+    }
+
+    // ---------------------------------------------------------- endpoints
+
+    /// Real EU node config (env/dev/servers/fr.frkn.org/config.toml) with the
+    /// legacy multi-IP list: (a) the parsed result must be exactly what the
+    /// pre-endpoints code produced — same `node_ips`, same weights, no ports.
+    #[test]
+    fn legacy_multi_ip_config_parses_as_before() {
+        let config = parse_node(
+            r#"
+[node]
+env = "dev"
+hostname = "fr.frkn.org"
+default_interface = "net0"
+address = "77.221.153.189"
+uuid = "85a5b650-4a3c-4ec1-94bf-21a894760aaf"
+label = "France AWG3.1"
+max_bandwidth_bps = 200000000
+country = "FR"
+type = "Common"
+node_ips = [
+"77.221.153.189",
+"62.60.248.235",
+"62.60.246.138",
+"109.120.178.116",
+]
+"#,
+        )
+        .expect("real EU node config must parse");
+
+        assert_eq!(
+            config.node_ips,
+            Some(vec![
+                "77.221.153.189".parse().unwrap(),
+                "62.60.248.235".parse().unwrap(),
+                "62.60.246.138".parse().unwrap(),
+                "109.120.178.116".parse().unwrap(),
+            ]),
+            "the legacy IP list must be preserved verbatim"
+        );
+        assert!(
+            config.node_weights.is_none(),
+            "no node_weights in the file -> None, as before"
+        );
+        assert!(
+            config.endpoints_legacy,
+            "a config on the legacy keys must be reported as legacy"
+        );
+        // The single shape the rest of the node reads is derived from the
+        // legacy keys: same addresses, default weight, no port override.
+        let endpoints = config.endpoints.expect("endpoints are always populated");
+        assert_eq!(endpoints.len(), 4);
+        assert_eq!(endpoints[1].ip, "62.60.248.235".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(endpoints[1].port, None);
+        assert_eq!(endpoints[1].weight, DEFAULT_NODE_WEIGHT);
+    }
+
+    /// Real RU config with the legacy weights map.
+    #[test]
+    fn legacy_weights_reach_the_endpoints_mirror() {
+        let config = parse_node(
+            r#"
+[node]
+env = "ru"
+hostname = "msk-tw.frkn.org"
+default_interface = "eth0"
+address = "217.149.29.118"
+uuid = "447b2ee2-0351-4af6-b3eb-70341194bc81"
+label = "RU Рилзопровод"
+max_bandwidth_bps = 1000000000
+country = "RU"
+type = "Common"
+node_ips = ["217.149.29.118", "95.163.1.10"]
+node_weights = { "217.149.29.118" = 75, "95.163.1.10" = 25 }
+"#,
+        )
+        .expect("RU config parses");
+
+        let weights = config.node_weights.clone().expect("weights kept");
+        assert_eq!(weights.get("217.149.29.118"), Some(&75));
+        assert_eq!(weights.get("95.163.1.10"), Some(&25));
+        assert!(config.endpoints_legacy);
+        let endpoints = config.endpoints.expect("endpoints populated");
+        assert_eq!(endpoints[0].weight, 75);
+        assert_eq!(endpoints[1].weight, 25);
+    }
+
+    /// New section present -> it wins; the deprecated keys are ignored (the
+    /// warning is logged, the values are not merged).
+    #[test]
+    fn endpoints_section_wins_over_legacy_keys() {
+        let config = parse_node(
+            r#"
+[node]
+env = "nl"
+hostname = "nl-01.frkn.org"
+default_interface = "eth0"
+address = "82.148.231.161"
+uuid = "11111111-2222-3333-4444-555555555555"
+label = "NL"
+max_bandwidth_bps = 1000000000
+country = "NL"
+type = "Common"
+node_ips = ["82.148.231.161", "82.148.231.162"]
+node_weights = { "82.148.231.161" = 75 }
+
+[[node.endpoints]]
+ip = "82.148.231.161"
+port = 8443
+weight = 200
+label = "nl-01"
+
+[[node.endpoints]]
+ip = "82.148.231.162"
+"#,
+        )
+        .expect("config with both shapes parses");
+
+        let endpoints = config.endpoints.expect("endpoints from the new section");
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].port, Some(8443));
+        assert_eq!(endpoints[0].weight, 200);
+        assert_eq!(endpoints[0].label.as_deref(), Some("nl-01"));
+        assert_eq!(endpoints[1].weight, DEFAULT_NODE_WEIGHT);
+        // Mirror derived from the WINNING source, not from the stale keys.
+        assert_eq!(config.node_weights.as_ref().and_then(|w| w.get("82.148.231.161")), Some(&200));
+        assert!(!config.endpoints_legacy, "a node on [[node.endpoints]] is migrated");
+    }
+
+    #[test]
+    fn duplicate_endpoint_ip_is_an_error() {
+        let config = parse_node(
+            r#"
+[node]
+env = "dev"
+hostname = "node.local"
+default_interface = "eth0"
+address = "10.0.0.1"
+uuid = "11111111-2222-3333-4444-555555555555"
+label = "x"
+max_bandwidth_bps = 1
+country = "NL"
+type = "Common"
+
+[[node.endpoints]]
+ip = "10.0.0.1"
+
+[[node.endpoints]]
+ip = "10.0.0.1"
+"#,
+        );
+        let err = config.expect_err("duplicate ip must be rejected");
+        assert!(
+            format!("{err}").contains("duplicate endpoint ip"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn out_of_range_endpoint_port_is_an_error() {
+        for port in ["0", "70000"] {
+            let config = parse_node(&format!(
+                r#"
+[node]
+env = "dev"
+hostname = "node.local"
+default_interface = "eth0"
+address = "10.0.0.1"
+uuid = "11111111-2222-3333-4444-555555555555"
+label = "x"
+max_bandwidth_bps = 1
+country = "NL"
+type = "Common"
+
+[[node.endpoints]]
+ip = "10.0.0.1"
+port = {port}
+"#
+            ));
+            let err = config.expect_err("port out of range must be rejected");
+            assert!(format!("{err}").contains("out of range"), "{err}");
+        }
+    }
+
+    /// `weight <= 0` is "not set" (the same rule the legacy map uses), and the
+    /// primary endpoint must be the node address.
+    #[test]
+    fn endpoint_weight_defaults_and_primary_must_match_address() {
+        let config = parse_node(
+            r#"
+[node]
+env = "dev"
+hostname = "node.local"
+default_interface = "eth0"
+address = "10.0.0.1"
+uuid = "11111111-2222-3333-4444-555555555555"
+label = "x"
+max_bandwidth_bps = 1
+country = "NL"
+type = "Common"
+
+[[node.endpoints]]
+ip = "10.0.0.1"
+weight = 0
+"#,
+        );
+        assert_eq!(config.expect("valid config").endpoints.unwrap()[0].weight, DEFAULT_NODE_WEIGHT);
+
+        let config = parse_node(
+            r#"
+[node]
+env = "dev"
+hostname = "node.local"
+default_interface = "eth0"
+address = "10.0.0.1"
+uuid = "11111111-2222-3333-4444-555555555555"
+label = "x"
+max_bandwidth_bps = 1
+country = "NL"
+type = "Common"
+
+[[node.endpoints]]
+ip = "10.0.0.2"
+"#,
+        );
+        let err = config.expect_err("wrong primary must be rejected");
+        assert!(format!("{err}").contains("must equal the node address"), "{err}");
+    }
+
+    /// A single-address node with neither shape still gets one endpoint and is
+    /// NOT counted as legacy: there is nothing to migrate.
+    #[test]
+    fn single_address_node_is_not_legacy() {
+        let config = parse_node(
+            r#"
+[node]
+env = "dev"
+hostname = "node.local"
+default_interface = "eth0"
+address = "10.0.0.1"
+uuid = "11111111-2222-3333-4444-555555555555"
+label = "x"
+max_bandwidth_bps = 1
+country = "NL"
+type = "Common"
+"#,
+        );
+        let config = config.expect("valid config");
+        assert!(!config.endpoints_legacy);
+        assert!(config.node_ips.is_none());
+        let endpoints = config.endpoints.unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].ip, "10.0.0.1".parse::<Ipv4Addr>().unwrap());
     }
 }

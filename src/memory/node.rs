@@ -141,6 +141,60 @@ impl FromStr for Type {
     }
 }
 
+/// One entry point of a node — the single endpoint shape used by the node
+/// config (`[[node.endpoints]]`), the node→api announcement and the api's
+/// client payload.
+///
+/// Every field except `ip` is optional on the wire:
+/// `port` falls back to the inbound (protocol) port, `weight` to
+/// [`DEFAULT_NODE_WEIGHT`], `label` is for logs only. Old payloads without
+/// `endpoints` keep working: the api derives the list from the legacy
+/// `node_ips` + `node_weights` pair, which this struct mirrors.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Endpoint {
+    pub ip: Ipv4Addr,
+    /// Port this address listens on; `None` = the inbound's own port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Share of the traffic; `100` (the default) for a regular entry.
+    #[serde(default = "default_endpoint_weight")]
+    pub weight: i32,
+    /// Free-form name for logs/diagnostics; never parsed by a client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+fn default_endpoint_weight() -> i32 {
+    DEFAULT_NODE_WEIGHT
+}
+
+impl Endpoint {
+    /// Wire-shaped endpoint of the primary address, all defaults.
+    pub fn from_ip(ip: Ipv4Addr) -> Self {
+        Self {
+            ip,
+            port: None,
+            weight: DEFAULT_NODE_WEIGHT,
+            label: None,
+        }
+    }
+
+    /// Same endpoint with `port` filled in from the inbound when unset — the
+    /// form the api publishes, so a client never has to know protocol ports.
+    pub fn with_default_port(&self, default_port: u16) -> Self {
+        Self {
+            ip: self.ip,
+            port: Some(self.port.unwrap_or(default_port)),
+            weight: if self.weight > 0 {
+                self.weight
+            } else {
+                DEFAULT_NODE_WEIGHT
+            },
+            label: self.label.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeResponse {
     pub uuid: uuid::Uuid,
@@ -157,16 +211,31 @@ pub struct NodeResponse {
     pub country: String,
     pub r#type: Type,
     pub cluster: Option<String>,
+    /// Entry points in `[[node.endpoints]]` order, port resolved per protocol
+    /// where known. Absent for nodes that declare none (old node builds).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<Endpoint>,
+    /// `true` when the node still declares the legacy `node_ips`/`node_weights`
+    /// keys. Counted across the fleet to know when the legacy path can be
+    /// removed (`#deprecated` in `config/settings.rs`).
+    #[serde(default)]
+    pub endpoints_legacy: bool,
     /// Extra entry IPs of the node: node_ips[0] is the primary address
     /// (== `address`); absent = single-address node (current behavior).
     /// Skipped in serialization when absent so old consumers see the
     /// byte-for-byte old shape.
+    ///
+    /// TODO(remove-legacy-endpoints): legacy mirror of `endpoints`, kept until
+    /// every node reports `endpoints_legacy: false` and no old client reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_ips: Option<Vec<Ipv4Addr>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
     /// address from `node_ips`. Absent when every address uses the default (100).
+    ///
+    /// TODO(remove-legacy-endpoints): legacy mirror of `endpoints`, kept until
+    /// every node reports `endpoints_legacy: false` and no old client reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_weights: Option<BTreeMap<String, i32>>,
 }
@@ -205,8 +274,23 @@ pub struct Node {
     /// (== `address`); absent = single-address node (current behavior).
     /// Participates in the derived PartialEq so a changed IP set registers
     /// as a node update in storage (see NodeStorageOperations::add).
+    ///
+    /// TODO(remove-legacy-endpoints): legacy mirror of `endpoints`, kept until
+    /// every node reports `endpoints_legacy: false` and no old client reads it.
     #[serde(default)]
     pub node_ips: Option<Vec<Ipv4Addr>>,
+    /// Entry points in `[[node.endpoints]]` order — the single source of truth
+    /// for addresses, ports and weights. Empty for nodes whose registration
+    /// came from an old build (or from a database written before the column
+    /// existed); `node_ips`/`node_weights` are then the only source and are
+    /// mirrored here on the next registration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<Endpoint>,
+    /// `true` when the node still declares the legacy `node_ips`/`node_weights`
+    /// keys in its config. Migration progress counter: the legacy code paths
+    /// below stay until no node reports `true`.
+    #[serde(default)]
+    pub endpoints_legacy: bool,
     /// Optional pool/group name of the node (config.toml `[node] pool`, e.g.
     /// "Finland"). Clients group identically-named nodes and may show a
     /// localized title (`pool_translation`) instead of `label`. Absent for
@@ -246,6 +330,7 @@ pub struct Node {
 /// the traffic.
 pub const DEFAULT_NODE_WEIGHT: i32 = 100;
 
+#[allow(deprecated)]
 impl Node {
     /// Entry addresses in `node_ips` order, else `address` alone.
     pub fn entry_ips(&self) -> Vec<String> {
@@ -254,6 +339,41 @@ impl Node {
             .map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>())
             .filter(|ips: &Vec<String>| !ips.is_empty())
             .unwrap_or_else(|| vec![self.address.to_string()])
+    }
+
+    /// Endpoints exactly as the node declared them, or derived from the legacy
+    /// `node_ips`/`node_weights` pair — never empty.
+    ///
+    /// A node registered by an old build (or a row written before the
+    /// `nodes.endpoints` column existed) has no list, so the api would
+    /// otherwise publish `endpoints: []` next to a populated `node_ips`. This
+    /// keeps ONE shape on every level regardless of how the node declared
+    /// itself; `port: None` still means "the inbound's own port".
+    pub fn endpoint_list(&self) -> Vec<Endpoint> {
+        if !self.endpoints.is_empty() {
+            return self.endpoints.clone();
+        }
+        let ips: Vec<Ipv4Addr> = match &self.node_ips {
+            Some(ips) if !ips.is_empty() => ips.clone(),
+            _ => vec![self.address],
+        };
+        ips.into_iter()
+            .map(|ip| Endpoint {
+                ip,
+                port: None,
+                weight: self.weight_for(&ip.to_string()),
+                label: None,
+            })
+            .collect()
+    }
+
+    /// Entry points with the port resolved for a protocol's inbound — the form
+    /// the api publishes, so a client never has to know protocol ports.
+    pub fn endpoints_with_port(&self, default_port: u16) -> Vec<Endpoint> {
+        self.endpoint_list()
+            .iter()
+            .map(|endpoint| endpoint.with_default_port(default_port))
+            .collect()
     }
 
     /// Weight of one address: explicit, else `DEFAULT_NODE_WEIGHT`.
@@ -445,6 +565,8 @@ impl Node {
             r#type: settings.r#type,
             cluster: settings.cluster,
             node_ips: settings.node_ips,
+            endpoints: settings.endpoints.unwrap_or_default(),
+            endpoints_legacy: settings.endpoints_legacy,
             pool: settings.pool,
             pool_translation: settings.pool_translation,
             pool_country_code: settings.pool_country_code,
@@ -496,6 +618,10 @@ impl Node {
             country: self.country.clone(),
             r#type: self.r#type,
             cluster: self.cluster.clone(),
+            // Node view without a protocol: `port: null` means "the inbound's
+            // port", which is what the per-protocol client payloads resolve.
+            endpoints: self.endpoint_list(),
+            endpoints_legacy: self.endpoints_legacy,
             node_ips: self.node_ips.clone(),
             pool: self.pool.clone(),
             node_weights: if self.node_weights.is_empty() {
@@ -565,6 +691,8 @@ mod tests {
             r#type: Type::Node,
             cluster: Some("test-cluster.example.com".to_string()),
             node_ips: None,
+            endpoints: Vec::new(),
+            endpoints_legacy: false,
             pool: None,
             pool_translation: None,
             pool_country_code: None,
@@ -575,11 +703,90 @@ mod tests {
 
         let response = node.as_node_response();
         assert_eq!(response.inbounds.len(), 1);
+        // The node view carries the ONE endpoint shape too: here it is derived
+        // from `address` because the node declares no list.
+        assert_eq!(response.endpoints.len(), 1);
+        assert_eq!(response.endpoints[0].ip, "192.168.1.100".parse::<Ipv4Addr>().unwrap());
+        assert!(!response.endpoints_legacy);
         assert_eq!(response.inbounds[0].tag, Tag::VlessTcpReality);
         assert_eq!(response.inbounds[0].port, 443);
         assert_eq!(
             response.cluster,
             Some("test-cluster.example.com".to_string())
         );
+    }
+
+    fn node_with_endpoints(endpoints: Vec<Endpoint>) -> Node {
+        Node {
+            uuid: uuid::Uuid::nil(),
+            env: Env::Experimental,
+            hostname: "node".to_string(),
+            address: "192.0.2.1".parse().unwrap(),
+            status: Status::Online,
+            label: "Node".to_string(),
+            interface: "eth0".to_string(),
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            inbounds: HashMap::new(),
+            cores: 1,
+            max_bandwidth_bps: 1,
+            country: "NL".to_string(),
+            r#type: Type::Node,
+            cluster: None,
+            node_ips: None,
+            endpoints,
+            endpoints_legacy: false,
+            pool: None,
+            pool_translation: None,
+            pool_country_code: None,
+            pool_country_name: None,
+            node_weights: BTreeMap::new(),
+            bench_url: None,
+        }
+    }
+
+    /// A declared port wins over the inbound's; an entry without one takes the
+    /// inbound port, so a client never sees a portless endpoint.
+    #[test]
+    fn endpoints_with_port_resolves_the_inbound_fallback() {
+        let node = node_with_endpoints(vec![
+            Endpoint {
+                ip: "192.0.2.1".parse().unwrap(),
+                port: Some(8443),
+                weight: 200,
+                label: None,
+            },
+            Endpoint {
+                ip: "192.0.2.2".parse().unwrap(),
+                port: None,
+                weight: 50,
+                label: None,
+            },
+        ]);
+        let endpoints = node.endpoints_with_port(51820);
+        assert_eq!(endpoints[0].port, Some(8443));
+        assert_eq!(endpoints[0].weight, 200);
+        assert_eq!(endpoints[1].port, Some(51820));
+        assert_eq!(endpoints[1].weight, 50);
+    }
+
+    /// A node with no declared list (old build, or a row written before the
+    /// column existed) expands the legacy pair into the same shape.
+    #[test]
+    fn legacy_node_expands_into_the_same_endpoint_shape() {
+        let mut node = node_with_endpoints(Vec::new());
+        node.node_ips = Some(vec![
+            "192.0.2.1".parse().unwrap(),
+            "192.0.2.2".parse().unwrap(),
+        ]);
+        node.node_weights = BTreeMap::from([("192.0.2.2".to_string(), 25)]);
+        node.endpoints_legacy = true;
+
+        let endpoints = node.endpoints_with_port(443);
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].ip, "192.0.2.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(endpoints[0].port, Some(443));
+        assert_eq!(endpoints[0].weight, DEFAULT_NODE_WEIGHT);
+        assert_eq!(endpoints[1].weight, 25);
     }
 }

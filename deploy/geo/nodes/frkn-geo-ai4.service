@@ -1,0 +1,18 @@
+[Unit]
+Description=FRKN EU pool: apply the verified AI IPv4 zone to nft set inet frkn_geo ai4
+Documentation=https://github.com/frkn-dev/fcore/blob/main/docs/router-geo.md
+After=network-online.target frkn-msk-route.service
+Wants=network-online.target
+# The set lives in the table that frkn-msk-route.sh creates; applying before
+# it exists would just create a stray set.
+Requires=frkn-msk-route.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/frkn-geo-ai4-refresh.sh
+# Writes /etc/frkn/geo (zone + ETag) and the netlink socket only.
+ProtectSystem=strict
+ReadWritePaths=/etc/frkn/geo
+PrivateTmp=true
+NoNewPrivileges=true
+TimeoutStartSec=180

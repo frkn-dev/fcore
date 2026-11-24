@@ -533,8 +533,19 @@ fn parse_rich_report(
     sub_id: Option<uuid::Uuid>,
     ip: IpAddr,
 ) -> Result<RichParsed, String> {
+    // Current clients ship the whole rich payload under `report`
+    // (`{auth_data, report_id, report:{targets, attempts, tunnel, …}}`), while the
+    // first generation sent those fields at the top level. Read from whichever
+    // object carries them, otherwise every new-client report was "empty_report".
+    let rich = body
+        .get("report")
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or_else(|| body.clone());
+
     let support_tag = body
         .get("support_tag")
+        .or_else(|| rich.get("support_tag"))
         .and_then(|v| v.as_str())
         .and_then(|v| trimmed(v, 64));
     let at_raw = body.get("at").and_then(|v| v.as_str());
@@ -557,17 +568,23 @@ fn parse_rich_report(
             uuid::Uuid::parse_str(raw.trim()).map_err(|_| "invalid_report_id".to_string())
         })?;
 
-    let targets: Vec<TargetEntry> = body
+    let targets: Vec<TargetEntry> = rich
         .get("targets")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let attempts: Vec<AttemptEntry> = body
+    let attempts: Vec<AttemptEntry> = rich
         .get("attempts")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let has_target = body.get("target").map(|v| !v.is_null()).unwrap_or(false);
+    let has_target = rich.get("target").map(|v| !v.is_null()).unwrap_or(false);
 
-    if targets.is_empty() && !has_target && attempts.is_empty() {
+    // «Отчёт без туннеля» — это снимок устройства/сети без targets и attempts:
+    // он полезен сам по себе (MTU, DNS, платформа), поэтому пустым считается
+    // только действительно пустой конверт.
+    let has_context = ["config", "mtu", "network", "session", "device", "tunnel"]
+        .iter()
+        .any(|key| rich.get(*key).map(|v| !v.is_null()).unwrap_or(false));
+    if targets.is_empty() && !has_target && attempts.is_empty() && !has_context {
         return Err("empty_report".to_string());
     }
 
@@ -579,13 +596,13 @@ fn parse_rich_report(
         app_version: app_version.clone(),
         platform: platform.clone(),
         os: os.clone(),
-        app: body.get("app").cloned().unwrap_or(Value::Null),
-        config: body.get("config").cloned().unwrap_or(Value::Null),
-        mtu: body.get("mtu").cloned().unwrap_or(Value::Null),
-        tunnel: body.get("tunnel").cloned().unwrap_or(Value::Null),
-        network: body.get("network").cloned().unwrap_or(Value::Null),
-        session: body.get("session").cloned().unwrap_or(Value::Null),
-        device: body.get("device").cloned().unwrap_or(Value::Null),
+        app: rich.get("app").or_else(|| body.get("app")).cloned().unwrap_or(Value::Null),
+        config: rich.get("config").cloned().unwrap_or(Value::Null),
+        mtu: rich.get("mtu").cloned().unwrap_or(Value::Null),
+        tunnel: rich.get("tunnel").cloned().unwrap_or(Value::Null),
+        network: rich.get("network").cloned().unwrap_or(Value::Null),
+        session: rich.get("session").cloned().unwrap_or(Value::Null),
+        device: rich.get("device").cloned().unwrap_or(Value::Null),
         payload: body.clone(),
         country_code: None,
         asn: geo.asn.map(|v| v as i32),
@@ -632,11 +649,11 @@ fn parse_rich_report(
             target_country: None,
             error: Value::Null,
             note: None,
-            app: body.get("app").cloned().unwrap_or(Value::Null),
-            device: body.get("device").cloned().unwrap_or(Value::Null),
-            network: body.get("network").cloned().unwrap_or(Value::Null),
+            app: rich.get("app").or_else(|| body.get("app")).cloned().unwrap_or(Value::Null),
+            device: rich.get("device").cloned().unwrap_or(Value::Null),
+            network: rich.get("network").cloned().unwrap_or(Value::Null),
             probe,
-            session: body.get("session").cloned().unwrap_or(Value::Null),
+            session: rich.get("session").cloned().unwrap_or(Value::Null),
             country_code: None,
             asn: geo.asn.map(|v| v as i32),
             client_country: geo.country.clone(),
@@ -1831,6 +1848,47 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Clients from 4.8.14.1xx send the rich payload under `report`; the first
+    /// generation put those fields at the top level. Both must parse, and a
+    /// "no tunnel" snapshot (no targets/attempts) must not read as empty.
+    #[test]
+    fn rich_report_accepts_nested_and_toplevel_payloads() {
+        let sub: uuid::Uuid = "f76c2814-f9ed-4a40-a231-d34ec51f7584".parse().unwrap();
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let rid = "11111111-2222-3333-4444-555555555555";
+
+        let nested = serde_json::json!({
+            "auth_data": {"id": sub.to_string()},
+            "report_id": rid,
+            "report": {"app": {"version": "4.8.14.162"}, "mtu": {"override": 0},
+                       "network": {"dns": "1.1.1.1"}}
+        });
+        assert!(parse_rich_report(&nested, Some(sub), ip).is_ok(), "nested no-tunnel report");
+
+        let nested_targets = serde_json::json!({
+            "auth_data": {"id": sub.to_string()},
+            "report_id": rid,
+            "report": {"targets": [{"host": "1.2.3.4", "port": 443, "protocol": "awg"}]}
+        });
+        assert!(parse_rich_report(&nested_targets, Some(sub), ip).is_ok(), "nested targets");
+
+        let flat = serde_json::json!({
+            "auth_data": {"id": sub.to_string()},
+            "report_id": rid,
+            "targets": [{"host": "1.2.3.4", "port": 443, "protocol": "awg"}]
+        });
+        assert!(parse_rich_report(&flat, Some(sub), ip).is_ok(), "legacy flat report");
+
+        let empty = serde_json::json!({
+            "auth_data": {"id": sub.to_string()},
+            "report_id": rid,
+            "report": {}
+        });
+        assert_eq!(parse_rich_report(&empty, Some(sub), ip).err().as_deref(), Some("empty_report"));
+    }
+
     use super::*;
 
     /// Отчёт про пул приходит как ОДИН target + probe.handshake с адресами.

@@ -246,6 +246,19 @@ where
                     service.reap_stale_devices(interval).await;
                 }
             });
+
+            // Peer addresses are a lease: a tunnel that stopped carrying
+            // traffic, or whose subscription/grant is gone, is revoked and
+            // the node told to drop it. Batched, and the batch size is fixed
+            // in the task.
+            spawn_task("reap_idle_peers", {
+                let interval = self.settings.tasks.peer_reap_interval_sec;
+                let service = Arc::clone(&self);
+
+                async move {
+                    service.reap_idle_peers(interval).await;
+                }
+            });
         }
 
         spawn_task("enforce_traffic_limits", {

@@ -188,6 +188,8 @@ mod tests {
             r#type: NodeType::Node,
             cluster: None,
             node_ips: None,
+            endpoints: Vec::new(),
+            endpoints_legacy: false,
             pool: None,
             pool_translation: None,
             pool_country_code: None,

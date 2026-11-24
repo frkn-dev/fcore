@@ -1,0 +1,15 @@
+[Unit]
+Description=Hourly refresh of the FRKN AI IPv4 zone (verified IPs of AI-service domains)
+
+[Timer]
+# AI services rotate CDN IPs continuously and an hour-old answer is usually
+# still good; hourly keeps the set fresh without hammering anyone. The jitter
+# spreads the 48 x 2 DNS queries and the TLS probes off the top of the hour.
+OnCalendar=hourly
+RandomizedDelaySec=5m
+# A host that was down at the top of the hour catches up on the next boot.
+Persistent=true
+Unit=frkn-geo-ai-update.service
+
+[Install]
+WantedBy=timers.target

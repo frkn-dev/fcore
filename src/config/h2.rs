@@ -59,9 +59,19 @@ pub struct AuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HysteriaSalamander {
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HysteriaObfs {
     pub r#type: Option<String>,
+    /// Flat form (`obfs: { type, password }`), used by hysteria2 when the
+    /// obfuscator takes no nested options. Salamander's nested form is
+    /// `obfs: { type: salamander, salamander: { password } }` — see below.
     pub password: Option<String>,
+    #[serde(default)]
+    pub salamander: Option<HysteriaSalamander>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,8 +162,19 @@ impl TryFrom<Hysteria2Settings> for H2Settings {
         });
 
         let obfs = server.obfs.map(|o| H2Obfs {
-            r#type: o.r#type.unwrap_or_default(),
-            password: o.password.unwrap_or_default(),
+            // Salamander declares its PSK in a nested block; the flat `password`
+            // is what other obfuscators use. Normalise both into one shape so
+            // the card can carry `{type, password}` regardless of the file style.
+            password: o
+                .password
+                .clone()
+                .or_else(|| o.salamander.as_ref().and_then(|s| s.password.clone()))
+                .unwrap_or_default(),
+            r#type: o
+                .r#type
+                .clone()
+                .or_else(|| o.salamander.as_ref().map(|_| "salamander".to_string()))
+                .unwrap_or_default(),
         });
 
         Ok(H2Settings {
@@ -167,5 +188,82 @@ impl TryFrom<Hysteria2Settings> for H2Settings {
             down_mbps: None,
             auth_info,
         })
+    }
+}
+
+#[cfg(test)]
+mod obfs_tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> H2Settings {
+        let cfg: Hysteria2Settings = serde_yaml::from_str(yaml).expect("yaml");
+        H2Settings::try_from(cfg).expect("settings")
+    }
+
+    /// Salamander keeps its PSK in a nested block: the file style hysteria2
+    /// itself expects. The card must still see `{type: salamander, password}`.
+    #[test]
+    fn nested_salamander_password_reaches_the_announced_inbound() {
+        let h2 = parse(
+            r#"
+host: prem-0001.beacon.frkn.org
+listen: :8443
+tls:
+  cert: /opt/hysteria/certs/fullchain.pem
+  key: /opt/hysteria/certs/privkey.pem
+auth:
+  type: http
+  http:
+    url: https://api.frkn.org/auth
+obfs:
+  type: salamander
+  salamander:
+    password: psk-from-nested-block
+"#,
+        );
+        let obfs = h2.obfs.expect("obfs announced");
+        assert_eq!(obfs.r#type, "salamander");
+        assert_eq!(obfs.password, "psk-from-nested-block");
+    }
+
+    /// The flat form stays supported (no obfuscator without nested options
+    /// regressed).
+    #[test]
+    fn flat_password_is_still_read() {
+        let h2 = parse(
+            r#"
+host: h2.example
+listen: :443
+tls:
+  cert: /c.pem
+  key: /k.pem
+auth:
+  type: password
+  password: secret
+obfs:
+  type: salamander
+  password: flat-psk
+"#,
+        );
+        let obfs = h2.obfs.expect("obfs announced");
+        assert_eq!(obfs.password, "flat-psk");
+        assert_eq!(obfs.r#type, "salamander");
+    }
+
+    #[test]
+    fn absent_obfs_stays_absent() {
+        let h2 = parse(
+            r#"
+host: h2.example
+listen: :443
+tls:
+  cert: /c.pem
+  key: /k.pem
+auth:
+  type: password
+  password: secret
+"#,
+        );
+        assert!(h2.obfs.is_none());
     }
 }

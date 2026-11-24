@@ -41,8 +41,9 @@ pub use config::{
     inbound::{Inbound, InboundConnLink, Network, Settings as XraySettings},
     mtproto::MtprotoSettings,
     settings::{
-        normalize_bench_url, normalize_pool_country, normalize_pool_country_name, ApiAccessConfig,
-        MetricsTxConfig, NodeConfig, NodeConfigRaw, Settings,
+        normalize_bench_url, normalize_pool_country, normalize_pool_country_name,
+        validate_endpoint_list, ApiAccessConfig, MetricsTxConfig, NodeConfig, NodeConfigRaw,
+        NodeEndpointRaw, Settings,
     },
     wireguard::{WireguardServerConfig, WireguardSettings},
 };
@@ -63,11 +64,14 @@ pub use memory::{
     env::Env,
     key::{Code, Distributor, Key, KeyKind},
     node::{
-        InboundStat, Node, NodeMetricInfo, NodeResponse, Status as NodeStatus, Type as NodeType,
-        DEFAULT_NODE_WEIGHT,
+        Endpoint, InboundStat, Node, NodeMetricInfo, NodeResponse, Status as NodeStatus,
+        Type as NodeType, DEFAULT_NODE_WEIGHT,
     },
     product::Product,
-    snapshot::{PeerMirror, SnapshotIdentity, SnapshotManager, SnapshotMeta, SnapshotPeer},
+    snapshot::{
+        mirror_from_peers, PeerIdentity, PeerMirror, SnapshotIdentity, SnapshotManager,
+        SnapshotMeta, SnapshotPeer,
+    },
     stat::{Kind as StatKind, StatType},
     storage::{
         connection::ApiOp as ConnectionStorageApiOperations,
@@ -77,7 +81,7 @@ pub use memory::{
     },
     subscription::{
         Operations as SubscriptionOperations, PlanKind, SelfhostedLimits, Subscription,
-        Subscriptions, DEFAULT_SERVER_LIMIT, DEFAULT_USER_LIMIT,
+        Subscriptions, DEFAULT_OWN_NODES_LIMIT, DEFAULT_SERVER_LIMIT, DEFAULT_USER_LIMIT,
     },
     tag::ProtoTag as Tag,
 };

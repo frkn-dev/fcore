@@ -77,6 +77,46 @@ impl WgApi {
         Ok(())
     }
 
+    /// Allowed IPs of one peer; empty when the interface does not hold it.
+    ///
+    /// The peers plane programs several addresses per public key (one per
+    /// pool), so callers compare sets instead of asking "does it exist".
+    pub fn allowed_ips(&self, pubkey: &str) -> Result<Vec<IpAddrMask>> {
+        let data = self.client.read_interface_data()?;
+        let key = Self::decode_pubkey(pubkey)?;
+        let Some(peer) = data.peers.get(&key) else {
+            return Ok(Vec::new());
+        };
+        Ok(peer
+            .allowed_ips
+            .iter()
+            .map(|ip| IpAddrMask {
+                address: ip.address,
+                cidr: ip.cidr,
+            })
+            .collect())
+    }
+
+    /// Replace the allowed IPs of a peer, creating it when missing.
+    ///
+    /// defguard installs `allowed_ips` as the peer's whole list
+    /// (`WGPEER_F_REPLACE_ALLOWEDIPS`), which is what removes one pool's
+    /// address while the key itself stays.
+    pub fn configure_ips(&self, pubkey: &str, ips: &[IpAddrMask]) -> Result<()> {
+        let key = Self::decode_pubkey(pubkey)?;
+        let mut peer = Peer::new(key);
+        peer.set_allowed_ips(
+            ips.iter()
+                .map(|ip| defguard_wireguard_rs::net::IpAddrMask {
+                    address: ip.address,
+                    cidr: ip.cidr,
+                })
+                .collect(),
+        );
+        self.client.configure_peer(&peer)?;
+        Ok(())
+    }
+
     pub fn last_ip(&self) -> Result<Ipv4Addr> {
         let data = self.client.read_interface_data()?;
 

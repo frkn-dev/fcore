@@ -27,7 +27,8 @@
 | **Service token** | Управление подписками, нодами, ключами, подключениями | `Authorization: Bearer <settings.service.token>` |
 | **Admin token** | Admin API и страница `/admin` | `Authorization: Bearer <settings.service.admin_token>` (API) или `?token=<admin_token>` (страница) |
 | **Premium token** | Premium panel | `Authorization: Bearer <subscription.premium_token>` |
-| **Без auth** | Публичные endpoint'ы: `/healthcheck`, `/sub`, `/subscription/*`, `/status`, `/clusters/*`, `/info/connections/*`, `/key/validate`, `/key/activate`, `/trial`, `/router/geo/*`, `/v1/*` | — |
+| **Без auth** | Публичные endpoint'ы: `/healthcheck`, `/sub`, `/subscription/*`, `/status`, `/clusters/*`, `/info/connections/*`, `/key/validate`, `/key/activate`, `/trial`, `/v1/*` | — |
+| **Без auth (nginx)** | `/router/geo/*` отдаёт nginx перед api из файлов зон; в бинаре api этого маршрута нет | — |
 
 ---
 
@@ -100,6 +101,10 @@ VMess и Hysteria2). WG-семейство и `mtproto` в подписках н
     "monthly_downlink": 0,
     "monthly_uplink": 0,
     "limit_bytes": 10737418240,
+    "is_child": false,
+    "parent_id": null,
+    "plane": "v1",
+    "v2_since": null,
     "env_traffic": [
       {
         "env": "production",
@@ -113,6 +118,28 @@ VMess и Hysteria2). WG-семейство и `mtproto` в подписках н
     ]
   }
   ```
+
+- `is_child` — подписка создана владельцем selfhosted-аккаунта (пользователь,
+  `parent_id != null`). Такой аккаунт **не может** держать своих нод:
+  `/private/install-token` отвечает ему 403. Кабинет по этому полю показывает бейдж
+  «Пользователь» и не рисует selfhosted-блоки. `parent_id` — только id владельца,
+  никаких других его данных в ответе нет. Старые сборки api поля не отдают —
+  сайт обязан трактовать отсутствие как `false`.
+
+- `own_nodes_limit` — сколько своих нод аккаунт может зарегистрировать (0 — нельзя).
+  Своя нода — возможность **любого** аккаунта, а не тариф: `plan_kind` в гейте
+  `/private/install-token` не участвует, решают только `parent_id`, этот лимит и
+  ёмкости (ноды/живые токены). Новые подписки получают квоту из
+  `[service.private] default_own_nodes_limit` (по умолчанию 3), старые строки не
+  пересчитываются. Кабинет показывает блок «своя нода» при `> 0`, независимо от
+  `plan_kind`. Старые сборки api поля не отдают — трактовать отсутствие как `0`.
+
+- `plane` — плоскость подписки: `v1` (только per-protocol `connections`),
+  `v2` (только shard-`peers`) или `dual` (есть и то, и другое). Свежая подписка
+  начинает с `v1`; первый живой peer переводит её в `v2`, а при живой v1-connection
+  — в `dual`. `v2_since` — момент этого перехода, `null` для чистой `v1`. Поля
+  пишет миграция `0030` (backfill по существующим данным) и создание peer;
+  старые сборки api их не отдают — трактовать отсутствие как `v1` / `null`.
 
 ### `GET /subscription/{id}/traffic`
 
@@ -140,6 +167,159 @@ VMess и Hysteria2). WG-семейство и `mtproto` в подписках н
     ]
   }
   ```
+
+### Два тарифа на одной подписке (`plans[]`)
+
+Тарифы продаются отдельно и живут в отдельных шардах: `standard` (срок,
+трафик не режется) и `lite` — в витрине «Super Duper» (пакет трафика, без
+срока). Права хранятся **грантами** (`subscription_access`), по одному на
+план, поэтому у одной подписки может быть и тот, и другой: у каждого свой
+срок и своя квота.
+
+`GET /subscription/{id}` и `GET /cabinet/{id}` отдают список `plans`. В нём
+всегда оба продаваемых плана — этого достаточно, чтобы нарисовать «Standard
+активен» и кнопку «Докупить Super Duper», не зная, какие ещё планы бывают.
+План, которого нет у подписки, приходит с `active: false`.
+
+```json
+"plans": [
+  {
+    "plan": "standard",
+    "title": "Standard",
+    "active": true,
+    "expires_at": "2027-01-19T12:00:00Z",
+    "traffic_used": 3221225472,
+    "traffic_limit": null,
+    "purchasable": true
+  },
+  {
+    "plan": "lite",
+    "title": "Super Duper",
+    "active": false,
+    "expires_at": null,
+    "traffic_used": 0,
+    "traffic_limit": null,
+    "purchasable": false
+  }
+]
+```
+
+- `active` — живой грант этого плана: его собственный срок не вышел и его
+  квота не выбрана. `expires_at`/`traffic_used`/`traffic_limit` — тоже только
+  про этот план; `traffic_limit: null` у `standard` — «без лимита».
+- `purchasable: false` — купить сейчас нельзя: ни один шард не объявлен под
+  этот план (`plan_not_configured`), либо объявлен, но у него нет живой ноды
+  или адресного блока (`no_live_shard`). Это состояние кнопки, а не ошибка.
+- Подписка без грантов (легаси) показывает план из собственной строки
+  подписки: `plan_kind` + `limit_bytes` + срок, чтобы платный v1-юзер не
+  выглядел как «ничего не куплено».
+- План гранта, которого нет среди продаваемых (например `gaming`), тоже
+  попадает в список — выданное вручную не должно исчезать из кабинета.
+
+### `POST /subscription/{id}/buy`
+
+Начало покупки второго (или первого) плана из ЛК: «Докупить обычный» /
+«Докупить Super Duper». Ключ при такой покупке не выдаётся — оплата сразу
+покупает грант.
+
+- **Auth:** нет; идентификатор подписки — это capability из пути (как
+  `GET /cabinet/{id}`). Тело не может назвать другую подписку или цену.
+- **Body:**
+  ```json
+  { "plan": "lite" }
+  ```
+  `plan` — `standard` или `lite`; `super-duper` принимается как alias.
+- **Response:** `200 OK`
+  ```json
+  {
+    "status": 200,
+    "message": "plan available",
+    "response": {
+      "subscription_id": "uuid",
+      "plan": "lite",
+      "title": "Super Duper",
+      "active": false,
+      "expires_at": null,
+      "traffic_limit": null,
+      "payment": {
+        "method": "POST",
+        "routes": {
+          "platega": "/payment/platega/subscription/create",
+          "planta": "/payment/planta/subscription/create"
+        },
+        "body": { "subscription_id": "uuid", "plan": "lite" }
+      }
+    }
+  }
+  ```
+  Цены здесь нет и быть не может: она живёт в `[[app.plans]]` платёжного
+  шлюза. Api отвечает на два вопроса, которые ЛК не должен угадывать, —
+  **можно ли продать этот план сейчас** и **какой запрос в шлюз послать**.
+- **Ошибки:** `400 unknown_plan`; `404 subscription_not_found`;
+  `503 plan_not_configured` — под план не объявлен ни один шард (никуда не
+  сажаем, в частности не подменяем стандартным шардом); `503 no_live_shard` —
+  шард объявлен, но живой ноды/адресов нет.
+
+### `POST /subscription/{id}/plan`
+
+Исполнение оплаченной покупки плана — её зовёт payment-gw после успешного
+платежа. Создаёт грант плана или продлевает существующий.
+
+- **Auth:** service token (как у остальных внутренних ручек).
+- **Body:**
+  ```json
+  {
+    "plan": "lite",
+    "days": 0,
+    "traffic_bytes": 107374182400,
+    "payment_ref": "platega-transaction-uuid",
+    "source": "payment",
+    "protos": ["amnezia_peer", "wireguard_peer"]
+  }
+  ```
+  - `plan` — `standard` | `lite` (`super-duper` — alias).
+  - `days` — купленный срок; для `standard` обязателен.
+  - `traffic_bytes` (или `traffic_gib`) — купленный объём; для `lite`
+    **прибавляется** к квоте гранта (второй пакет — это топ-ап, не сброс).
+  - `payment_ref` — **обязателен**, это ключ идемпотентности (id транзакции
+    шлюза; принимаются также `trace_id`/`transaction_id`).
+  - `source`, `protos` — опционально: метка в `sources` (по умолчанию
+    `payment`) и теги гранта (по умолчанию оба peer-протокола).
+- **Что пишется:** грант на шарде плана (`env_capacity.plan`), `plan`,
+  `expires_at` = «остаток срока + `days`» (просроченный стартует с сегодня),
+  `traffic_limit` = прежняя квота + `traffic_bytes`. Ссылка на платёж
+  сохраняется в `sources` как `pay:<payment_ref>`; в ответах ЛК она не
+  показывается.
+- **Идемпотентность:** повторный вебхук с тем же `payment_ref` отвечает
+  `200` с `"duplicate": true` и ничего не меняет (проверка и запись идут в
+  одной транзакции под advisory-lock по ссылке).
+- **Response:** `200 OK`
+  ```json
+  {
+    "status": 200,
+    "message": "plan purchase fulfilled",
+    "response": {
+      "subscription_id": "uuid",
+      "plan": "lite",
+      "title": "Super Duper",
+      "duplicate": false,
+      "grant": {
+        "plan": "lite",
+        "plan_title": "Super Duper",
+        "protos": ["amnezia_peer", "wireguard_peer"],
+        "sources": ["payment"],
+        "expires_at": null,
+        "traffic_limit": 107374182400,
+        "used_bytes": 0
+      },
+      "capacity": { "plan": "lite", "used": 1, "limit": 5000, "overflow": false }
+    }
+  }
+  ```
+- **Ошибки:** `400 unknown_plan | payment_ref_required | empty_purchase |
+  days_required | bad_days | bad_traffic | unknown_proto`; `404
+  subscription_not_found`; `503 plan_not_configured | no_live_shard` (грант не
+  пишется, деньги не превращаются в права, которые никто не обслуживает).
 
 ### `POST /subscription`
 
@@ -439,13 +619,49 @@ VMess и Hysteria2). WG-семейство и `mtproto` в подписках н
 подписки, списания ключа и создания подключений. Если для env тарифа не задан
 протокол (`env_proto_templates`), активация отвечает `500`, ключ не расходуется.
 
+**Второй тариф — грант на той же подписке, а не вторая подписка.** Ключ
+кладётся на уже существующую подписку, если её можно опознать: в теле передан
+`subscription_id`, либо сам ключ выпущен под подписку (`keys.subscription_id`,
+так платёжка привязывает ключ к известному покупателю). В обоих случаях план
+ключа добавляется как **ещё один грант** этой подписки (`subscription_access`
+по одному на план, со своим сроком и своей квотой), а новая подписка не
+создаётся. Если опознать пользователя нечем — поведение прежнее, создаётся
+новая подписка. В ответе `POST /v1/activate` поле `merged: true` говорит
+клиенту, что план добавлен к существующей подписке.
+
+Ключ `lite` («Super Duper») сажается только на шард плана `lite`: если под
+этот план не объявлен ни один шард — `503 plan_not_configured`, если объявлен,
+но без живой ноды/адресов — `503 no_live_shard`. Ключ при этом не расходуется,
+и на стандартный шард такой пользователь не попадает. Ключ `lite` на
+подписке, у которой грант этого плана уже есть, — это **топ-ап**: купленный
+объём прибавляется к квоте, а не заменяет её.
+
 ---
 
-## Гео-листы роутера
+## Гео-листы роутера и нод
 
-Публичные plain-text ручки для OpenWrt-прошивки: свежий список российских
-IPv4-подсетей (ipdeny `ru-aggregated.zone`), который обновляется раз в сутки.
-Подробности — [`docs/router-geo.md`](router-geo.md).
+Публичные plain-text ручки, из которых потребители берут списки IPv4.
+**Отдаёт их nginx с хоста api, не бинарь api** (njs-обработчик
+`/etc/nginx/frkn-geo.js`, файлы из `/var/lib/frkn/geo`); в api маршрута
+`/router/geo/*` больше нет — прямой запрос в api отвечает `405`, как на любой
+неизвестный GET-путь (`/foobar`), и зону не отдаёт:
+`ru.zone` — свежий список российских подсетей (ipdeny `ru-aggregated.zone`,
+раз в сутки), `ai4.zone` — IP-адреса AI-сервисов, каждый проверен TLS/SNI перед
+публикацией (раз в час), `aicn4.zone` — то же для китайских AI, но это
+**direct whitelist**: ноды не маркируют такие адреса, и они выходят с IP самой
+ноды, `exch4.zone` — то же для китайских криптобирж (ноды
+маркируют их в RU-выход), `adult4.zone` — то же для взрослых платформ и их
+CDN (второй **direct whitelist**: ноды не маркируют такие адреса, и они всегда
+выходят с IP NL-входа, никогда через RU/US/KZ), `gov4.zone` — проверенные адреса
+российских государственных сайтов (свой одноцелевой выход, `mark 0x7` → таблица
+700 → msk-tw, fail-closed). Подробности —
+[`docs/router-geo.md`](router-geo.md).
+Отдаются только зоны из whitelist в nginx-сниппете
+`/etc/nginx/snippets/frkn-geo.conf` (`ru.zone`, `ai4.zone`, `aicn4.zone`,
+`exch4.zone`, `youtube4.zone`, `gov4.zone`, `adult4.zone`); отдачу делает
+nginx, не api — **новой зоне релиз api не нужен**, см.
+[`docs/router-geo.md`](router-geo.md) § «Зоны отдаёт nginx». Неизвестное имя —
+`404`, файл по нему не читается.
 
 ### `GET /router/geo/ru.zone` (+ `HEAD`)
 
@@ -456,12 +672,72 @@ IPv4-подсетей (ipdeny `ru-aggregated.zone`), который обновл
 - **`If-None-Match`** с текущим ETag → `304 Not Modified` без тела
 - `404` — файл ещё не опубликован, `503` — файл не прошёл валидацию (обрезанный
   список не отдаётся никогда)
-- Файл: `[service] geo_dir` (по умолчанию `/var/lib/frkn/geo/ru.zone`)
+- Файл: `/var/lib/frkn/geo/ru.zone` (константа `GEO_DIR` в
+  `/etc/nginx/frkn-geo.js`)
 
 ### `GET /router/geo/ru.zone.sha256` (+ `HEAD`)
 
 - **Ответ:** `200 OK`, `text/plain; charset=utf-8`, тело `<sha256>  ru.zone\n`
   (формат `sha256sum`), те же кэш-заголовки и `If-None-Match` → `304`
+
+### `GET /router/geo/<zone>.count` (+ `HEAD`)
+
+- **Ответ:** `200 OK`, `text/plain; charset=utf-8`, тело — число CIDR в
+  валидированной генерации, одной строкой (`180\n`)
+- **Заголовки/семантика:** тот же сильный `ETag` (`sha256:…`) и `Last-Modified`,
+  что у самой зоны, `304` по `If-None-Match`, `503` если файл не прошёл
+  проверку формы/порога (счётчик невалидного списка не отдаётся)
+- **Зачем:** однострочная сверка «на ноде применено столько же, сколько
+  опубликовано» без скачивания списка:
+  `nft list set inet frkn_geo exch4 | wc -l` против
+  `curl -s .../exch4.zone.count`. Ноды считают элементы сами, эндпойнт —
+  для оператора и мониторинга
+
+### `GET /router/geo/ai4.zone` и `/router/geo/ai4.zone.sha256`
+
+Точно те же заголовки, коды и `304`-семантика, что у `ru.zone`, только список —
+проверенные `/32` AI-сервисов (Anthropic, OpenAI, Google Gemini, xAI, Mistral,
+Perplexity, Copilot; источник — `domains/ai.txt` в `env`). Порог валидации у
+зоны свой (8 строк): размер генерации защищает публикатор (порог 60 % от
+предыдущей + TLS-проверка каждого IP), а не отдача.
+
+### `GET /router/geo/aicn4.zone` и `/router/geo/aicn4.zone.sha256`
+
+Тот же контракт (заголовки, `ETag`, `304`, `HEAD`, свой порог 8 строк), список —
+проверенные `/32` китайских AI (DeepSeek, Qwen, Moonshot/Kimi, Zhipu/GLM,
+MiniMax, Volcengine/Doubao; источник — `domains/ai-cn.txt` в `env`).
+Использование обратное `ai4`: ноды ставят `ip daddr @aicn4 return` **выше всех
+марок**, поэтому трафик выходит с IP самой ноды и никогда не уходит в exit-группу
+(`router-geo.md`, «Маршрутизация: группы `ai` и `ai-cn`»).
+
+### `GET /router/geo/adult4.zone` и `/router/geo/adult4.zone.sha256`
+
+Тот же контракт (заголовки, `ETag`, `304`, `HEAD`, свой порог 8 строк), список —
+проверенные `/32` взрослых платформ (Pornhub, XVideos, XNXX, xHamster, Redtube,
+Youporn, Spankbang, …) и их image/media CDN; источник — `domains/adult.txt` в
+`env`. Использование — как у `aicn4`: ноды ставят `ip daddr @adult4 return`
+**вторым, сразу после `@aicn4` и выше всех марок**, поэтому такие адреса всегда
+выходят с IP NL-входа ноды и никогда через RU/US/KZ (`router-geo.md`,
+«Маршрутизация: группа `adult`»).
+
+### `GET /router/geo/exch4.zone` и `/router/geo/exch4.zone.sha256`
+
+Тот же контракт (заголовки, `ETag`, `304`, `HEAD`, свой порог 8 строк), список —
+проверенные `/32` китайских криптобирж (Binance, OKX, Bybit, HTX, Gate, KuCoin,
+MEXC, Bitget, …; источник — `domains/exchanges.txt` в `env`). Использование
+другое: ноды ставят `ip daddr @exch4 meta mark set 0x2` и пускают трафик в
+RU-выход (`router-geo.md`, «Маршрутизация: группа `exch`»).
+
+### `GET /router/geo/gov4.zone` и `/router/geo/gov4.zone.sha256`
+
+Тот же контракт (заголовки, `ETag`, `304`, `HEAD`, `.count`, свой порог 8 строк),
+список — проверенные `/32` российских государственных сайтов (Госуслуги, ЕСИА,
+Почта, `mos.ru`, ФНС, СФР, суды, министерства; источник — `domains/gov.txt` в
+`env`). Использование — единственная группа с **одним** выходом: ноды ставят
+`ip daddr @gov4 meta mark set 0x7 return` **выше всех остальных групп**
+(таблица 700 → `msk-tw` `217.149.29.118`), потому что общие RU-диапазоны
+WAF-зафлагены для гос-сайтов. Выход fail-closed: упал — трафик блокируется, а не
+утекает через NL или RU-группу (`router-geo.md`, «группа `gov`»).
 
 ---
 
@@ -530,12 +806,22 @@ Endpoint'ы `/v1/*` используют шифрование RSA+AES, когд�
 {
   "connection_uuid": "1ac65b82-…",
   "node_id": "7f3c9a01-…",
+  "endpoints": [{ "ip": "177.177.20.172", "port": 443, "weight": 100 }],
   "node_ips": ["177.177.20.172"],
   "node_ports": { "177.177.20.172": 443 },
+  "node_weights": { "177.177.20.172": 100 },
   "pool": "EU Рилзопровод",
   "speedtest_url": "https://mis-at-vie-bench-01.bench.beacon.frkn.org:19443"
 }
 ```
+
+- `endpoints[]` — **единая форма точки входа** (`ip`, `port`, `weight`,
+  опционально `label`): то же, что `[[node.endpoints]]` в конфиге ноды. Новый
+  клиент читает только её; `node_ips` + `node_ports` + `node_weights` остаются
+  на проводе для старых сборок и всегда описывают тот же набор адресов —
+  `port` резолвится (порт инбаунда, если нода свой не задала), `weight` по
+  умолчанию 100. То же поле есть в `/v1/config` и в карточках `/v1/locations`
+  (`nodes[].endpoints`, по записи на строку — рядом с легаси `endpoint`).
 
 - `speedtest_url` — base URL бенча **этой ноды** (`https://host:port`, без пути и слэша), тот же, что в `/status`. Один на ноду: не зависит от адреса и протокола.
 - **Отсутствует** (не `null`), если у ноды бенча нет — премиум-слоты, легаси-ноды. Клиент показывает «нет тест-файла».
@@ -628,6 +914,48 @@ Endpoint'ы `/v1/*` используют шифрование RSA+AES, когд�
   - `client_priv_key` и `client_pub_key` — это ключи из connection, сгенерированные сервером. Публичный ключ пира на сервере создаётся именно для этой пары.
 
 ---
+
+## Алерты
+
+### `POST /v1/admin/alerts/exit`
+
+Событие health **группы выходов** от watchdog'а на ноде (`ru`, `ai`, `gov`, …).
+Нода видит туннели и exit IP, api владеет почтовым каналом и дедупликацией —
+поэтому SMTP-креденшелов на нодах нет, у ноды только токен вызова.
+
+- **Auth:** сервисный или админский токен (`Authorization: Bearer <service token>`),
+  фильтр `with_service_or_admin_auth`; `node_`-токен здесь не принимается.
+- **Body:**
+  ```json
+  {
+    "group": "ru",
+    "node": "sh-0001-nl02",
+    "table": 200,
+    "event": "exit_dead",
+    "duration_sec": 42,
+    "detail": "both exits of group ru are dead; table 200 holds only the unreachable guard 1000",
+    "active_iface": "",
+    "probes": [
+      { "iface": "wg-ru-ufo", "role": "primary", "expected_ip": "171.22.134.156",
+        "observed_ip": null, "alive": false, "handshake_age_sec": 999999 },
+      { "iface": "wg-ru-aeza", "role": "secondary", "expected_ip": "171.22.130.17",
+        "observed_ip": null, "alive": false, "handshake_age_sec": 999999 }
+    ]
+  }
+  ```
+  `event` — `exit_dead` (все выходы мертвы, трафик группы заблокирован),
+  `exit_degraded` (primary мёртв, везёт secondary), `exit_recovered`.
+- **Дедупликация** — по паре (группа, нода), в процессе api; после рестарта
+  восстанавливается из `alert_events`. Переход состояния → письмо сразу; повтор
+  того же состояния → не чаще `[alerts] exit_reminder_sec` (1800 с). Поэтому нода
+  может присылать текущее состояние на каждом тике (10 с).
+- **Response:** `200` `{"delivered":true,"action":"sent","email":true,"telegram":null,"reminder":false}`.
+  `action:"suppressed"` + `reason` (`repeat` | `nothing-to-recover`) — письма не было
+  и повторять не нужно. `502` — доставка не удалась, событие надо повторить.
+- **Запись:** отправленное событие попадает в `alert_events` (`rule=exit_*`,
+  `env=<группа>`, `hostname=<нода>`, `details->>'group'`, `details->'probes'`).
+
+Тема письма: `[FRKN] ⛔ <нода> — группа <g>: выход мёртв`.
 
 ## Сводка (digest)
 

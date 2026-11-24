@@ -1,0 +1,15 @@
+[Unit]
+Description=Hourly refresh of the FRKN EU pool gov (Russian state sites) nft set
+
+[Timer]
+# Same cadence as the ai4/aicn4/exch4/adult4 sets: the resolver on the api host
+# publishes hourly, and a destination that leaves the zone between runs simply
+# falls back to the general path, so an hour of staleness is acceptable. The
+# fail-closed side of this group lives in table 700, not here.
+OnCalendar=hourly
+RandomizedDelaySec=7m
+Persistent=true
+Unit=frkn-geo-gov4.service
+
+[Install]
+WantedBy=timers.target

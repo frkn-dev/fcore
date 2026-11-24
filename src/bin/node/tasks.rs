@@ -5,7 +5,9 @@ use tokio::time::Duration;
 #[cfg(feature = "xray")]
 use tonic::Status;
 
-use fcore::{Action, BaseConnection as Connection, Message, Metrics, PeerMessage, Topic};
+use fcore::{
+    Action, BaseConnection as Connection, Message, Metrics, PeerIdentity, PeerMessage, Topic,
+};
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use fcore::{ConnectionStorageBaseOperations, Proto};
 use fcore::{Error, Result, Tag};
@@ -17,6 +19,7 @@ use fcore::ConnectionBaseOperations;
 #[cfg(any(feature = "xray", feature = "wireguard", feature = "amnezia-wg"))]
 use super::metrics::BusinessMetrics;
 use super::node::Node;
+use super::peer_plane;
 
 #[cfg(feature = "amnezia-wg")]
 use netlink_packet_amnezia_wireguard::{AmneziaWireguardPeer, AmneziaWireguardPeerAttribute};
@@ -51,6 +54,11 @@ where
         let sub = self.subscriber.clone();
         let node_uuid = self.node.uuid;
         let node_env = &self.node.env;
+        // Compare the whole topic string: `peers-update-<env>-<pool>` cannot be
+        // split reliably (both halves may contain '-'), so the node only
+        // accepts the exact topic it subscribed to.
+        let own_peers_topic =
+            peer_plane::peers_topic(self.node.env.clone(), self.node.pool.as_deref());
 
         loop {
             let Some((topic_bytes, payload_bytes)) = sub.recv().await else {
@@ -87,8 +95,11 @@ where
                     continue;
                 }
 
-                Topic::PeersUpdates(env) if env != node_env => {
-                    tracing::trace!("SUB: Skipping peers update for another env: {}", env);
+                Topic::PeersUpdates(..) if topic_str != own_peers_topic => {
+                    tracing::trace!(
+                        "SUB: Skipping peers update for another env/pool: {}",
+                        topic_str
+                    );
                     continue;
                 }
 
@@ -106,7 +117,7 @@ where
                 continue;
             }
 
-            let is_peers = matches!(topic, Topic::PeersUpdates(_) | Topic::PeersInit(_));
+            let is_peers = matches!(topic, Topic::PeersUpdates(..) | Topic::PeersInit(_));
             if is_peers {
                 let peers: Option<Vec<PeerMessage>> = {
                     let mut aligned = AlignedVec::new();
@@ -230,21 +241,36 @@ where
     }
 
     async fn handle_peer_batch(&self, msgs: Vec<PeerMessage>, authoritative: bool) -> Result<()> {
-        let mut keep: std::collections::HashMap<Tag, std::collections::HashSet<String>> =
+        // Every pair the api listed: the prune keep-set is keyed by
+        // `(public_key, address)`, never by the key alone, or one pool's peer
+        // would vouch for the address of another.
+        let mut keep: std::collections::HashMap<Tag, std::collections::HashSet<PeerIdentity>> =
             std::collections::HashMap::new();
 
         for msg in &msgs {
+            let identity = PeerIdentity::new(&msg.public_key, peer_plane::host(&msg.address));
+            // Listed is listed, however the apply turns out: the mirror is the
+            // api's desired state, the interface is reconciled towards it.
+            keep.entry(msg.tag).or_default().insert(identity.clone());
             match msg.action {
                 Action::Create | Action::Update => {
-                    // One broken peer must not abort the batch: the rest are
-                    // valid, and the failed one is retried by the next
-                    // authoritative sync.
-                    if let Err(e) = self.apply_peer(msg).await {
-                        tracing::error!("peers: apply {} failed: {}", msg.public_key, e);
-                        continue;
-                    }
-                    self.peers.write().await.insert(
-                        msg.public_key.clone(),
+                    // What this key must allow on the interface: the other
+                    // pools' addresses plus this one. A row that moved to a new
+                    // address loses its old entry on the way.
+                    let desired = {
+                        let mirror = self.peers.read().await;
+                        let mut wanted = peer_plane::desired_except(
+                            &mirror,
+                            msg.tag,
+                            &msg.public_key,
+                            msg.peer_id,
+                        );
+                        wanted.insert(peer_plane::host(&msg.address).to_string());
+                        wanted
+                    };
+                    let mut mirror = self.peers.write().await;
+                    peer_plane::insert(
+                        &mut mirror,
                         fcore::SnapshotPeer {
                             peer_id: msg.peer_id,
                             subscription_id: msg.subscription_id,
@@ -253,32 +279,58 @@ where
                             address: msg.address.clone(),
                         },
                     );
+                    drop(mirror);
+                    // One broken peer must not abort the batch: the rest are
+                    // valid, and the failed one is retried by the next
+                    // authoritative reconcile.
+                    if let Err(e) = self.reconcile_peer(msg.tag, &msg.public_key, &desired) {
+                        tracing::error!(
+                            "peers: apply {} {} failed: {}",
+                            msg.public_key,
+                            msg.address,
+                            e
+                        );
+                    }
                 }
                 Action::Delete => {
-                    if let Err(e) = self.drop_peer(msg).await {
-                        tracing::error!("peers: drop {} failed: {}", msg.public_key, e);
+                    // Drop exactly this pair. The key keeps its other pools'
+                    // addresses, and the kernel peer goes only when none is left.
+                    let desired = {
+                        let mirror = self.peers.read().await;
+                        let mut wanted = peer_plane::desired(&mirror, msg.tag, &msg.public_key);
+                        wanted.remove(peer_plane::host(&msg.address));
+                        wanted
+                    };
+                    if let Err(e) = self.reconcile_peer(msg.tag, &msg.public_key, &desired) {
+                        tracing::error!(
+                            "peers: drop {} {} failed: {}",
+                            msg.public_key,
+                            msg.address,
+                            e
+                        );
                     }
-                    self.peers.write().await.remove(&msg.public_key);
+                    // The api said the tunnel is gone, so the mirror must not
+                    // keep reporting traffic for it even if netlink failed.
+                    let mut mirror = self.peers.write().await;
+                    peer_plane::remove(&mut mirror, &identity);
                 }
                 Action::ResetStat => {}
             }
-            keep.entry(msg.tag)
-                .or_default()
-                .insert(msg.public_key.clone());
         }
 
         if authoritative {
-            if let Err(e) = self.prune_peers(&keep).await {
-                tracing::error!("peers: prune failed: {}", e);
-            }
-            // Mirror the prune: a peer that is no longer on the interface must
-            // not keep reporting traffic either.
-            let listed: std::collections::HashSet<String> =
+            // Mirror first: a peer the api did not list must not keep reporting
+            // traffic, and the interface is reconciled against the mirror below.
+            let listed: std::collections::HashSet<PeerIdentity> =
                 keep.values().flat_map(|set| set.iter().cloned()).collect();
             self.peers
                 .write()
                 .await
-                .retain(|public_key, _| listed.contains(public_key));
+                .retain(|identity, _| listed.contains(identity));
+            // The whole interface, not just the messages in this batch: a node
+            // that missed live updates converges here, without a manual
+            // interface restart.
+            self.reconcile_peers_with_mirror().await;
         }
 
         self.snapshot_wake.notify_one();
@@ -677,143 +729,241 @@ where
 
 /// Peer plane helpers: program the interface, never decide anything.
 ///
-/// The api owns the address book; a node only applies (public_key, address).
-/// Every function is idempotent the way the api expects: a create that is
-/// already applied is a no-op, a delete of a missing peer is not an error.
+/// The api owns the address book; a node only installs the set of addresses
+/// the mirror holds for one public key. The unit of identity is
+/// `(public_key, address)`: one key may hold an address per pool, and the
+/// kernel keeps them as several allowed-ips of a single peer. Every function is
+/// idempotent the way the api expects: a create that is already applied changes
+/// nothing, a delete of a missing peer is not an error.
 impl<C> Node<C>
 where
     C: ConnectionBaseOperations + Send + Sync + Clone + 'static + From<Connection>,
 {
-    pub(crate) async fn apply_peer(&self, msg: &PeerMessage) -> Result<()> {
-        match msg.tag {
-            #[cfg(feature = "amnezia-wg")]
-            Tag::AmneziaPeer => {
-                let api = self
-                    .awg_peers_client
-                    .as_ref()
-                    .ok_or_else(|| Error::Custom("AWG peers interface is not configured".into()))?;
-                let key = AwgInterface::decode_pubkey(&msg.public_key)?;
-                let device = api.get_device().map_err(|e| {
-                    Error::Custom(format!("Failed to read AWG peers device: {}", e))
-                })?;
-                let exists = device.peers.iter().any(|p| {
-                    p.0.iter().any(|attr| {
-                        matches!(attr, AmneziaWireguardPeerAttribute::PublicKey(k) if k == &key)
-                    })
-                });
-                if exists {
-                    return Ok(());
-                }
-
-                let address: std::net::IpAddr = msg.address.parse().map_err(|_| {
-                    Error::Custom(format!("Invalid peer address '{}'", msg.address))
-                })?;
-                let peer = AmneziaWireguardPeer(vec![
-                    AmneziaWireguardPeerAttribute::PublicKey(key),
-                    AmneziaWireguardPeerAttribute::AllowedIps(vec![fcore::IpAddrMask::host(
-                        address,
-                    )
-                    .into()]),
-                ]);
-                api.add_peer(peer).map_err(|e| {
-                    Error::Custom(format!("Failed to add AWG peer via netlink: {}", e))
-                })?;
-                Ok(())
-            }
-            #[cfg(feature = "wireguard")]
-            Tag::WireguardPeer => {
-                let api = self
-                    .wg_peers_client
-                    .as_ref()
-                    .ok_or_else(|| Error::Custom("WG peers interface is not configured".into()))?;
-                if api.is_exist(msg.public_key.clone()) {
-                    return Ok(());
-                }
-                let address: std::net::IpAddr = msg.address.parse().map_err(|_| {
-                    Error::Custom(format!("Invalid peer address '{}'", msg.address))
-                })?;
-                api.create(&msg.public_key, fcore::IpAddrMask::host(address))
-            }
-            other => Err(Error::Custom(format!(
-                "peer message for a non-peer tag: {:?}",
-                other
-            ))),
-        }
-    }
-
-    pub(crate) async fn drop_peer(&self, msg: &PeerMessage) -> Result<()> {
-        match msg.tag {
-            #[cfg(feature = "amnezia-wg")]
-            Tag::AmneziaPeer => {
-                let api = self
-                    .awg_peers_client
-                    .as_ref()
-                    .ok_or_else(|| Error::Custom("AWG peers interface is not configured".into()))?;
-                let key = AwgInterface::decode_pubkey(&msg.public_key)?;
-                // Removing a peer that is already gone is not an error: the
-                // same delete may arrive twice (grant revoke + device delete).
-                let _ = api.remove_peer(key);
-                Ok(())
-            }
-            #[cfg(feature = "wireguard")]
-            Tag::WireguardPeer => {
-                let api = self
-                    .wg_peers_client
-                    .as_ref()
-                    .ok_or_else(|| Error::Custom("WG peers interface is not configured".into()))?;
-                if api.is_exist(msg.public_key.clone()) {
-                    api.delete(&msg.public_key)?;
-                }
-                Ok(())
-            }
-            other => Err(Error::Custom(format!(
-                "peer message for a non-peer tag: {:?}",
-                other
-            ))),
-        }
-    }
-
-    /// Remove every peer of the interfaces this node serves that the api did
-    /// not list. This is what makes `peers-init` authoritative: a tunnel
-    /// revoked while the node was down dies here.
-    async fn prune_peers(
-        &self,
-        keep: &std::collections::HashMap<Tag, std::collections::HashSet<String>>,
-    ) -> Result<()> {
-        use base64::Engine;
-
+    /// Bring every peer interface this node serves in line with the mirror.
+    ///
+    /// Applying live messages one by one is not enough: a message the node did
+    /// not hear (it started after the api published, or its subscriber was not
+    /// attached yet) leaves the interface without tunnels until somebody
+    /// restarts the interface itself. This compares the whole interface with
+    /// the authoritative set — add what is missing, rewrite changed
+    /// allowed-ips, remove what the api no longer lists.
+    pub(crate) async fn reconcile_peers_with_mirror(&self) {
         #[cfg(feature = "amnezia-wg")]
-        if let Some(api) = self.awg_peers_client.as_ref() {
-            let wanted = keep.get(&Tag::AmneziaPeer);
-            let device = api
-                .get_device()
-                .map_err(|e| Error::Custom(format!("Failed to read AWG peers device: {}", e)))?;
-            for peer in &device.peers {
-                for attr in &peer.0 {
-                    if let AmneziaWireguardPeerAttribute::PublicKey(key) = attr {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(key);
-                        let listed = wanted.is_some_and(|w| w.contains(&b64));
-                        if !listed {
-                            tracing::warn!("peers: pruning AWG peer {} (not listed)", b64);
-                            let _ = api.remove_peer(*key);
-                        }
+        self.reconcile_tag(Tag::AmneziaPeer).await;
+        #[cfg(feature = "wireguard")]
+        self.reconcile_tag(Tag::WireguardPeer).await;
+    }
+
+    #[cfg_attr(
+        not(any(feature = "amnezia-wg", feature = "wireguard")),
+        allow(dead_code)
+    )]
+    async fn reconcile_tag(&self, tag: Tag) {
+        let desired = {
+            let mirror = self.peers.read().await;
+            peer_plane::desired_by_key(&mirror, tag)
+        };
+        if let Err(e) = self.reconcile_against(tag, &desired) {
+            tracing::error!("peers reconcile: {:?} failed: {}", tag, e);
+        }
+    }
+
+    /// Diff the interface against `desired` and apply only the differences.
+    fn reconcile_against(
+        &self,
+        tag: Tag,
+        desired: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) -> Result<()> {
+        let current = self.kernel_allowed_map(tag)?;
+        let change = peer_plane::diff(&current, desired);
+        if change.is_noop() {
+            return Ok(());
+        }
+        tracing::info!(
+            "peers reconcile: +{} ~{} -{} ({:?})",
+            change.add.len(),
+            change.update.len(),
+            change.remove.len(),
+            tag
+        );
+
+        for key in change.add.iter().chain(change.update.iter()) {
+            let wanted: Vec<String> = desired
+                .get(key)
+                .map(|addresses| addresses.iter().cloned().collect())
+                .unwrap_or_default();
+            let ips_change = if wanted.is_empty() {
+                peer_plane::AllowedIpsChange::Remove
+            } else {
+                peer_plane::AllowedIpsChange::Set(wanted)
+            };
+            if let Err(e) = self.apply_peer_change(tag, key, ips_change) {
+                tracing::error!("peers reconcile: {} {:?} failed: {}", key, tag, e);
+            }
+        }
+        for key in &change.remove {
+            if let Err(e) = self.apply_peer_change(tag, key, peer_plane::AllowedIpsChange::Remove) {
+                tracing::error!("peers reconcile: removing {} {:?} failed: {}", key, tag, e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Make one key of one interface allow exactly `desired`.
+    ///
+    /// Appending only when addresses are missing keeps a live peer's handshake
+    /// and counters; a rewrite happens only when an address has to go, so
+    /// revoking one pool does not reset the other.
+    #[allow(unused_variables)]
+    pub(crate) fn reconcile_peer(
+        &self,
+        tag: Tag,
+        public_key: &str,
+        desired: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        let current = self
+            .kernel_allowed_map(tag)?
+            .remove(public_key)
+            .unwrap_or_default();
+        self.apply_peer_change(tag, public_key, peer_plane::plan(&current, desired))
+    }
+
+    /// Run one precomputed change against the interface.
+    #[allow(unused_variables)]
+    fn apply_peer_change(
+        &self,
+        tag: Tag,
+        public_key: &str,
+        change: peer_plane::AllowedIpsChange,
+    ) -> Result<()> {
+        if change == peer_plane::AllowedIpsChange::Keep {
+            return Ok(());
+        }
+        match tag {
+            #[cfg(feature = "amnezia-wg")]
+            Tag::AmneziaPeer => {
+                let api = self
+                    .awg_peers_client
+                    .as_ref()
+                    .ok_or_else(|| Error::Custom("AWG peers interface is not configured".into()))?;
+                let key = AwgInterface::decode_pubkey(public_key)?;
+
+                match change {
+                    peer_plane::AllowedIpsChange::Keep => Ok(()),
+                    peer_plane::AllowedIpsChange::Remove => {
+                        // Removing a peer that is already gone is not an error:
+                        // the same delete may arrive twice (revoke + device
+                        // delete).
+                        let _ = api.remove_peer(key);
+                        Ok(())
+                    }
+                    peer_plane::AllowedIpsChange::Add(addresses) => {
+                        let peer = peer_plane::awg_peer_with_ips(key, &addresses, false)
+                            .map_err(Error::Custom)?;
+                        api.add_peer(peer).map_err(|e| {
+                            Error::Custom(format!("Failed to add AWG peer via netlink: {}", e))
+                        })
+                    }
+                    peer_plane::AllowedIpsChange::Set(addresses) => {
+                        let peer = peer_plane::awg_peer_with_ips(key, &addresses, true)
+                            .map_err(Error::Custom)?;
+                        api.add_peer(peer).map_err(|e| {
+                            Error::Custom(format!("Failed to set AWG allowed-ips: {}", e))
+                        })
                     }
                 }
             }
-        }
+            #[cfg(feature = "wireguard")]
+            Tag::WireguardPeer => {
+                let api = self
+                    .wg_peers_client
+                    .as_ref()
+                    .ok_or_else(|| Error::Custom("WG peers interface is not configured".into()))?;
 
-        #[cfg(feature = "wireguard")]
-        if let Some(api) = self.wg_peers_client.as_ref() {
-            let wanted = keep.get(&Tag::WireguardPeer);
-            for key in api.peer_pubkeys()? {
-                let listed = wanted.is_some_and(|w| w.contains(&key));
-                if !listed {
-                    tracing::warn!("peers: pruning WG peer {} (not listed)", key);
-                    let _ = api.delete(&key);
+                match change {
+                    peer_plane::AllowedIpsChange::Keep => Ok(()),
+                    peer_plane::AllowedIpsChange::Remove => {
+                        if api.is_exist(public_key.to_string()) {
+                            api.delete(public_key)?;
+                        }
+                        Ok(())
+                    }
+                    // defguard rewrites allowed-ips as a set, so an append is
+                    // the same call with the union.
+                    peer_plane::AllowedIpsChange::Add(addresses)
+                    | peer_plane::AllowedIpsChange::Set(addresses) => {
+                        let ips = addresses
+                            .iter()
+                            .map(|address| {
+                                address
+                                    .parse::<std::net::IpAddr>()
+                                    .map(fcore::IpAddrMask::host)
+                                    .map_err(|_| {
+                                        Error::Custom(format!("Invalid peer address '{}'", address))
+                                    })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        api.configure_ips(public_key, &ips)
+                    }
                 }
             }
+            other => Err(Error::Custom(format!(
+                "peer message for a non-peer tag: {:?}",
+                other
+            ))),
         }
+    }
 
-        Ok(())
+    /// What the interface currently holds: `public key -> allowed addresses`.
+    #[allow(unused_variables)]
+    fn kernel_allowed_map(
+        &self,
+        tag: Tag,
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
+        match tag {
+            #[cfg(feature = "amnezia-wg")]
+            Tag::AmneziaPeer => {
+                use base64::Engine;
+
+                let Some(api) = self.awg_peers_client.as_ref() else {
+                    return Ok(Default::default());
+                };
+                let device = api.get_device().map_err(|e| {
+                    Error::Custom(format!("Failed to read AWG peers device: {}", e))
+                })?;
+                Ok(device
+                    .peers
+                    .iter()
+                    .filter_map(|peer| {
+                        peer_plane::awg_peer_key(peer).map(|key| {
+                            (
+                                base64::engine::general_purpose::STANDARD.encode(key),
+                                peer_plane::awg_allowed_hosts(peer),
+                            )
+                        })
+                    })
+                    .collect())
+            }
+            #[cfg(feature = "wireguard")]
+            Tag::WireguardPeer => {
+                let Some(api) = self.wg_peers_client.as_ref() else {
+                    return Ok(Default::default());
+                };
+                let mut out = std::collections::BTreeMap::new();
+                for key in api.peer_pubkeys()? {
+                    let addresses = api
+                        .allowed_ips(&key)?
+                        .iter()
+                        .map(|ip| ip.address.to_string())
+                        .collect();
+                    out.insert(key, addresses);
+                }
+                Ok(out)
+            }
+            other => Err(Error::Custom(format!(
+                "peer message for a non-peer tag: {:?}",
+                other
+            ))),
+        }
     }
 }

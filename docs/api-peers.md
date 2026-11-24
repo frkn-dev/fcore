@@ -30,6 +30,7 @@
 |---|---|---|
 | `POST /v1/locations` | `{subscription_id}` | `{access: [...], pools: [...]}` |
 | `POST /v1/peers` | `{subscription_id, device_uid, device_name?, card_id, public_key?, label?}` (ручной/админский вариант: `env`+`proto` вместо `card_id`) | `{peer: PeerView, support_tag, pools: [...]}` |
+| `POST /v1/peers/prepare` | `{subscription_id, device_uid, public_key, device_name?, platform?, pools?: ["<shard>:<pool>", …]}` | `{prepared: [PreparedPeer], skipped: [{card_id, reason}]}` |
 | `POST /v1/peers/list` | `{subscription_id, device_uid?}` | `{peers: [PeerView]}` |
 | `POST /v1/peers/delete` | `{subscription_id, peer_id}` | `{status: "ok"}` |
 | `POST /v1/devices/list` | `{subscription_id}` | `{devices: [DeviceView]}` |
@@ -54,6 +55,61 @@
 
 `PeerCreateResponse` — то же плюс `support_tag` (строка вида `7K2M-9XQ4P`) и `pools[]`
 с `endpoint` / `server_public_key` / `mtu` / `dns` / `keepalive` / `obfuscation`.
+
+### `POST /v1/peers/prepare` — все пулы гранта за один вызов
+
+Приложение зовёт ручку при логине устройства / импорте подписки, чтобы сохранить конфиги
+всех пулов сразу: спид-тест идёт по ним, не дожидаясь первого подключения.
+
+```json
+{
+  "subscription_id": "…", "device_uid": "…",
+  "public_key": "<base64 X25519>",
+  "device_name": "iPhone", "platform": "ios",
+  "pools": ["standard-eu:eu", "standard-eu:prem"]
+}
+```
+
+`pools` необязателен: без него берутся **все peer-карточки** гранта. Значение — тот же
+handle, что `card_id`, без протокола (`<shard>:<pool>`); запрошенный, но несуществующий
+handle возвращается в `skipped` с `reason: "unknown_pool"`.
+
+Ответ (200; отдельные пулы не валят запрос):
+
+```json
+{
+  "prepared": [
+    { "card_id": "0001:eu:amnezia_peer", "pool": "eu", "proto": "amnezia_peer",
+      "address": "10.88.0.2/32", "peer_id": "…",
+      "config": { "card_id": "0001:eu:amnezia_peer", "pool": "eu",
+                  "country": "NL", "country_name": "Netherlands",
+                  "proto": "amnezia_peer", "kind": "peer", "nodes": [ … ] } }
+  ],
+  "skipped": [
+    { "card_id": "0001:eu:hysteria2", "reason": "card_kind_not_peer" },
+    { "card_id": "0001:ru:amnezia_peer", "reason": "peers_limit" }
+  ]
+}
+```
+
+`config` — та же карточка, что `/v1/locations`/`pools[]` (`endpoint`, `server_public_key`,
+`mtu`, `dns`, `keepalive`, `obfuscation`, `payload`), поэтому клиент парсит один формат.
+
+Правила:
+
+1. **Только peer-карточки.** `client_config` (hysteria2) не готовится: `skipped` с
+   `card_kind_not_peer` — конфиг клиент собирает из `nodes[].payload`.
+2. **Идемпотентность** по `(env, pool, public_key)`: живой пир с этим ключом в этом пуле
+   возвращается как есть (`prepared`, тот же `peer_id` и адрес), новый не создаётся.
+3. **Лимиты как у одиночного создания**: per-(device, pool) — 3 (считается по
+   `devices.public_key`, все каналы устройства), подписного лимита нет (`0` = без лимита,
+   с 0.7.39). Пул за лимитом → `skipped: "peers_limit"`, остальные пулы провижнятся.
+4. **Грант**: `check_grant` на каждый протокол; отказ (`proto_not_granted`, `grant_expired`,
+   `quota_exhausted`, `no_grant`) уходит кодом в `skipped` этого пула.
+5. **Изоляция пулов**: каждый `INSERT` — своя транзакция; ошибка БД одного пула → `skipped:
+   "db"` (конфликт адреса/ключа ретраится со следующим свободным адресом), остальные пишутся.
+6. В отличие от `POST /v1/peers`, общий HTTP-статус 200 даже когда часть пулов пропущена;
+   причину каждого смотреть в `skipped[].reason`.
 
 `DeviceView`: `{id, device_uid, device_name, support_tag, created_at, rotated_at}`.
 
@@ -107,18 +163,18 @@
 
 | лимит | на что | по умолчанию | код отказа |
 |---|---|---|---|
-| `peers_per_device` | живые туннели **одного физического устройства** | 3 | `peers_limit` |
+| `peers_per_device` | живые туннели **одного физического устройства** в одном пуле | 3 | `peers_limit` |
 | `max_devices_per_subscription` | устройства (установки) одной подписки | 15 | `devices_limit` |
-| `max_per_subscription` | живые туннели одной подписки | 45 | `subscription_limit` |
+| `max_per_subscription` | живые туннели одной подписки | 0 (без лимита) | `subscription_limit` |
 
-**Лимит туннелей — на устройство, а не на подписку.** Устройство опознаётся по своему
+**Лимит туннелей — на устройство и на пул, а не на подписку.** Устройство опознаётся по своему
 X25519-ключу (`devices.public_key`, он же `device_public_key` в терминах клиента): считаются
-все живые пиры всех записей `devices` с этим ключом, **во всех env и во всех подписках
-подряд**. Поэтому вторая подписка на том же телефоне не даёт ещё три туннеля, а роутер,
-которому нужно три туннеля сразу для failover, упирается в 3 ровно тогда, когда их три.
-Пиры дополнительных каналов роутера (свой `public_key` + `label`) принадлежат той же записи
-устройства и считаются в тот же лимит. Отозванные и истёкшие пиры не считаются: удалённый
-туннель сразу освобождает слот.
+живые пиры всех записей `devices` с этим ключом, но **в разрезе одного `(env, pool)`**.
+Поэтому `POST /v1/peers/prepare` кладёт по одному пиру в каждый пул гранта: три туннеля в
+`eu` не мешают туннелю в `ru`. Роутер, которому нужно три туннеля в одном пуле для failover,
+упирается в 3 ровно тогда, когда их три в этом пуле. Пиры дополнительных каналов роутера
+(свой `public_key` + `label`) принадлежат той же записи устройства и считаются в тот же
+лимит. Отозванные и истёкшие пиры не считаются: удалённый туннель сразу освобождает слот.
 
 `peers_per_device` задаётся в `[service.peers]` конфига api (старое имя `max_per_device`
 продолжает читаться; `0` или отсутствие ключа = 3). Значение из `subscription_limits`
@@ -130,8 +186,10 @@ X25519-ключу (`devices.public_key`, он же `device_public_key` в тер
 
 ## Идемпотентность
 
-`POST /v1/peers` с тем же `(env, public_key)` возвращает существующий пир — повтор после
-таймаута безопасен. Идемпотентный поиск идёт **до** проверки лимитов: повтор запроса на
+`POST /v1/peers` с тем же `(env, pool, public_key)` возвращает существующий пир — повтор после
+таймаута безопасен. `pool` входит в ключ идемпотентности: одна и та же пара ключей может
+держать по туннелю в каждом пуле шарда (`POST /v1/peers/prepare`), но в одном пуле это один
+и тот же туннель. Идемпотентный поиск идёт **до** проверки лимитов: повтор запроса на
 устройстве, у которого лимит уже выбран, получает `200` с тем же пиром, а не `409`.
 
 ## Клиент не видит шард: карточка — это handle
@@ -158,16 +216,23 @@ X25519-ключу (`devices.public_key`, он же `device_public_key` в тер
 `nodes[].country` остаётся ISO-кодом конкретной машины: он нужен, когда ноды пула стоят в
 разных странах и это важно показать.
 
-`nodes[]` — один элемент на **entry-адрес**: нода, объявившая несколько IP (`[node] node_ips`,
-например основной и запасной вход), даёт по элементу на каждый, с одинаковыми
-`server_public_key` / `mtu` / `dns` / `obfuscation` и разными `endpoint`. Одна карточка из двух
-машин, у одной из которых два IP, — это три endpoint, и приложение вправе выбрать любой.
+`nodes[]` — один элемент на **entry-адрес**: нода, объявившая несколько точек входа
+(`[[node.endpoints]]`, например основной и запасной IP), даёт по элементу на каждый, с
+одинаковыми `server_public_key` / `mtu` / `dns` / `obfuscation` и разными `endpoint`. Одна
+карточка из двух машин, у одной из которых два IP, — это три endpoint, и приложение вправе
+выбрать любой.
+
+Каждый элемент несёт ещё и `endpoints` — тот же адрес в единой форме
+(`[{"ip": "…", "port": 443, "weight": 100}]`, см. `[[node.endpoints]]`); `endpoint`
+(`"ip:port"`) остаётся для старых клиентов, `endpoints[].weight` — вес адреса в пуле.
 
 ## Шарды: `env` — непрозрачный id
 
 `env` — идентификатор шарда, а не описание: `0001`, `0002`, а не `standard-ru`. Имя несётся
 **дословно** везде — в конфиге ноды, в `env_networks` / `env_capacity` / `subscription_access`,
-в `access[].env`, `peer.env` и в топике `peers-update-<env>`. Никакого префикса `custom` больше
+в `access[].env`, `peer.env` и в топике пиров. Топик привязан к пулу:
+`peers-update-<env>-<pool>` (нода без `pool` в конфиге остаётся на env-wide `peers-update-<env>`),
+потому что один ключ устройства держит по адресу на пул. Никакого префикса `custom` больше
 нет: раньше неизвестное имя превращалось в `Env::Custom` и в базу уезжало `customstandard-01` —
 шард, которого не обслуживает ни одна нода.
 
@@ -271,3 +336,26 @@ IAP, продление ключом) вызывает `renew_grants`:
 оживлять строку, которой нет в ядре, нельзя. Клиент получает новый туннель обычным
 `POST /v1/peers` — с тем же ключом устройства и (обычно) тем же адресом из блока шарда.
 В лог пишется `renewal: grant revived for subscription <id> env <env> until <дата>`.
+
+## Адрес живёт в аренде: таска `reap_idle_peers`
+
+Пул адресов шарда конечен, поэтому живой пир — это аренда, а не вечное владение.
+Таска `reap_idle_peers` (интервал `[tasks] peer_reap_interval_sec`, по умолчанию
+3600 с; порог `[tasks] peer_idle_days`, по умолчанию 30, `0` выключает только
+возрастное правило) раз в тик берёт **до 200** живых пиров и отзывает их тем же
+путём, что и `POST /v1/peers/delete`: `revoked_at` в базе, удаление из памяти,
+`Delete`-сообщение в `PeersUpdates` env — нода снимает пир из ядра.
+
+Пир отзывается, если выполнено любое:
+
+| причина (`revoke_reason`) | условие |
+|---|---|
+| `idle` | трафик не бронировался `peer_idle_days` дней; отсчёт от `max(peer_traffic.updated_at, peer_watermarks.updated_at)`, а если бронирований не было вовсе — от `peers.created_at` |
+| `subscription_ended` | `subscriptions.is_deleted`, либо `expires_at` в прошлом **без живого гранта** на этом env (грант и его пиры закрывает `expire_grants`, таска с ним не соревнуется) — и не traffic-mode, где на балансе ещё есть байты |
+| `grant_revoked` | у пары (подписка, env) есть строки `subscription_access`, но ни одной живой, и env не своя (`scope_env`) — это пир, переживший отзыв гранта на офлайн-ноде |
+
+Решение (порог, приоритет причин, `created_at` как fallback) вынесено в чистую
+функцию `peers::reap_reason` и покрыто юнит-тестами; таска только собирает факты
+из `peer_traffic` / `peer_watermarks` / `subscriptions` и выполняет отзыв. За тик
+пишется одна строка в лог:
+`reap_idle_peers: revoked N peer(s) — X idle >30d, Y subscription ended, Z grant revoked`.

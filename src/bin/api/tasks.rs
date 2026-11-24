@@ -54,6 +54,9 @@ pub trait Tasks {
     /// created for `stale_device_days`), so the device cap does not fill with
     /// phones that no longer exist.
     async fn reap_stale_devices(&self, interval_sec: u64);
+    /// Revoke live peers that were not used for `peer_idle_days`, or whose
+    /// subscription/grant no longer backs them.
+    async fn reap_idle_peers(&self, interval_sec: u64);
     async fn republish_conn_deletes(&self, interval_sec: u64);
 }
 
@@ -708,6 +711,167 @@ where
                 }
                 Err(e) => error!("reap_stale_devices: cannot delete stale devices: {}", e),
             }
+        }
+    }
+
+    /// Peer cleanup: a live tunnel is revoked when it was not used for
+    /// `peer_idle_days`, or when the subscription/grant behind it no longer
+    /// backs it (ended subscription, expired term, revoked grant).
+    ///
+    /// A shard has a finite pool of addresses, so a peer is a lease, not a
+    /// permanent claim: a phone that was wiped, or a router that was resold,
+    /// must not keep an address forever. The age rule counts from the last
+    /// booked traffic (`peer_traffic` / `peer_watermarks`, the rows the
+    /// persister writes) and falls back to `created_at` for a peer that never
+    /// moved a byte. The decision itself is `peers::reap_reason`; this task
+    /// only gathers facts, revokes and publishes each revocation to the node
+    /// exactly like an explicit `POST /v1/peers/delete`.
+    async fn reap_idle_peers(&self, interval_sec: u64) {
+        let idle_days = self.settings.tasks.peer_idle_days as i64;
+
+        // Per pass cap: a first run on a long-lived deployment revokes in
+        // batches instead of one huge transaction, and every pass is visible
+        // in the log. A full batch means there is a backlog, so the next pass
+        // follows after a short pause instead of a whole interval — tens of
+        // thousands of stale peers must not take a week to drain.
+        const PER_TICK: i64 = 200;
+        const BACKLOG_PAUSE: Duration = Duration::from_secs(5);
+
+        let interval = Duration::from_secs(interval_sec.max(60));
+
+        loop {
+            debug!("Run reaping idle peers task");
+
+            let now = Utc::now();
+            let cutoff = now - chrono::Duration::days(idle_days.max(0));
+            let rows = match self
+                .sync
+                .db
+                .peers()
+                .peers_for_cleanup(cutoff, now, PER_TICK)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    error!("reap_idle_peers: cannot list peers: {}", e);
+                    tokio::time::sleep(interval).await;
+                    continue;
+                }
+            };
+
+            if rows.is_empty() {
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+
+            let full_batch = rows.len() as i64 >= PER_TICK;
+
+            let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
+            let (mut idle, mut ended, mut ungranted) = (0usize, 0usize, 0usize);
+
+            for row in rows {
+                let mut owner = crate::peers::PeerOwner {
+                    deleted: row.sub_deleted,
+                    expired: row.sub_expired,
+                    kept_by_traffic: false,
+                    env_owned: row.env_owned,
+                    grant_live: row.grant_live,
+                    grant_seen: row.grant_seen,
+                };
+
+                // Traffic mode: a term that ran out while the balance still
+                // has bytes is not the end of the subscription — the same
+                // rule `cleanup_expired_subscriptions` applies to v1
+                // connections.
+                if owner.expired && traffic_mode_enabled {
+                    let limit = {
+                        let mem = self.sync.memory.read().await;
+                        mem.subscriptions
+                            .find_by_id(&row.peer.subscription_id)
+                            .and_then(|s| s.limit_bytes())
+                    };
+                    if let Some(limit) = limit.filter(|l| *l > 0) {
+                        match self
+                            .sync
+                            .db
+                            .traffic()
+                            .total_for_subscription(row.peer.subscription_id)
+                            .await
+                        {
+                            Ok((up, down)) => owner.kept_by_traffic = (up + down).max(0) < limit,
+                            Err(e) => {
+                                // Cannot prove the balance is spent: keep the
+                                // peer this pass rather than cut a paying user.
+                                error!(
+                                    "reap_idle_peers: cannot read traffic of {}: {}",
+                                    row.peer.subscription_id, e
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                let usage = crate::peers::PeerUsage {
+                    created_at: row.peer.created_at,
+                    last_traffic_at: row.last_traffic_at,
+                };
+                let Some(reason) = crate::peers::reap_reason(&usage, &owner, now, idle_days) else {
+                    continue;
+                };
+
+                let (code, label) = match reason {
+                    crate::peers::PeerReap::Idle => (crate::peers::REVOKE_IDLE, "idle"),
+                    crate::peers::PeerReap::SubscriptionEnded => {
+                        (crate::peers::REVOKE_SUBSCRIPTION_ENDED, "ended")
+                    }
+                    crate::peers::PeerReap::GrantRevoked => {
+                        (crate::peers::REVOKE_GRANT_REVOKED, "ungranted")
+                    }
+                };
+
+                match self.sync.db.peers().revoke_peer(row.peer.id, code).await {
+                    Ok(true) => {
+                        self.sync
+                            .memory
+                            .write()
+                            .await
+                            .peers_state
+                            .peers
+                            .remove_live(row.peer.id);
+                        // Same push an explicit delete does: a node that keeps
+                        // the peer in its kernel keeps burning the address.
+                        crate::http::handlers::peers::publish_peer(
+                            &self.sync,
+                            fcore::Action::Delete,
+                            &row.peer,
+                        )
+                        .await;
+                        match reason {
+                            crate::peers::PeerReap::Idle => idle += 1,
+                            crate::peers::PeerReap::SubscriptionEnded => ended += 1,
+                            crate::peers::PeerReap::GrantRevoked => ungranted += 1,
+                        }
+                        debug!(
+                            "reap_idle_peers: revoked peer {} of {} ({}), env {}",
+                            row.peer.id, row.peer.subscription_id, label, row.peer.env
+                        );
+                    }
+                    Ok(false) => debug!("reap_idle_peers: peer {} already revoked", row.peer.id),
+                    Err(e) => error!(
+                        "reap_idle_peers: cannot revoke peer {}: {}",
+                        row.peer.id, e
+                    ),
+                }
+            }
+
+            let revoked = idle + ended + ungranted;
+            info!(
+                "reap_idle_peers: revoked {} peer(s) — {} idle >{}d, {} subscription ended, {} grant revoked",
+                revoked, idle, idle_days, ended, ungranted
+            );
+
+            tokio::time::sleep(if full_batch { BACKLOG_PAUSE } else { interval }).await;
         }
     }
 

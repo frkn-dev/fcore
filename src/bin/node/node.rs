@@ -113,7 +113,7 @@ where
     }
 }
 
-pub async fn run(settings: ServiceSettings) -> Result<()> {
+pub async fn run(settings: ServiceSettings, peers_resync: bool) -> Result<()> {
     let mut tasks: Vec<JoinHandle<()>> = vec![];
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
@@ -304,7 +304,9 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         (None, None)
     };
 
-    // Init Hysteria2
+    // Init Hysteria2. fnode never starts it: the process is a separate
+    // systemd unit, and its own config file is the single source of truth for
+    // what gets announced (port from `listen`, name from `host`/`acme.domains`).
     let h2_config = if settings.h2.enabled {
         match Hysteria2Settings::from_file(&settings.h2.path) {
             Ok(cfg) => {
@@ -360,11 +362,16 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     let topic_init: Topic = settings.node.env.clone().into();
     let topic_updates: Topic = settings.node.uuid.into();
 
-    // Peer topics are separate from the connection stream: a node of the env
-    // applies every peer change, and its own `peers-init-<uuid>` is the
-    // authoritative full set it prunes against.
+    // Peer topics are separate from the connection stream. The live stream is
+    // scoped to this node's pool (`peers-update-<env>-<pool>`): the same device
+    // key holds one address per pool, and a node must only hear about the pool
+    // it serves. A config without a pool keeps the env-wide topic and the
+    // env-wide snapshot — that is the pre-pool generation.
     let mut topics = vec![topic_updates, topic_init];
-    topics.push(Topic::PeersUpdates(settings.node.env.clone()));
+    topics.push(Topic::PeersUpdates(
+        settings.node.env.clone(),
+        settings.node.pool.clone(),
+    ));
     topics.push(Topic::PeersInit(settings.node.uuid));
 
     tracing::debug!("Topics to connect {:?}", topics);
@@ -434,12 +441,15 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
         tasks.push(h);
     }
 
-    if Path::new(&snapshot_manager.snapshot_path).exists() {
+    if peers_resync {
+        // `--peers-resync`: ignore the local file for this start. The api's
+        // `peers-init` is authoritative and the interface is reconciled against
+        // the mirror, so the node rebuilds its peer set from the api instead of
+        // trusting a snapshot that may be exactly what is wrong.
+        info!("--peers-resync: snapshot ignored, peer set rebuilt from the api");
+    } else if Path::new(&snapshot_manager.snapshot_path).exists() {
         match snapshot_manager.load_snapshot().await {
             Ok(Some(meta)) => {
-                // Peers come from the same file; program them now, the api
-                // prunes the stale ones on registration.
-                node.restore_peers_from_mirror().await;
                 // The snapshot is only worth applying if its per-tag counts
                 // still match what the api would send: a file that no longer
                 // describes reality used to be applied as-is, and the node then
@@ -553,6 +563,13 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
     } else {
         warn!("No snapshot found, starting fresh");
     };
+
+    // The interfaces are up and the snapshot (if any) is applied. Reconcile the
+    // whole interface against the mirror now: a peer that the file did not
+    // carry, or that a missed message never applied, must not need a manual
+    // `awg-quick down/up` to appear. `peers-init` reconciles again once the api
+    // sends its authoritative set.
+    node.reconcile_peers_with_mirror().await;
 
     // Write-through: every applied Create/Update/Delete persists immediately,
     // so a restart in the same second cannot resurrect a deleted connection.
@@ -693,6 +710,59 @@ pub async fn run(settings: ServiceSettings) -> Result<()> {
                 }
             });
             tasks.push(zmq_task);
+
+            // On-demand resync: `systemctl reload fnode` (SIGHUP) re-registers,
+            // which makes the api publish the authoritative peer set again and
+            // the node reconcile the whole interface against it. A node whose
+            // snapshot was lost is repaired by a reload, not by SQL.
+            #[cfg(unix)]
+            {
+                let node = node.clone();
+                let endpoint = settings.api.endpoint.clone();
+                let token = settings.api.token.clone();
+                let mut shutdown = shutdown_tx.subscribe();
+                tasks.push(tokio::spawn(async move {
+                    let mut hup = match tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::hangup(),
+                    ) {
+                        Ok(signal) => signal,
+                        Err(e) => {
+                            warn!("SIGHUP handler disabled: {}", e);
+                            return;
+                        }
+                    };
+                    // PUB/SUB drops a message published before the subscription
+                    // is established, and the node's only copy of the peer set
+                    // arrives that way. One delayed re-register covers a slow
+                    // start: it is idempotent and the api answers with the
+                    // authoritative set again.
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    if let Err(e) = node.register_node(endpoint.clone(), token.clone()).await {
+                        warn!("peers: second registration failed: {}", e);
+                    } else {
+                        node.reconcile_peers_with_mirror().await;
+                    }
+
+                    loop {
+                        tokio::select! {
+                            _ = hup.recv() => {
+                                info!("SIGHUP: re-registering for the authoritative peer set");
+                                match node
+                                    .register_node(endpoint.clone(), token.clone())
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        info!("SIGHUP: re-registered");
+                                        node.reconcile_peers_with_mirror().await;
+                                    }
+                                    Err(e) => warn!("SIGHUP: re-register failed: {}", e),
+                                }
+                            }
+                            _ = shutdown.recv() => break,
+                        }
+                    }
+                }));
+            }
 
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -925,43 +995,4 @@ fn divergence_ratio(local: u64, api: u64) -> f64 {
         return 0.0;
     }
     (local.abs_diff(api) as f64) / (api as f64)
-}
-
-impl<C> Node<C>
-where
-    C: ConnectionBaseOperations + Send + Sync + Clone + 'static + From<fcore::BaseConnection>,
-{
-    /// Program the peer interfaces from the snapshot mirror.
-    ///
-    /// The mirror is filled by `SnapshotManager::load_snapshot` from the same
-    /// rkyv file that carries the connections, so a restart brings tunnels up
-    /// before the api answers. The api then pushes the authoritative set and
-    /// the node prunes whatever it did not list — a tunnel revoked while the
-    /// node was down dies there, not here.
-    pub async fn restore_peers_from_mirror(&self) {
-        let peers: Vec<fcore::SnapshotPeer> = {
-            let mirror = self.peers.read().await;
-            mirror.values().cloned().collect()
-        };
-        if peers.is_empty() {
-            return;
-        }
-
-        let mut restored = 0usize;
-        for peer in &peers {
-            let msg = fcore::PeerMessage {
-                peer_id: peer.peer_id,
-                action: fcore::Action::Create,
-                tag: peer.tag,
-                public_key: peer.public_key.clone(),
-                address: peer.address.clone(),
-                subscription_id: peer.subscription_id,
-            };
-            match self.apply_peer(&msg).await {
-                Ok(()) => restored += 1,
-                Err(e) => warn!("peers snapshot: cannot restore {}: {}", peer.public_key, e),
-            }
-        }
-        info!("peers snapshot: restored {} tunnels", restored);
-    }
 }

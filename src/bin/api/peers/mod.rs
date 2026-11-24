@@ -10,6 +10,7 @@
 //! pin the rules that matter (allocation, key validation, limits).
 
 pub mod alloc;
+pub mod prepare;
 pub mod store;
 
 use chrono::{DateTime, Utc};
@@ -27,7 +28,14 @@ pub enum ShardKind {
     Core,
     /// A premium slot of one account.
     Premium,
-    /// A user's own machine (self-hosted node).
+    /// An account's own machine (`custompersonal<sub-uuid>`): one shard per
+    /// account, one pool (`own`) inside it.
+    Selfhosted,
+    /// A resell partner's shard (`custom<hex>`): the partner's own machines
+    /// plus the users it hosts.
+    Resell,
+    /// Pre-`selfhosted` spelling of [`Selfhosted`]. Only ever produced from
+    /// old `env_capacity` rows; never written back.
     Personal,
 }
 
@@ -42,7 +50,9 @@ impl ShardKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "core" => Some(Self::Core),
             "premium" => Some(Self::Premium),
-            "personal" => Some(Self::Personal),
+            // `personal` is the pre-0031 spelling of the same shard.
+            "selfhosted" | "personal" => Some(Self::Selfhosted),
+            "resell" => Some(Self::Resell),
             _ => None,
         }
     }
@@ -55,16 +65,78 @@ impl ShardKind {
         match plan.trim().to_ascii_lowercase().as_str() {
             "standard" | "lite" => Some(Self::Core),
             "premium" => Some(Self::Premium),
-            "selfhosted" => Some(Self::Personal),
+            "selfhosted" => Some(Self::Selfhosted),
+            "resell" => Some(Self::Resell),
             _ => None,
         }
+    }
+
+    /// A shard of one account's own machines: served only to that account.
+    pub fn is_private(&self) -> bool {
+        matches!(self, Self::Selfhosted | Self::Personal)
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Core => "core",
             Self::Premium => "premium",
+            Self::Selfhosted => "selfhosted",
+            Self::Resell => "resell",
             Self::Personal => "personal",
+        }
+    }
+}
+
+/// Migration plane of a subscription (`subscriptions.plane`, migration 0030).
+///
+/// v1 — the subscription lives on per-protocol `connections` rows.
+/// v2 — it holds shard `peers` and no live v1 connection.
+/// Dual — both at once: a client that still dials its old config next to a
+/// peer. A fresh subscription starts on `V1`; the first live peer moves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Plane {
+    V1,
+    V2,
+    Dual,
+}
+
+impl Default for Plane {
+    fn default() -> Self {
+        Self::V1
+    }
+}
+
+impl Plane {
+    /// Reads the stored value. An absent column, an older backend or an
+    /// unexpected string all mean the historical plane: v1.
+    pub fn from_db(raw: Option<&str>) -> Self {
+        match raw.map(str::trim) {
+            Some("v2") => Self::V2,
+            Some("dual") => Self::Dual,
+            _ => Self::V1,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+            Self::Dual => "dual",
+        }
+    }
+
+    /// Plane after this subscription's **first** live peer exists.
+    ///
+    /// `None` means the row must not change: v2 and dual already record the
+    /// migration, and a marker is never moved back. A v1 subscription with a
+    /// live v1 connection becomes dual — dropping it to v2 would hide the
+    /// client that still uses the old plane.
+    pub fn after_peer(self, has_live_connection: bool) -> Option<Self> {
+        match self {
+            Self::V1 if has_live_connection => Some(Self::Dual),
+            Self::V1 => Some(Self::V2),
+            Self::V2 | Self::Dual => None,
         }
     }
 }
@@ -120,7 +192,11 @@ pub struct Limits {
     /// every subscription and env it holds. A phone keeps one; a router or a
     /// Linux box may keep three up at once for failover.
     pub per_device: i64,
-    /// Tunnels of the whole subscription — the hard cap on the address budget.
+    /// Tunnels of the whole subscription. `0` means **no cap**: with one
+    /// address per pool a legal device holds as many rows as the account has
+    /// pools, and a fixed number either blocks that (`45` was hit by three
+    /// devices on fifteen pools) or is meaningless. The address budget of the
+    /// shard is what actually bounds this.
     pub per_subscription: i64,
     /// Installations of the whole subscription.
     pub devices_per_subscription: i64,
@@ -131,8 +207,9 @@ impl Limits {
     /// a second subscription must not let the same machine open another three
     /// tunnels. Three covers the router case (three tunnels up for failover).
     pub const DEFAULT_PEERS_PER_DEVICE: i64 = 3;
-    /// 15 devices × 3 tunnels: the peer cap must not bind before the device cap.
-    pub const DEFAULT_PER_SUBSCRIPTION: i64 = 45;
+    /// No subscription-wide cap by default: the per-(device, pool) cap is the
+    /// real limit, and the shard's address block bounds the rest.
+    pub const DEFAULT_PER_SUBSCRIPTION: i64 = 0;
     pub const DEFAULT_DEVICES_PER_SUBSCRIPTION: i64 = 15;
 
     /// Overrides from `subscription_limits` win over the deployment defaults;
@@ -167,8 +244,9 @@ impl Limits {
         Ok(())
     }
 
+    /// The subscription-wide cap is optional: `0` disables it.
     pub fn check_subscription(&self, live: i64) -> Result<(), Refusal> {
-        if live >= self.per_subscription {
+        if self.per_subscription > 0 && live >= self.per_subscription {
             return Err(Refusal::SubscriptionLimit(self.per_subscription));
         }
         Ok(())
@@ -343,6 +421,14 @@ pub const REVOKE_EXPIRED: &str = "expired";
 pub const REVOKE_QUOTA: &str = "quota";
 pub const REVOKE_USER: &str = "user";
 pub const REVOKE_SUBSCRIPTION_ENDED: &str = "subscription_ended";
+/// `reap_idle_peers`: the tunnel carried no booked traffic for the configured
+/// number of days. Not a decision of the customer — the peer is simply gone
+/// from the device — so a re-created tunnel is a normal create, not a revival.
+pub const REVOKE_IDLE: &str = "idle";
+/// `reap_idle_peers`: a live peer survived a grant revocation (a node was
+/// offline and missed the bulk delete). The reason recorded is the sweep's,
+/// not the original decision — the grant row keeps that.
+pub const REVOKE_GRANT_REVOKED: &str = "grant_revoked";
 
 /// Is there room under the grant's traffic limit? `None` (or a non-positive
 /// limit) means the env is not metered at all.
@@ -474,24 +560,258 @@ pub fn check_grant(
     Ok(())
 }
 
+// ---------------------------------------------------------------- peer cleanup
+
+/// Why the cleanup job drops a live tunnel. `Idle` is the clock on the
+/// traffic watermark; the other two are rights, not age.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerReap {
+    /// No booked traffic for `idle_days`: the address belongs to the subject
+    /// shard, not to a device that stopped connecting (or never did).
+    Idle,
+    /// The owning subscription is over — deleted, or its term is over with
+    /// nothing left on the traffic balance.
+    SubscriptionEnded,
+    /// The grant that authorized this env was revoked.
+    GrantRevoked,
+}
+
+/// What the cleanup knows about one live peer.
+#[derive(Clone, Debug)]
+pub struct PeerUsage {
+    pub created_at: DateTime<Utc>,
+    /// Last time traffic was booked for this peer (`peer_traffic` /
+    /// `peer_watermarks`); `None` when it never moved a byte.
+    pub last_traffic_at: Option<DateTime<Utc>>,
+}
+
+impl PeerUsage {
+    /// The clock the idle rule counts from: real traffic when there is any,
+    /// otherwise the tunnel's creation, so a peer that never connected still
+    /// ages out instead of living forever.
+    pub fn idle_since(&self) -> DateTime<Utc> {
+        self.last_traffic_at.unwrap_or(self.created_at)
+    }
+}
+
+/// What the cleanup knows about the peer's subscription and its grant.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PeerOwner {
+    pub deleted: bool,
+    /// `expires_at` is set and already over.
+    pub expired: bool,
+    /// Traffic mode with bytes left on the balance: the paid term is over but
+    /// the subscription still has a right to its tunnels.
+    pub kept_by_traffic: bool,
+    /// The env is the subscription's own (self-hosted node, premium slot): no
+    /// grant row exists for it and none is needed.
+    pub env_owned: bool,
+    pub grant_live: bool,
+    /// Any grant row (live or revoked) exists for this (subscription, env):
+    /// rows are only ever written for shared shards, never for an owned env.
+    pub grant_seen: bool,
+}
+
+/// The cleanup decision. Pure, so the rules are testable without Postgres; the
+/// job only gathers [`PeerUsage`] / [`PeerOwner`] and revokes what this
+/// returns. Precedence: an ended subscription outranks a revoked grant, and
+/// both outrank idleness — the logged reason should be the real one.
+pub fn reap_reason(
+    usage: &PeerUsage,
+    owner: &PeerOwner,
+    now: DateTime<Utc>,
+    idle_days: i64,
+) -> Option<PeerReap> {
+    // A live grant is `expire_grants`' business: it closes the grant on its
+    // own term/quota tick and takes the env's peers with it, so this sweep
+    // must not race it. What is left here is the peer nobody else owns — an
+    // env without a grant (own node, selfhosted user) behind a subscription
+    // that is deleted or expired with no balance to live on.
+    if owner.deleted
+        || (owner.expired && !owner.grant_live && !owner.kept_by_traffic)
+    {
+        return Some(PeerReap::SubscriptionEnded);
+    }
+    if owner.grant_seen && !owner.grant_live && !owner.env_owned {
+        return Some(PeerReap::GrantRevoked);
+    }
+    if idle_days > 0 && usage.idle_since() <= now - chrono::Duration::days(idle_days) {
+        return Some(PeerReap::Idle);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn shard_kind_parses_and_round_trips() {
-        for kind in [ShardKind::Core, ShardKind::Premium, ShardKind::Personal] {
+        for kind in [
+            ShardKind::Core,
+            ShardKind::Premium,
+            ShardKind::Selfhosted,
+            ShardKind::Resell,
+        ] {
             assert_eq!(ShardKind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(ShardKind::parse(" CORE "), Some(ShardKind::Core));
         assert_eq!(ShardKind::parse("other"), None);
+        // The pre-0031 spelling is the same shard.
+        assert_eq!(
+            ShardKind::parse("personal"),
+            Some(ShardKind::Selfhosted)
+        );
         // A shard without a declared kind is a region we operate.
         assert_eq!(ShardKind::default(), ShardKind::Core);
+        // Account-owned shards: one own-node account, one reseller.
+        assert!(ShardKind::Selfhosted.is_private());
+        assert!(ShardKind::Personal.is_private());
+        assert!(!ShardKind::Resell.is_private());
+        assert!(!ShardKind::Core.is_private());
+        assert_eq!(ShardKind::for_plan("selfhosted"), Some(ShardKind::Selfhosted));
+        assert_eq!(ShardKind::for_plan("resell"), Some(ShardKind::Resell));
     }
     use chrono::TimeZone;
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 19, 12, 0, 0).unwrap()
+    }
+
+    fn days_ago(days: i64) -> DateTime<Utc> {
+        now() - chrono::Duration::days(days)
+    }
+
+    fn active_owner() -> PeerOwner {
+        PeerOwner {
+            grant_live: true,
+            ..PeerOwner::default()
+        }
+    }
+
+    /// A peer that moved traffic 31 days ago holds a shard address for
+    /// nothing: the cleanup drops it on age alone.
+    #[test]
+    fn peer_idle_for_31_days_is_reaped() {
+        let usage = PeerUsage {
+            created_at: days_ago(90),
+            last_traffic_at: Some(days_ago(31)),
+        };
+        assert_eq!(
+            reap_reason(&usage, &active_owner(), now(), 30),
+            Some(PeerReap::Idle)
+        );
+    }
+
+    /// A live tunnel used 5 days ago stays: the idle rule is 30 days, and
+    /// one pass must never cut a working device.
+    #[test]
+    fn peer_used_5_days_ago_is_kept() {
+        let usage = PeerUsage {
+            created_at: days_ago(90),
+            last_traffic_at: Some(days_ago(5)),
+        };
+        assert_eq!(reap_reason(&usage, &active_owner(), now(), 30), None);
+    }
+
+    /// An expired subscription loses its grant-less tunnels immediately,
+    /// whatever the traffic says — a peer of an account that stopped paying
+    /// is not ours to keep. Two things keep a peer: a traffic balance it may
+    /// still spend, and a live grant, which `expire_grants` closes on its own
+    /// tick (this sweep must not race it).
+    #[test]
+    fn peer_of_expired_subscription_is_reaped_regardless_of_age() {
+        let fresh = PeerUsage {
+            created_at: days_ago(1),
+            last_traffic_at: Some(days_ago(1)),
+        };
+        let expired = PeerOwner {
+            expired: true,
+            ..PeerOwner::default()
+        };
+        assert_eq!(
+            reap_reason(&fresh, &expired, now(), 30),
+            Some(PeerReap::SubscriptionEnded)
+        );
+
+        // Traffic mode with balance left: the term is over but the right is
+        // not, so age (not the clock) decides.
+        let kept = PeerOwner {
+            kept_by_traffic: true,
+            ..expired
+        };
+        assert_eq!(reap_reason(&fresh, &kept, now(), 30), None);
+
+        // A granted env belongs to `expire_grants`: it revokes the grant and
+        // the env's peers together, so the sweep leaves it alone.
+        let granted = PeerOwner {
+            grant_live: true,
+            ..expired
+        };
+        assert_eq!(reap_reason(&fresh, &granted, now(), 30), None);
+    }
+
+    /// A peer that never moved a byte counts from `created_at`: no traffic
+    /// rows at all must not mean "no evidence, keep forever".
+    #[test]
+    fn peer_without_traffic_ages_from_creation() {
+        let usage = PeerUsage {
+            created_at: days_ago(31),
+            last_traffic_at: None,
+        };
+        assert_eq!(
+            reap_reason(&usage, &active_owner(), now(), 30),
+            Some(PeerReap::Idle)
+        );
+
+        let young = PeerUsage {
+            created_at: days_ago(3),
+            last_traffic_at: None,
+        };
+        assert_eq!(reap_reason(&young, &active_owner(), now(), 30), None);
+    }
+
+    /// A revoked grant takes the tunnels of that env with it, but an env the
+    /// subscription owns (its own node) has no grant row by design.
+    #[test]
+    fn revoked_grant_reaps_but_an_owned_env_does_not() {
+        let fresh = PeerUsage {
+            created_at: days_ago(1),
+            last_traffic_at: Some(days_ago(1)),
+        };
+        let revoked = PeerOwner {
+            grant_seen: true,
+            ..PeerOwner::default()
+        };
+        assert_eq!(
+            reap_reason(&fresh, &revoked, now(), 30),
+            Some(PeerReap::GrantRevoked)
+        );
+
+        let owned = PeerOwner {
+            env_owned: true,
+            ..revoked
+        };
+        assert_eq!(reap_reason(&fresh, &owned, now(), 30), None);
+    }
+
+    /// `peer_idle_days = 0` is the kill switch: rights are still enforced,
+    /// age is not.
+    #[test]
+    fn zero_idle_days_disables_only_the_age_rule() {
+        let old = PeerUsage {
+            created_at: days_ago(400),
+            last_traffic_at: Some(days_ago(400)),
+        };
+        assert_eq!(reap_reason(&old, &active_owner(), now(), 0), None);
+        let expired = PeerOwner {
+            expired: true,
+            ..PeerOwner::default()
+        };
+        assert_eq!(
+            reap_reason(&old, &expired, now(), 0),
+            Some(PeerReap::SubscriptionEnded)
+        );
     }
 
     fn grant(protos: Vec<Tag>, expires_at: Option<DateTime<Utc>>, limit: Option<i64>) -> Grant {
@@ -814,5 +1134,86 @@ mod tests {
         assert_eq!(Refusal::NoGrant.status(), 403);
         assert_eq!(Refusal::NoFreeAddress.status(), 503);
         assert_eq!(Refusal::BadPublicKey.status(), 400);
+    }
+}
+
+#[cfg(test)]
+mod subscription_cap_tests {
+    use super::*;
+
+    fn limits(per_subscription: i64) -> Limits {
+        Limits {
+            per_device: 3,
+            per_subscription,
+            devices_per_subscription: 15,
+        }
+    }
+
+    /// One address per pool is the normal shape: 15 pools × 3 devices must not
+    /// trip a subscription-wide counter, so `0` has to mean "no cap".
+    #[test]
+    fn zero_means_no_subscription_cap() {
+        let l = limits(0);
+        assert!(l.check_subscription(1_000).is_ok());
+        assert!(l.check_subscription(i64::MAX).is_ok());
+    }
+
+    /// An explicit number still throttles, and the per-(device, pool) cap is
+    /// unaffected by either setting.
+    #[test]
+    fn an_explicit_cap_still_bites() {
+        let l = limits(5);
+        assert!(l.check_subscription(4).is_ok());
+        assert!(matches!(
+            l.check_subscription(5),
+            Err(Refusal::SubscriptionLimit(5))
+        ));
+        assert!(l.check_device_peers(2).is_ok());
+        assert!(matches!(
+            l.check_device_peers(3),
+            Err(Refusal::PeersLimit(3))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod plane_tests {
+    use super::Plane;
+
+    /// (a) A fresh subscription is on the v1 plane: the column defaults to
+    /// `v1`, and an older backend/absent column must read the same way.
+    #[test]
+    fn a_fresh_subscription_is_on_the_v1_plane() {
+        assert_eq!(Plane::from_db(None), Plane::V1);
+        assert_eq!(Plane::from_db(Some("v1")), Plane::V1);
+        assert_eq!(Plane::default(), Plane::V1);
+        assert_eq!(Plane::V1.as_str(), "v1");
+    }
+
+    /// (b) The first live peer moves a pure v1 subscription to v2.
+    #[test]
+    fn the_first_peer_moves_a_subscription_to_v2() {
+        assert_eq!(Plane::V1.after_peer(false), Some(Plane::V2));
+        assert_eq!(Plane::from_db(Some("v1")).after_peer(false), Some(Plane::V2));
+    }
+
+    /// (c) A subscription that also still has a live v1 connection is dual:
+    /// calling it v2 would hide the client that still uses the old plane.
+    #[test]
+    fn a_peer_next_to_live_connections_makes_the_plane_dual() {
+        assert_eq!(Plane::V1.after_peer(true), Some(Plane::Dual));
+    }
+
+    /// A recorded migration is never undone by another peer, and every stored
+    /// value round-trips.
+    #[test]
+    fn a_marked_subscription_is_never_moved_back() {
+        for plane in [Plane::V2, Plane::Dual] {
+            assert_eq!(plane.after_peer(false), None);
+            assert_eq!(plane.after_peer(true), None);
+            assert_eq!(Plane::from_db(Some(plane.as_str())), plane);
+        }
+        // Unknown values degrade to the historical plane instead of failing.
+        assert_eq!(Plane::from_db(Some("future")), Plane::V1);
     }
 }

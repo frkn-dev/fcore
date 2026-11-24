@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly refresh of the FRKN exchange IPv4 zone (RU exit group: verified IPs of Binance/OKX/Bybit/Gate/KuCoin/MEXC/Bitget/...)
+
+[Timer]
+# Same cadence as the `ai` / `ai-cn` zones: an hour-old answer is still good,
+# and the jitter keeps the three resolvers off the same second.
+OnCalendar=hourly
+RandomizedDelaySec=5m
+# A host that was down at the top of the hour catches up on the next boot.
+Persistent=true
+Unit=frkn-geo-exch4-update.service
+
+[Install]
+WantedBy=timers.target

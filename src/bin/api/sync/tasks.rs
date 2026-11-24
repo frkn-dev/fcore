@@ -299,6 +299,13 @@ where
     async fn add_sub(&self, sub: Subscription) -> SyncResult<Status> {
         info!("Adding subscription: {}", sub.id);
 
+        // Own nodes are a capability of any account, not a plan: a new
+        // top-level subscription gets the deployment quota. Children live on
+        // their owner's nodes and never get one. The quota is applied here —
+        // the one path every creation flow (key, iap, admin, private account)
+        // goes through — so no handler can forget it.
+        let sub = sub.with_own_nodes_default(self.own_nodes_default);
+
         subscription_audit::log_days_change(
             "created",
             sub.id,

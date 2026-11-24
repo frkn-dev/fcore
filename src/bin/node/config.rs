@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use fcore::{ApiAccessConfig, MetricsTxConfig, NodeConfigRaw, Result, Settings};
+use fcore::{ApiAccessConfig, Error, H2Settings, MetricsTxConfig, NodeConfigRaw, Result, Settings};
 
 fn default_disabled() -> bool {
     false
@@ -134,8 +134,13 @@ pub struct XrayConfig {
 
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct H2Config {
-    #[serde(default = "default_disabled")]
+    #[serde(default)]
     pub enabled: bool,
+    /// Hysteria2 config file of the inbound. It is also the single source of
+    /// truth for the announced listener: `listen` gives the port, `host` (or
+    /// the first `acme.domains` entry) gives the name clients dial. fnode never
+    /// starts hysteria2 itself — the process is a separate systemd unit.
+    #[serde(default)]
     pub path: String,
 }
 
@@ -209,3 +214,4 @@ mod snapshot_cfg_tests {
         assert!(c.is_divergent(45, 20));
     }
 }
+

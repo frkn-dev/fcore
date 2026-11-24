@@ -47,6 +47,8 @@ cargo test --lib
 ```
 
 - Feature flags are load-bearing: `api`/`auth` build **without** default features, `node` needs `xray,wireguard,amnezia-wg`. A plain `cargo build` is not the release build.
+- **Build the linux binaries on the build host (`build01`, 45.9.13.213), never on the api host and never on a mac.** The api host is x86_64 linux, so a mac build lands there as an arm64/macOS binary and systemd dies with `Exec format error` — that took production down for ~1.5 min. Compiling on the api host itself steals its CPU from live traffic. Path on the host: `/root/build/ffcore` → `target/release/api`.
+- A locally built `target/release/api` (macOS arm64) is for tests only; before any deploy check `file <binary>` says `ELF 64-bit LSB … x86-64`.
 - CI (`rust.yml`, `release.yml`) is `workflow_dispatch`-only and runs on the self-hosted build server. The normal path is `frkn-services`'s `deploy/server-release.sh`, not GitHub Actions.
 - Version lives in `Cargo.toml` and is bumped on the feature branch.
 

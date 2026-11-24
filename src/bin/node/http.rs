@@ -9,7 +9,7 @@ use fcore::{
         request::ConnType,
         response::{Instance, InstanceWithId, ResponseMessage},
     },
-    ConnectionBaseOperations, Env, Error, Inbound, NodeType, Result, Tag, Topic,
+    ConnectionBaseOperations, Endpoint, Env, Error, Inbound, NodeType, Result, Tag, Topic,
 };
 
 use crate::node::Node;
@@ -28,9 +28,26 @@ pub struct NodeRequest {
     pub country: String,
     pub r#type: NodeType,
     pub cluster: Option<String>,
+    /// Entry points of this node in the ONE `[[node.endpoints]]` shape
+    /// (`ip` + optional `port`/`weight`/`label`). The api stores and publishes
+    /// exactly this list; `node_ips`/`node_weights` below are the DEPRECATED
+    /// mirror an old api build still reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<Endpoint>,
+    /// `true` when this node's config still declares the DEPRECATED
+    /// `node_ips`/`node_weights` keys. Counted by the api (`/status`) so the
+    /// legacy path is removed only once every node reports `false`.
+    #[serde(default)]
+    pub endpoints_legacy: bool,
+    /// DEPRECATED — use `[[node.endpoints]]`.
+    /// TODO(remove-legacy-endpoints): delete once every node config in
+    /// `env/dev/servers` is migrated and no supported api build needs the key.
     /// Extra entry IPs (node_ips[0] == address); None = single-address
     /// node. Old api binaries ignore the unknown field.
     #[serde(default)]
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_ips: Option<Vec<Ipv4Addr>>,
     /// Optional pool/group name (config.toml `[node] pool`). Old api
     /// binaries ignore the unknown field.
@@ -48,7 +65,13 @@ pub struct NodeRequest {
     pub pool_country_name: Option<String>,
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by an
     /// address from `node_ips`. Old api builds ignore the unknown field.
+    ///
+    /// DEPRECATED — use `[[node.endpoints]]`.
+    /// TODO(remove-legacy-endpoints): delete once every node config is migrated.
     #[serde(default)]
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_weights: BTreeMap<String, i32>,
     /// Base URL this node serves its speed-test files from (config.toml
     /// `[node] bench_url`). Omitted when the node has no bench, so a
@@ -284,6 +307,7 @@ where
         Ok(())
     }
 
+    #[allow(deprecated)]
     async fn register_node(&self, endpoint: String, token: String) -> Result<()> {
         let token = load_runtime_token(&token);
         let node = self.node.clone();
@@ -331,6 +355,8 @@ where
             country: node.country,
             r#type: node.r#type,
             cluster: node.cluster.clone(),
+            endpoints: node.endpoints.clone(),
+            endpoints_legacy: node.endpoints_legacy,
             node_ips: node.node_ips.clone(),
             pool: node.pool.clone(),
             pool_translation: node.pool_translation.clone(),
@@ -404,9 +430,10 @@ fn persist_node_token(token: &str) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::NodeRequest;
-    use fcore::{Env, NodeType};
+    use fcore::{Endpoint, Env, NodeType};
     use std::collections::HashMap;
 
     fn request(bench_url: Option<&str>) -> NodeRequest {
@@ -423,6 +450,8 @@ mod tests {
             country: "RU".to_string(),
             r#type: NodeType::Node,
             cluster: None,
+            endpoints: Vec::new(),
+            endpoints_legacy: false,
             node_ips: None,
             pool: None,
             pool_translation: None,
@@ -456,5 +485,55 @@ mod tests {
             json.get("bench_url").is_none(),
             "bench_url must be omitted, not sent as null: {json}"
         );
+    }
+
+    // The announcement carries the ONE endpoint shape: `ip` plus the optional
+    // port/weight/label, together with the legacy mirror an old api reads and
+    // the migration flag the new api counts.
+    #[test]
+    fn registration_carries_endpoints_and_legacy_flag() {
+        let mut req = request(None);
+        req.endpoints = vec![
+            Endpoint {
+                ip: "185.156.108.232".parse().unwrap(),
+                port: Some(8443),
+                weight: 200,
+                label: Some("ru-01".to_string()),
+            },
+            Endpoint {
+                ip: "185.156.108.233".parse().unwrap(),
+                port: None,
+                weight: 100,
+                label: None,
+            },
+        ];
+        req.endpoints_legacy = true;
+        req.node_ips = Some(vec![
+            "185.156.108.232".parse().unwrap(),
+            "185.156.108.233".parse().unwrap(),
+        ]);
+
+        let json = serde_json::to_value(req).unwrap();
+        assert_eq!(json["endpoints"][0]["ip"], "185.156.108.232");
+        assert_eq!(json["endpoints"][0]["port"], 8443);
+        assert_eq!(json["endpoints"][0]["weight"], 200);
+        assert_eq!(json["endpoints"][0]["label"], "ru-01");
+        assert_eq!(json["endpoints"][1]["weight"], 100);
+        assert!(
+            json["endpoints"][1].get("port").is_none(),
+            "an endpoint without a port means 'the inbound port'"
+        );
+        assert_eq!(json["endpoints_legacy"], true);
+        // Legacy mirror still travels, so an old api build keeps working.
+        assert_eq!(json["node_ips"][1], "185.156.108.233");
+    }
+
+    // A single-address node sends no endpoints list at all (an empty one is
+    // meaningless) — the api expands `address` into the same shape.
+    #[test]
+    fn registration_omits_empty_endpoints() {
+        let json = serde_json::to_value(request(None)).unwrap();
+        assert!(json.get("endpoints").is_none(), "{json}");
+        assert_eq!(json["endpoints_legacy"], false);
     }
 }

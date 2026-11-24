@@ -60,9 +60,57 @@ fn split_header(bytes: &[u8]) -> Option<&[u8]> {
     Some(&bytes[12..])
 }
 
-/// The peer mirror keyed by public key. Same map the node keeps in memory and
-/// the snapshot persists — one structure, no conversion.
-pub type PeerMirror = std::collections::HashMap<String, SnapshotPeer>;
+/// Identity of one peer of the peers plane: `(public_key, address)`.
+///
+/// The api may hand the same device key one tunnel address per pool, and every
+/// such address must stay on the node with its own allowed-ip. Keying by the
+/// public key alone collapsed them into whichever message arrived last, and a
+/// client that got the other address came up with no traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PeerIdentity {
+    pub public_key: String,
+    /// Host address without the prefix (`a.b.c.d`).
+    pub address: String,
+}
+
+impl PeerIdentity {
+    pub fn new(public_key: impl Into<String>, address: &str) -> Self {
+        Self {
+            public_key: public_key.into(),
+            address: address
+                .split('/')
+                .next()
+                .unwrap_or(address)
+                .trim()
+                .to_string(),
+        }
+    }
+}
+
+impl SnapshotPeer {
+    pub fn identity(&self) -> PeerIdentity {
+        PeerIdentity::new(self.public_key.clone(), &self.address)
+    }
+}
+
+/// The peer mirror: one entry per `(public_key, address)`, the same map the
+/// node keeps in memory and the snapshot persists — one structure, no
+/// conversion.
+pub type PeerMirror = std::collections::HashMap<PeerIdentity, SnapshotPeer>;
+
+/// Index a file's peer list by identity.
+///
+/// Files written before the mirror was keyed by `(public_key, address)` carry
+/// one entry per key; the address stored in that entry is kept as-is. The
+/// payload layout did not change (still a `Vec<SnapshotPeer>`), so those files
+/// load without a format bump.
+pub fn mirror_from_peers(peers: &[SnapshotPeer]) -> PeerMirror {
+    let mut mirror = PeerMirror::new();
+    for peer in peers {
+        mirror.insert(peer.identity(), peer.clone());
+    }
+    mirror
+}
 
 #[derive(Archive, Deserialize, Serialize, SerdeDeserialize, SerdeSerialize, Debug, Clone)]
 #[archive(check_bytes)]
@@ -354,10 +402,7 @@ where
                 // root fails to deserialize and the file is moved aside.
                 {
                     let mut mirror = self.peers.write().await;
-                    mirror.clear();
-                    for peer in &snapshot.peers {
-                        mirror.insert(peer.public_key.clone(), peer.clone());
-                    }
+                    *mirror = mirror_from_peers(&snapshot.peers);
                 }
                 // The identity check happens before the state is applied: a file
                 // from another env/pool must not touch the interfaces at all.
@@ -555,5 +600,55 @@ mod identity_tests {
             pool: None,
         };
         assert!(identity.mismatch(&meta("dev", None)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+
+    fn peer(peer_id: u128, public_key: &str, address: &str) -> SnapshotPeer {
+        SnapshotPeer {
+            peer_id: uuid::Uuid::from_u128(peer_id),
+            subscription_id: None,
+            tag: Tag::AmneziaPeer,
+            public_key: public_key.to_string(),
+            address: address.to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_file_with_one_entry_per_key_keeps_its_address() {
+        // Written by a node that keyed the mirror by public key: one entry per
+        // key, carrying the address it had at the time. Loading must keep that
+        // address instead of starting empty (which would need a full resync).
+        let file = vec![
+            peer(1, "KEY", "10.88.0.2"),
+            peer(2, "OTHER", "10.88.0.7/32"),
+        ];
+        let mirror = mirror_from_peers(&file);
+
+        assert_eq!(mirror.len(), 2);
+        let key = PeerIdentity::new("KEY", "10.88.0.2");
+        assert_eq!(
+            mirror.get(&key).map(|p| p.address.as_str()),
+            Some("10.88.0.2")
+        );
+        // A prefix in the stored address must not hide the entry.
+        assert!(mirror.contains_key(&PeerIdentity::new("OTHER", "10.88.0.7")));
+    }
+
+    #[test]
+    fn one_key_with_several_addresses_loads_as_several_entries() {
+        let file = vec![peer(1, "KEY", "10.88.0.2"), peer(2, "KEY", "10.88.0.12")];
+        let mirror = mirror_from_peers(&file);
+
+        assert_eq!(mirror.len(), 2);
+        assert_eq!(
+            mirror
+                .get(&PeerIdentity::new("KEY", "10.88.0.12"))
+                .map(|p| p.peer_id),
+            Some(uuid::Uuid::from_u128(2))
+        );
     }
 }

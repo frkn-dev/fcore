@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly refresh of the FRKN Russian state-site IPv4 zone (gosuslugi/esia/pochta/mos.ru/nalog/sfr/courts -> gov exit, msk-tw)
+
+[Timer]
+# Same cadence as the `ai` / `ai-cn` / `exch` / `adult` zones: an hour-old
+# answer is still good, and the jitter keeps the resolvers off the same second.
+OnCalendar=hourly
+RandomizedDelaySec=5m
+# A host that was down at the top of the hour catches up on the next boot.
+Persistent=true
+Unit=frkn-geo-gov4-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly refresh of the FRKN EU pool Chinese-AI direct-whitelist nft set
+
+[Timer]
+# Same cadence as the ai4 set: the resolver on the api host publishes hourly,
+# and a destination that leaves the whitelist between runs simply falls back
+# to the normal path (direct), so an hour of staleness is harmless.
+OnCalendar=hourly
+RandomizedDelaySec=7m
+Persistent=true
+Unit=frkn-geo-aicn4.service
+
+[Install]
+WantedBy=timers.target

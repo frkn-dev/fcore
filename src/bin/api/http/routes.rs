@@ -15,9 +15,9 @@ use super::{
     crypto::{self, AesContext},
     filters::*,
     handlers::{
-        admin::*, amnezia::*, catalog::*, cluster::*, connection::*, geo as geo_handlers,
-        healthcheck_handler, iap::*, key::*, metrics::*, node::*, peers as peers_handlers,
-        premium::*, premium_inventory::*, private::*, score::*, share::*, subscription::*,
+        admin::*, amnezia::*, catalog::*, cluster::*, connection::*, healthcheck_handler, iap::*,
+        key::*, metrics::*, node::*, peers as peers_handlers, premium::*, premium_inventory::*,
+        private::*, score::*, share::*, subscription::*,
     },
     param::*,
     rejection,
@@ -152,13 +152,80 @@ where
             .and(with_param_bool(params.pool_strict_inbounds))
             .and_then(post_node_handler);
 
+        let peers_cfg = self.settings.service.peers.clone();
+        let peers_enabled = peers_cfg.enabled;
+        let peers_remember_days = peers_cfg.remember_days as u64;
+        let peers_per_device = peers_cfg.peers_per_device as u64;
+        let peers_per_subscription = peers_cfg.max_per_subscription as u64;
+        let peers_devices_per_subscription = peers_cfg.max_devices_per_subscription as u64;
+        let peers_auto_prefix = peers_cfg.auto_subnet_prefix as u64;
+        let peers_auto_pool: Option<fcore::IpAddrMask> = match peers_cfg
+            .auto_subnet_pool
+            .as_deref()
+        {
+            Some(raw) => match raw.parse::<fcore::IpAddrMask>() {
+                Ok(pool) => Some(pool),
+                Err(_) => {
+                    tracing::error!(
+                        "peers: auto_subnet_pool {:?} is not a CIDR, auto allocation stays off",
+                        raw
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        // A non-Copy optional value rides as a filter of its own.
+        let with_peers_auto_pool = warp::any().map(move || peers_auto_pool.clone());
+
         let private_mint_install_token_route = warp::post()
             .and(warp::path("private"))
             .and(warp::path("install-token"))
             .and(warp::path::end())
             .and(warp::body::json::<InstallTokenRequest>())
             .and(with_sync(self.sync.clone()))
-            .and_then(mint_install_token_handler);
+            .and(with_peers_auto_pool.clone())
+            .and(with_param_u64(peers_auto_prefix))
+            .and_then(
+                |req: InstallTokenRequest,
+                 sync: MemSync<N, C, S>,
+                 auto_pool: Option<fcore::IpAddrMask>,
+                 auto_prefix: u64| async move {
+                    mint_install_token_handler(
+                        req,
+                        sync,
+                        auto_pool,
+                        auto_prefix as u8,
+                    )
+                    .await
+                },
+            );
+
+        // What the installer asks before it touches the machine: the shard env
+        // (bus topic) and the address block. Read-only — the token survives, so
+        // re-running the installer heals instead of failing.
+        let private_inspect_install_token_route = warp::get()
+            .and(warp::path("private"))
+            .and(warp::path("install-token"))
+            .and(warp::path::param::<String>())
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_peers_auto_pool.clone())
+            .and(with_param_u64(peers_auto_prefix))
+            .and_then(
+                |token: String,
+                 sync: MemSync<N, C, S>,
+                 auto_pool: Option<fcore::IpAddrMask>,
+                 auto_prefix: u64| async move {
+                    inspect_install_token_handler(
+                        token,
+                        sync,
+                        auto_pool,
+                        auto_prefix as u8,
+                    )
+                    .await
+                },
+            );
 
         // Public selfhosted account creation: anyone may open an empty
         // account, but creation is per-IP rate-limited against abuse.
@@ -291,6 +358,7 @@ where
             .and_then(delete_private_user_handler);
 
         let private_routes = private_mint_install_token_route
+            .or(private_inspect_install_token_route)
             .or(private_create_account_route)
             .or(private_register_node_route)
             .or(private_list_nodes_route)
@@ -631,6 +699,35 @@ where
             .and(warp::any().map(move || score_cfg.clone()))
             .and_then(score_list_handler);
 
+        let admin_networks_get_route = warp::get()
+            .and(warp::path!("v1" / "admin" / "networks"))
+            .and(warp::path::end())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(crate::http::handlers::admin::get_admin_networks_handler);
+
+        let admin_peers_revoke_route = warp::post()
+            .and(warp::path!("v1" / "admin" / "peers" / "revoke"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(crate::http::handlers::admin::post_admin_peers_revoke_handler);
+
+        let admin_networks_post_route = warp::post()
+            .and(warp::path!("v1" / "admin" / "networks"))
+            .and(warp::path::end())
+            .and(warp::body::json())
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_bool(admin_enabled))
+            .and(with_param_string(admin_token.clone()))
+            .and(warp::header::optional::<String>("authorization"))
+            .and_then(crate::http::handlers::admin::post_admin_network_handler);
+
         let admin_score_history_route = warp::get()
             .and(warp::path!("v1" / "admin" / "nodes" / "score" / "history"))
             .and(warp::path::end())
@@ -643,6 +740,9 @@ where
 
         let admin_routes = admin_page_route
             .or(admin_score_history_route)
+            .or(admin_peers_revoke_route)
+            .or(admin_networks_get_route)
+            .or(admin_networks_post_route)
             .or(admin_score_route)
             .or(admin_api_state_route)
             .or(admin_premium_inventory_route)
@@ -1007,13 +1107,6 @@ where
             .and(with_param_vec(params.key_sign_token.clone()))
             .and_then(post_key_handler);
 
-        // Public geo lists for the OpenWrt router image (`/router/geo/*`):
-        // plain text, no AGW envelope, no auth — the same shape as
-        // `/sub/<token>`. The daily `frkn-geo-update` timer (deploy/geo/)
-        // replaces the file atomically; `If-None-Match` keeps router polling
-        // at a 304 most of the time.
-        let geo_routes = geo_handlers::routes(params.geo_dir.clone());
-
         let activate_conn_resolver = params.conn_resolver();
         let mrkting_config = params.mrkting.clone();
 
@@ -1331,6 +1424,23 @@ where
                 crate::http::handlers::alerts::SendAlertRequest,
             >())
             .and_then(crate::http::handlers::alerts::admin_alerts_send_handler);
+        // POST /v1/admin/alerts/exit — health группы выходов от watchdog'ов на
+        // нодах. Дедупликация живёт здесь, в процессе api: она общая для всех
+        // нод и переживает рестарт (сид из alert_events).
+        let exit_dedupe: std::sync::Arc<std::sync::Mutex<crate::alerts::ExitDedupe>> =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::alerts::ExitDedupe::new()));
+        let exit_alerts_cfg = alerts_cfg.clone();
+        let post_admin_alerts_exit_route = warp::post()
+            .and(warp::path!("v1" / "admin" / "alerts" / "exit"))
+            .and(warp::path::end())
+            .and(mgmt_auth.clone())
+            .and(warp::any().map(move || exit_dedupe.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(warp::any().map(move || exit_alerts_cfg.clone()))
+            .and(warp::body::json::<
+                crate::http::handlers::alerts::ExitAlertRequest,
+            >())
+            .and_then(crate::http::handlers::alerts::admin_exit_alert_handler);
 
         // Digest data for mrkting's daily/weekly/monthly email: the api owns
         // the data, mrkting owns the schedule, the template and the SMTP.
@@ -1697,32 +1807,6 @@ where
         // Peers: the client owns the key pair, the api hands out the address.
         // Mounted even when disabled — the handlers answer 404 in that case,
         // so a half-configured deployment is visible instead of silent.
-        let peers_cfg = self.settings.service.peers.clone();
-        let peers_enabled = peers_cfg.enabled;
-        let peers_remember_days = peers_cfg.remember_days as u64;
-        let peers_per_device = peers_cfg.peers_per_device as u64;
-        let peers_per_subscription = peers_cfg.max_per_subscription as u64;
-        let peers_devices_per_subscription = peers_cfg.max_devices_per_subscription as u64;
-        let peers_auto_prefix = peers_cfg.auto_subnet_prefix as u64;
-        let peers_auto_pool: Option<fcore::IpAddrMask> = match peers_cfg
-            .auto_subnet_pool
-            .as_deref()
-        {
-            Some(raw) => match raw.parse::<fcore::IpAddrMask>() {
-                Ok(pool) => Some(pool),
-                Err(_) => {
-                    tracing::error!(
-                        "peers: auto_subnet_pool {:?} is not a CIDR, auto allocation stays off",
-                        raw
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-        // A non-Copy optional value rides as a filter of its own.
-        let with_peers_auto_pool = warp::any().map(move || peers_auto_pool.clone());
-
         // Кабинет: на какой схеме подписка (legacy/peers/mixed) и что рисовать.
         // Плоский GET, как остальные ручки ЛК — конверта в браузере нет.
         let cabinet_route = warp::get()
@@ -1741,6 +1825,56 @@ where
                 },
             );
 
+        // Кабинет: «Докупить обычный» / «Докупить Super Duper». Плоский POST,
+        // как `GET /cabinet/{id}`: идентификатор подписки — это capability из
+        // пути (тот же, что уже открывает кабинет), тело называет только план.
+        // Поэтому произвольный `subscription_id` из тела покупать не может.
+        let buy_plan_route = warp::post()
+            .and(warp::path!("subscription" / Uuid / "buy"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(warp::body::json::<peers_handlers::BuyPlanRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |subscription_id: Uuid,
+                 enabled: bool,
+                 req: peers_handlers::BuyPlanRequest,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(peers_handlers::post_buy_plan_handler(subscription_id, req, sync).await)
+                },
+            );
+
+        // payment-gw: исполнение оплаченной покупки плана. Service token, как у
+        // остальных внутренних ручек: платёжка — единственный, кто сюда пишет.
+        let plan_purchase_route = warp::post()
+            .and(warp::path!("subscription" / Uuid / "plan"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(mgmt_auth.clone())
+            .and(warp::body::json::<peers_handlers::PlanPurchaseRequest>())
+            .and(with_sync(self.sync.clone()))
+            .and_then(
+                |subscription_id: Uuid,
+                 enabled: bool,
+                 req: peers_handlers::PlanPurchaseRequest,
+                 sync: MemSync<N, C, S>| async move {
+                    if !enabled {
+                        return Ok::<Box<dyn warp::Reply>, warp::Rejection>(
+                            peers_handlers::not_enabled(),
+                        );
+                    }
+                    Ok(
+                        peers_handlers::post_plan_purchase_handler(subscription_id, req, sync)
+                            .await,
+                    )
+                },
+            );
+
         // Client peer routes speak the AGW envelope only: every one of them is a
         // POST with an encrypted body, so `subscription_id` never lands in a
         // query string, an access log or a crash report. Ids that used to sit
@@ -1756,7 +1890,7 @@ where
             .and(with_param_u64(peers_per_device))
             .and(with_param_u64(peers_per_subscription))
             .and(with_param_u64(peers_devices_per_subscription))
-            .and(with_peers_auto_pool)
+            .and(with_peers_auto_pool.clone())
             .and(with_param_u64(peers_auto_prefix))
             .and_then(
                 |enabled: bool,
@@ -1781,6 +1915,56 @@ where
                         devices_per_subscription: devices_per_subscription as i64,
                     };
                     let reply = peers_handlers::post_peers_handler(
+                        req,
+                        sync,
+                        limits,
+                        auto_pool,
+                        auto_prefix as u8,
+                    )
+                    .await;
+                    crypto::encrypt_gateway_reply(reply.into_response(), ctx).await
+                },
+            );
+
+        // POST /v1/peers/prepare: every peer pool of the grant in one call.
+        // Same envelope and same defaults as the single create; a full pool is
+        // reported in `skipped`, not answered as a failed request.
+        let post_peers_prepare_route = warp::post()
+            .and(warp::path!("v1" / "peers" / "prepare"))
+            .and(warp::path::end())
+            .and(with_param_bool(peers_enabled))
+            .and(crypto::with_agw_decryption::<
+                peers_handlers::PeerPrepareRequest,
+            >(agw_key.clone()))
+            .and(with_sync(self.sync.clone()))
+            .and(with_param_u64(peers_per_device))
+            .and(with_param_u64(peers_per_subscription))
+            .and(with_param_u64(peers_devices_per_subscription))
+            .and(with_peers_auto_pool.clone())
+            .and(with_param_u64(peers_auto_prefix))
+            .and_then(
+                |enabled: bool,
+                 req: peers_handlers::PeerPrepareRequest,
+                 ctx: Option<AesContext>,
+                 sync: MemSync<N, C, S>,
+                 per_device: u64,
+                 per_subscription: u64,
+                 devices_per_subscription: u64,
+                 auto_pool: Option<fcore::IpAddrMask>,
+                 auto_prefix: u64| async move {
+                    if !enabled {
+                        return crypto::encrypt_gateway_reply(
+                            peers_handlers::not_enabled().into_response(),
+                            ctx,
+                        )
+                        .await;
+                    }
+                    let limits = crate::peers::Limits {
+                        per_device: per_device as i64,
+                        per_subscription: per_subscription as i64,
+                        devices_per_subscription: devices_per_subscription as i64,
+                    };
+                    let reply = peers_handlers::post_peers_prepare_handler(
                         req,
                         sync,
                         limits,
@@ -2066,6 +2250,7 @@ where
                 );
 
         let peers_routes = post_peers_route
+            .or(post_peers_prepare_route)
             .or(post_peers_list_route)
             .or(post_peers_delete_route)
             .or(post_devices_list_route)
@@ -2075,6 +2260,8 @@ where
             .or(get_access_route)
             .or(get_capacity_route)
             .or(cabinet_route)
+            .or(buy_plan_route)
+            .or(plan_purchase_route)
             .or(post_access_route)
             .or(delete_access_route)
             .or(get_support_route);
@@ -2200,8 +2387,6 @@ where
             .or(post_key_route)
             .or(post_activate_key_route)
             .or(post_activate_peers_route)
-            // Public geo lists (OpenWrt /router/geo/*)
-            .or(geo_routes)
             // Amnezia
             .or(post_amnezia_services_route)
             .or(post_amnezia_account_route)
@@ -2224,6 +2409,7 @@ where
             .or(get_admin_alerts_route)
             .or(post_admin_alerts_test_route)
             .or(post_admin_alerts_send_route)
+            .or(post_admin_alerts_exit_route)
             .or(admin_digest_route)
             // Peers
             .or(peers_routes)

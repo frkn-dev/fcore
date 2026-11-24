@@ -1,0 +1,21 @@
+[Unit]
+Description=FRKN geo lists: resolve + TLS-verify the AI IPv4 zone (api.frkn.org /router/geo/ai4.zone)
+Documentation=https://github.com/frkn-dev/fcore/blob/main/docs/router-geo.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The domain list is config (installed from the env repo, read-only here); the
+# zone is output and lives next to ru.zone, where the api reads it.
+ExecStart=/usr/local/lib/frkn/geo/update-ai4-zone.py --domains /etc/frkn/geo/domains/ai.txt
+Environment=GEO_DIR=/var/lib/frkn/geo
+# Up to 48 hosts x 2 resolvers + up to a few hundred TLS probes; normally well
+# under a minute, this only bounds a network that hangs.
+TimeoutStartSec=300
+# Writes its own directory only; /etc stays readable (the domain list).
+ProtectSystem=strict
+ReadWritePaths=/var/lib/frkn/geo
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true

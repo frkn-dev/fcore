@@ -30,12 +30,38 @@ pub struct InstallTokenRequest {
     pub subscription_id: Uuid,
 }
 
+/// The only pool of an account's own shard. One shard per account
+/// (`custompersonal<sub-uuid>`) and one pool inside it: the clients get a
+/// single card with every node of the account, and no pool picker. Shared
+/// shard pools never use this name — it is written only by the private
+/// registration paths.
+pub(crate) const PRIVATE_POOL: &str = "own";
+
 #[derive(Debug, Serialize)]
 pub struct InstallTokenResponse {
     pub token: String,
     pub scope_env: String,
+    /// Address block of the account's shard (`10.89.0.0/16`). The installer
+    /// brings the peer interface up inside it (`<block>.1/16`) and NATs exactly
+    /// that range: without it a node answers on a subnet the api never
+    /// allocates from, and every handshake dies silently.
+    pub env_block: String,
+    /// Node build the api is running with (`v0.7.47`): the installer downloads
+    /// `node-<arch>` of this release instead of a pinned old tag.
+    pub node_version: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub install_hint: String,
+}
+
+/// What an install token means for its node, resolved before anything is
+/// installed: the shard env the node must declare (the bus topic is derived
+/// from it) and the address block its peer interface must live in.
+#[derive(Debug, Serialize)]
+pub struct InstallTokenInfoResponse {
+    pub scope_env: String,
+    pub env_block: String,
+    pub node_version: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +123,9 @@ impl LimitUsage {
 pub struct PrivateStateResponse {
     pub subscription_id: Uuid,
     pub plan_kind: String,
+    /// Own-node quota of the account: the only gate of the install-token
+    /// endpoint and of the cabinet's own-node block (`> 0` shows it).
+    pub own_nodes_limit: i64,
     pub servers: LimitUsage,
     pub users: LimitUsage,
 }
@@ -295,6 +324,19 @@ fn too_many_requests(msg: &str) -> warp::reply::WithStatus<warp::reply::Json> {
 
 fn personal_env(subscription_id: Uuid) -> Env {
     Env::personal_for(subscription_id)
+}
+
+/// The subscription that owns a personal shard (`custompersonal<uuid>`).
+///
+/// A node re-registering with its node token carries only its env, and the
+/// rights of the account must be re-applied on that path too. The env name is
+/// derived from the subscription id, so it is the subscription id.
+pub(crate) fn subscription_from_personal_env(env: &Env) -> Option<Uuid> {
+    let name = env.to_string();
+    let suffix = name
+        .strip_prefix("custompersonal")
+        .or_else(|| name.strip_prefix("personal"))?;
+    Uuid::parse_str(suffix).ok()
 }
 
 /// Env whose nodes belong to this account: a regular account owns nodes on its
@@ -500,9 +542,315 @@ where
     Ok(personal)
 }
 
+/// Why `POST /private/install-token` refuses. Kept as data so the handler
+/// only maps it to a status and the rules stay unit-testable without a DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InstallTokenDenial {
+    /// A user of an own-node account never hosts nodes of its own: it lives
+    /// on the owner's nodes only.
+    ChildAccount,
+    /// The account holds no own-node quota.
+    NotEnabled,
+    /// Every own-node slot is taken (offline nodes count too).
+    ServerLimit { used: i64, limit: i64 },
+    /// Too many install tokens are still usable.
+    TooManyTokens,
+}
+
+/// The gate of `POST /private/install-token`. Hosting a node is a capability
+/// of any non-child account, not a plan: `plan_kind = selfhosted` (the old
+/// reseller concept) is deliberately not consulted. Only the parent link, the
+/// account's own-node quota and the two caps decide.
+pub(crate) fn install_token_denial(
+    parent_id: Option<Uuid>,
+    own_nodes_limit: i64,
+    servers_used: i64,
+    active_tokens: i64,
+) -> Option<InstallTokenDenial> {
+    if parent_id.is_some() {
+        return Some(InstallTokenDenial::ChildAccount);
+    }
+    if own_nodes_limit <= 0 {
+        return Some(InstallTokenDenial::NotEnabled);
+    }
+    if servers_used >= own_nodes_limit {
+        return Some(InstallTokenDenial::ServerLimit {
+            used: servers_used,
+            limit: own_nodes_limit,
+        });
+    }
+    if active_tokens >= MAX_ACTIVE_INSTALL_TOKENS {
+        return Some(InstallTokenDenial::TooManyTokens);
+    }
+    None
+}
+
+/// Node build the api ships with (`v0.7.47`): the installer asks for it instead
+/// of pinning a tag that drifts away from the api every release.
+pub(crate) fn node_version() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The address block of one shard, allocated on first use.
+///
+/// `env_networks` is the api's own statement of which range a shard holds: peers
+/// are numbered out of it, and a node whose peer interface sits outside it would
+/// answer nobody. Account-owned shards are not listed in the api config (nobody
+/// knows their number in advance), so the block is carved out of the auto pool
+/// on the first mint and returned to the installer, which writes
+/// `<block>.1/16` on the interface. Idempotent: an env that already holds a
+/// block keeps it, however many tokens are minted.
+async fn ensure_env_block<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    env: &Env,
+    auto_pool: Option<&IpAddrMask>,
+    auto_prefix: u8,
+) -> Option<String>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    if let Some(block) = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .block_masks(env)
+            .first()
+            .map(|block| block.to_string())
+    } {
+        return Some(block);
+    }
+
+    let Some(pool) = auto_pool else {
+        tracing::error!(
+            "install-token: shard {} has no block and [service.peers] auto_subnet_pool is unset",
+            env
+        );
+        return None;
+    };
+
+    match memory
+        .db
+        .peers()
+        .allocate_env_block(env, pool, auto_prefix)
+        .await
+    {
+        Ok(Some(block)) => {
+            tracing::info!("install-token: shard {} got {} from the auto pool", env, block);
+            memory
+                .memory
+                .write()
+                .await
+                .peers_state
+                .env_networks
+                .entry(env.clone())
+                .or_default()
+                .push(block.to_string());
+            Some(block.to_string())
+        }
+        Ok(None) => {
+            tracing::error!("install-token: the auto pool is exhausted, {} got no block", env);
+            None
+        }
+        Err(e) => {
+            tracing::error!("install-token: cannot allocate a block for {}: {}", env, e);
+            None
+        }
+    }
+}
+
+/// Tags of a private node that turn into cards of its own shard: the peer
+/// plane plus hysteria2. The node announces them; the api derives the grant
+/// from the announcement, never from anything the installer asked for.
+fn private_card_tags(node: &fcore::Node) -> Vec<Tag> {
+    let mut tags: Vec<Tag> = node
+        .inbounds
+        .keys()
+        .copied()
+        .filter(|tag| tag.is_peer() || *tag == Tag::Hysteria2)
+        .collect();
+    tags.sort_by_key(|tag| tag.to_string());
+    tags.dedup();
+    tags
+}
+
+/// Make the node's peer interface and the shard's block agree.
+///
+/// Two jobs, both fail-closed: a shard nobody gave a block takes the one the
+/// node brought (`10.89.0.1/16` -> `10.89.0.0/16`, the older shards' habit), and
+/// a peer interface outside the block is refused — the api would number peers
+/// from its block while the node answers on another subnet, and every handshake
+/// dies without a single log line.
+async fn settle_private_block<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    node: &fcore::Node,
+) -> Result<(), String>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let declared = {
+        let mem = memory.memory.read().await;
+        mem.peers_state.block_masks(&node.env)
+    };
+
+    let mut blocks = declared;
+    if blocks.is_empty() {
+        if let Some(block) = super::node::adopted_peer_block(node) {
+            match memory.db.peers().insert_env_block(&node.env, &block).await {
+                Ok(crate::postgres::peers::Inserted::Done) => {
+                    tracing::info!(
+                        "peers: own shard {} adopted {} from node {} ({})",
+                        node.env,
+                        block,
+                        node.uuid,
+                        node.hostname
+                    );
+                    memory
+                        .memory
+                        .write()
+                        .await
+                        .peers_state
+                        .env_networks
+                        .entry(node.env.clone())
+                        .or_default()
+                        .push(block.to_string());
+                    blocks = vec![block];
+                }
+                Ok(crate::postgres::peers::Inserted::Conflict) => {
+                    return Err(format!(
+                        "peer subnet {} is already held by another shard — pick another range",
+                        block
+                    ));
+                }
+                Err(e) => tracing::error!("peers: cannot store the subnet of {}: {}", node.env, e),
+            }
+        }
+    }
+
+    if blocks.is_empty() {
+        // No peer interface at all (v1-only install) or an api without an auto
+        // pool: nothing to check. `/v1/peers` answers `env_not_served` later.
+        return Ok(());
+    }
+
+    for (tag, address) in super::node::peer_interface_addresses(node) {
+        if !super::node::address_in_blocks(&address, &blocks) {
+            return Err(format!(
+                "peer interface {} ({:?}) sits outside the shard blocks of {} ({})",
+                address,
+                tag,
+                node.env,
+                blocks
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Rights and peer set of an own node, applied on every registration.
+///
+/// Without the grant `/v1/locations` has no card to render, so the node the user
+/// just installed simply never appears. Without the `peers-init` push the node's
+/// interface stays empty until somebody creates a tunnel — and a node that lost
+/// its snapshot keeps an empty interface forever, because a 200 on re-register
+/// used to send nothing. Both are idempotent, so the refresh path runs them too.
+async fn seed_private_shard<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: Uuid,
+    node: &fcore::Node,
+) where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let tags = private_card_tags(node);
+    if tags.is_empty() {
+        return;
+    }
+
+    // One grant per (subscription, env): `own` shard, no term, no quota — the
+    // account runs the machine.
+    match memory
+        .db
+        .peers()
+        .upsert_grant(subscription_id, &node.env, &tags, "install", None, None)
+        .await
+    {
+        Ok(row) => {
+            memory
+                .memory
+                .write()
+                .await
+                .peers_state
+                .access
+                .insert(subscription_id, row.clone());
+            tracing::info!(
+                "private: grant for {} on {} ({:?})",
+                subscription_id,
+                row.env,
+                tags
+            );
+        }
+        Err(e) => tracing::error!(
+            "private: cannot grant {} its own shard {}: {}",
+            subscription_id,
+            node.env,
+            e
+        ),
+    }
+
+    let peer_tags: Vec<Tag> = node
+        .inbounds
+        .keys()
+        .copied()
+        .filter(|tag| tag.is_peer())
+        .collect();
+    if peer_tags.is_empty() {
+        return;
+    }
+    super::peers::publish_peers_init(
+        memory,
+        node.uuid,
+        &node.env,
+        node.pool.as_deref(),
+        &peer_tags,
+    )
+    .await;
+}
+
 pub async fn mint_install_token_handler<N, C, S>(
     req: InstallTokenRequest,
     memory: MemSync<N, C, S>,
+    auto_pool: Option<IpAddrMask>,
+    auto_prefix: u8,
 ) -> Result<impl Reply, warp::Rejection>
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -517,48 +865,44 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    // A user of a selfhosted account never hosts nodes of its own: it lives
-    // on the owner's nodes only, so it must not get an install token (and no
+    // A user of an own-node account must not get an install token (and no
     // personal env of its own either — checked before any scope side effect).
-    {
+    let parent_id = {
         let mem = memory.memory.read().await;
-        if let Some(sub) = mem.subscriptions.find_by_id(&req.subscription_id) {
-            if sub.parent_id().is_some() {
-                return Ok(
-                    forbidden("a user of a selfhosted account cannot host nodes").into_response(),
-                );
+        match mem.subscriptions.find_by_id(&req.subscription_id) {
+            Some(sub) => {
+                if sub.parent_id().is_some() {
+                    return Ok(forbidden(
+                        "a user of a selfhosted account cannot host nodes",
+                    )
+                    .into_response());
+                }
+                sub.parent_id()
             }
+            None => None,
         }
-    }
+    };
 
     let scope_env = match ensure_personal_scope(&memory, req.subscription_id).await {
         Ok(env) => env,
         Err(reply) => return Ok(reply.into_response()),
     };
 
-    // Server cap of the owning account. Refuse to mint an install token once
+    // Own-node quota of the account. Refuse to mint an install token once
     // every slot is taken: the registration itself would be rejected anyway
     // (409 `server_limit_reached`), and this keeps the cabinet honest.
-    {
+    let (limit, used) = {
         let mem = memory.memory.read().await;
-        if let Some(sub) = mem.subscriptions.find_by_id(&req.subscription_id) {
-            // Own nodes are a right, not a plan: a paid account may have it too.
-            let limit = sub.own_nodes_limit();
-            if limit <= 0 {
-                return Ok(super::share::forbidden(
-                    "own nodes are not enabled for this account",
-                ));
-            }
-            let used = mem
-                .nodes
-                .get_by_env(&scope_env)
-                .map(|nodes| nodes.len() as i64)
-                .unwrap_or(0);
-            if used >= limit {
-                return Ok(limit_reached("server_limit_reached", used, limit).into_response());
-            }
-        }
-    }
+        let Some(sub) = mem.subscriptions.find_by_id(&req.subscription_id) else {
+            return Ok(http::not_found("subscription not found").into_response());
+        };
+        let used = mem
+            .nodes
+            .get_by_env(&scope_env)
+            .map(|nodes| nodes.len() as i64)
+            .unwrap_or(0);
+        (sub.own_nodes_limit(), used)
+    };
 
     let active = match memory
         .db
@@ -570,15 +914,37 @@ where
         Err(_) => return Ok(http::internal_error("db error").into_response()),
     };
 
-    if active >= MAX_ACTIVE_INSTALL_TOKENS {
-        return Ok(too_many_requests(&format!(
-            "too many active install tokens (max {})",
-            MAX_ACTIVE_INSTALL_TOKENS
-        ))
-        .into_response());
+    match install_token_denial(parent_id, limit, used, active) {
+        None => {}
+        Some(InstallTokenDenial::ChildAccount) => {
+            return Ok(forbidden("a user of a selfhosted account cannot host nodes").into_response())
+        }
+        Some(InstallTokenDenial::NotEnabled) => {
+            return Ok(super::share::forbidden(
+                "own nodes are not enabled for this account",
+            ))
+        }
+        Some(InstallTokenDenial::ServerLimit { used, limit }) => {
+            return Ok(limit_reached("server_limit_reached", used, limit).into_response())
+        }
+        Some(InstallTokenDenial::TooManyTokens) => {
+            return Ok(too_many_requests(&format!(
+                "too many active install tokens (max {})",
+                MAX_ACTIVE_INSTALL_TOKENS
+            ))
+            .into_response())
+        }
     }
 
     let token = format!("inst_{}", Uuid::new_v4().simple());
+
+    // The block is part of the token, not a script constant: the installer
+    // writes `<block>.1/16` on the peer interface and NATs exactly that range.
+    let Some(env_block) = ensure_env_block(&memory, &scope_env, auto_pool.as_ref(), auto_prefix).await
+    else {
+        return Ok(http::internal_error("install token: no address block for the shard").into_response());
+    };
+
     let row = match memory
         .db
         .install_token()
@@ -596,11 +962,66 @@ where
             response: Some(InstallTokenResponse {
                 token: row.token.clone(),
                 scope_env: scope_env.to_string(),
+                env_block,
+                node_version: node_version(),
                 expires_at: row.expires_at,
                 install_hint: format!(
                     "curl -fsSL https://frkn.org/install | bash -s -- --token {}",
                     row.token
                 ),
+            }),
+        }),
+        StatusCode::OK,
+    )
+    .into_response())
+}
+
+/// `GET /private/install-token/<token>`: what the installer has to know before
+/// it touches the machine — the shard env (the bus topic is derived from it) and
+/// the address block. Read-only: the token stays usable for the registration
+/// that follows, so the installer can be re-run safely.
+pub async fn inspect_install_token_handler<N, C, S>(
+    token: String,
+    memory: MemSync<N, C, S>,
+    auto_pool: Option<IpAddrMask>,
+    auto_prefix: u8,
+) -> Result<impl Reply, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    if !token.starts_with("inst_") {
+        return Ok(http::bad_request("install token required").into_response());
+    }
+
+    let row = match memory.db.install_token().find_usable(&token).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return Ok(unauthorized("invalid or expired install token").into_response()),
+        Err(_) => return Ok(http::internal_error("db error").into_response()),
+    };
+
+    let Some(env_block) = ensure_env_block(&memory, &row.scope_env, auto_pool.as_ref(), auto_prefix).await
+    else {
+        return Ok(http::internal_error("install token: no address block for the shard").into_response());
+    };
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&ResponseMessage {
+            status: StatusCode::OK.as_u16(),
+            message: "Ok".to_string(),
+            response: Some(InstallTokenInfoResponse {
+                scope_env: row.scope_env.to_string(),
+                env_block,
+                node_version: node_version(),
+                expires_at: row.expires_at,
             }),
         }),
         StatusCode::OK,
@@ -711,13 +1132,13 @@ where
         Err(_) => return Ok(http::internal_error("db error").into_response()),
     };
 
-    // A private node may only live in a personal shard. The declared kind wins;
-    // legacy `custompersonal…` envs have no `env_capacity` row and fall back to
-    // the name.
+    // A private node may only live in an own-node shard. The declared kind
+    // wins; legacy `custompersonal…` envs have no `env_capacity` row and fall
+    // back to the name.
     let scope_is_personal = {
         let mem = memory.memory.read().await;
         match mem.peers_state.shard_kind(&row.scope_env) {
-            Some(kind) => kind == crate::peers::ShardKind::Personal,
+            Some(kind) => kind.is_private(),
             None => row.scope_env.is_personal(),
         }
     };
@@ -737,13 +1158,16 @@ where
     node_req.env = expected.clone();
     node_req.r#type = Some(NodeType::SelfHosted);
     node_req.cluster = None;
-    node_req.pool = None;
+    // One shard per account holds exactly one pool (`own`): the clients get a
+    // single card with every node of the account, and no pool is offered to
+    // pick. Pools of the shared shards never appear here.
+    node_req.pool = Some(PRIVATE_POOL.to_string());
 
     let node = node_req.clone().as_node();
     let node_is_personal = {
         let mem = memory.memory.read().await;
         match mem.peers_state.shard_kind(&node.env) {
-            Some(kind) => kind == crate::peers::ShardKind::Personal,
+            Some(kind) => kind.is_private(),
             None => node.env.is_personal(),
         }
     };
@@ -752,6 +1176,12 @@ where
     }
 
     let node_id = node_req.uuid;
+
+    // The peer interface must live in the shard's block: a node answering
+    // outside it would serve nobody. Adopts the block when the shard has none.
+    if let Err(msg) = settle_private_block(&memory, &node).await {
+        return Ok(http::bad_request(&msg).into_response());
+    }
 
     // Server cap of the owning account, applied transactionally (lock the
     // account row -> count the nodes already in its env -> insert), so two
@@ -810,6 +1240,10 @@ where
                 &awg_mobile_network,
             )
             .await;
+            // Card rights + the authoritative peer set. Runs on every
+            // registration, including a re-register answered 200: a node whose
+            // snapshot was lost used to stay with an empty interface forever.
+            seed_private_shard(&memory, row.subscription_id, &node).await;
 
             Ok(warp::reply::with_status(
                 warp::reply::json(&ResponseMessage {
@@ -1254,7 +1688,7 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    let (servers, users, plan_kind) = {
+    let (servers, users, plan_kind, own_nodes_limit) = {
         let mem = memory.memory.read().await;
         let Some(sub) = mem.subscriptions.find_by_id(&query.subscription_id) else {
             return Ok(http::not_found("subscription not found").into_response());
@@ -1283,6 +1717,7 @@ where
             LimitUsage::new(servers_used, limits.server_limit),
             LimitUsage::new(users_used, limits.user_limit),
             sub.plan_kind().to_string(),
+            sub.own_nodes_limit(),
         )
     };
 
@@ -1293,6 +1728,7 @@ where
             response: Some(PrivateStateResponse {
                 subscription_id: query.subscription_id,
                 plan_kind,
+                own_nodes_limit,
                 servers,
                 users,
             }),
@@ -1927,9 +2363,18 @@ where
     node_req.uuid = known;
     node_req.r#type = Some(NodeType::SelfHosted);
     node_req.cluster = None;
-    node_req.pool = None;
+    // A refresh keeps the account's single private pool; the pool is an
+    // internal group of the shard, never a user-chosen label.
+    node_req.pool = Some(PRIVATE_POOL.to_string());
 
     let node = node_req.as_node();
+
+    // Same contract as the first registration: the interface must sit in the
+    // shard's block, and the shard takes the block the node brings when it has
+    // none (a token minted before the block existed).
+    if let Err(msg) = settle_private_block(&memory, &node).await {
+        return Ok(http::bad_request(&msg).into_response());
+    }
 
     if existing_env.is_none() {
         // A node we have never seen (its row was deleted while the node token
@@ -1961,6 +2406,17 @@ where
             let _ =
                 SyncOp::update_node_status(&memory, &known, &node.env, NodeStatus::Online).await;
             note_heartbeat(&metrics, known, node.get_base_tags());
+            // A refresh is a registration: the node gets its card rights and
+            // the authoritative peer set again, so a lost snapshot heals on a
+            // plain `systemctl restart fnode`.
+            if let Some(subscription_id) = subscription_from_personal_env(&node.env) {
+                seed_private_shard(&memory, subscription_id, &node).await;
+            } else {
+                tracing::warn!(
+                    "private: cannot derive the subscription of shard {}; card rights skipped",
+                    node.env
+                );
+            }
             Ok(warp::reply::with_status(
                 warp::reply::json(&ResponseMessage {
                     status: StatusCode::OK.as_u16(),
@@ -1996,6 +2452,75 @@ mod tests {
         assert!(env.to_string().starts_with("custompersonal"));
         assert!(!Env::Dev.is_personal());
         assert!(Env::Dev.is_frkn_shared());
+    }
+
+    /// (b) A standard account is born with a quota and mints a token for its
+    /// own shard — no `plan_kind = selfhosted` in the gate.
+    #[test]
+    fn standard_account_with_quota_may_mint_an_install_token() {
+        let id = Uuid::new_v4();
+        let sub = Subscription::new(id, "ref".to_string(), None, None)
+            .with_own_nodes_default(fcore::DEFAULT_OWN_NODES_LIMIT);
+        assert_eq!(sub.plan_kind(), PlanKind::Standard);
+        assert_eq!(sub.own_nodes_limit(), fcore::DEFAULT_OWN_NODES_LIMIT);
+
+        assert_eq!(
+            install_token_denial(sub.parent_id(), sub.own_nodes_limit(), 0, 0),
+            None,
+            "own nodes are a capability of a standard account"
+        );
+
+        // The token is scoped to the account's own shard, one per account.
+        let env = personal_env(id);
+        assert_eq!(env.to_string(), format!("custompersonal{}", id.as_simple()));
+        assert_eq!(install_token_denial(None, 1, 0, 0), None);
+    }
+
+    /// (c) A user of an own-node account never hosts nodes.
+    #[test]
+    fn child_account_is_refused_whatever_its_quota() {
+        let child = Subscription::new_user_child(Uuid::new_v4());
+        assert!(child.parent_id().is_some());
+        assert_eq!(
+            install_token_denial(child.parent_id(), child.own_nodes_limit(), 0, 0),
+            Some(InstallTokenDenial::ChildAccount)
+        );
+        // Even if a quota were forced onto a child row.
+        assert_eq!(
+            install_token_denial(child.parent_id(), 3, 0, 0),
+            Some(InstallTokenDenial::ChildAccount)
+        );
+    }
+
+    /// (d) A zero quota still refuses, with the same message as before.
+    #[test]
+    fn zero_quota_is_refused() {
+        assert_eq!(
+            install_token_denial(None, 0, 0, 0),
+            Some(InstallTokenDenial::NotEnabled)
+        );
+        assert_eq!(
+            install_token_denial(None, -1, 0, 0),
+            Some(InstallTokenDenial::NotEnabled)
+        );
+    }
+
+    #[test]
+    fn caps_still_apply() {
+        assert_eq!(
+            install_token_denial(None, 3, 3, 0),
+            Some(InstallTokenDenial::ServerLimit { used: 3, limit: 3 })
+        );
+        assert_eq!(
+            install_token_denial(None, 3, 0, MAX_ACTIVE_INSTALL_TOKENS),
+            Some(InstallTokenDenial::TooManyTokens)
+        );
+        // The server cap is checked before the token cap: a full account is
+        // told about slots, not about tokens.
+        assert_eq!(
+            install_token_denial(None, 1, 1, MAX_ACTIVE_INSTALL_TOKENS),
+            Some(InstallTokenDenial::ServerLimit { used: 1, limit: 1 })
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! in memory, and a `ON CONFLICT DO NOTHING` result means "take the next
 //! address", not an error the user sees.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -19,11 +19,12 @@ use warp::http::StatusCode;
 
 use fcore::{
     http::ResponseMessage, Connection, ConnectionApiOperations, ConnectionBaseOperations,
-    ConnectionStorageApiOperations, Env, NodeStorageOperations, Subscription,
+    ConnectionStorageApiOperations, Endpoint, Env, NodeStorageOperations, Subscription,
     SubscriptionOperations, SubscriptionStorageOperations,
 };
 
 use crate::peers::alloc;
+use crate::peers::prepare::{self, Batch, Decision, PoolTarget};
 use crate::peers::{self, Grant, Limits, PeerProto, Refusal};
 use crate::postgres::peers::{AccessRow, Inserted, PeerRow};
 use crate::sync::tasks::{SyncOp, DELETE_REASON_GRANT_CHANGED};
@@ -108,6 +109,27 @@ pub struct PeerCreateRequest {
     pub label: Option<String>,
 }
 
+/// `POST /v1/peers/prepare` — provision every peer pool of the grant in one
+/// call, so the client can store all configs at login/import and run the speed
+/// test without connecting first.
+///
+/// Same envelope and the same key the single create takes; the difference is
+/// that one full pool never fails the call: it lands in `skipped` with the code
+/// `POST /v1/peers` would have answered for it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PeerPrepareRequest {
+    pub subscription_id: Uuid,
+    pub device_uid: Uuid,
+    pub public_key: String,
+    pub device_name: Option<String>,
+    pub platform: Option<String>,
+    /// Only these pools (`<shard>:<pool>`); every peer card of the grant when
+    /// absent. A requested handle that matches no card is reported as
+    /// `unknown_pool` instead of silently doing nothing.
+    #[serde(default)]
+    pub pools: Option<Vec<String>>,
+}
+
 /// `POST /v1/peers/list` — the reconnect case: which tunnels exist.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PeerListRequest {
@@ -170,9 +192,127 @@ pub struct AccessRevokeRequest {
     pub env: String,
 }
 
+/// `POST /subscription/{id}/buy` — the cabinet's «Докупить» button.
+///
+/// The body names nothing but the plan: the subscription comes from the path,
+/// which is the same capability handle the cabinet and `GET /subscription/{id}`
+/// already use, so a caller cannot buy for a subscription it was not given and
+/// cannot pick a price.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BuyPlanRequest {
+    /// `standard` or `lite` (`super-duper` is accepted too).
+    pub plan: String,
+}
+
+/// `POST /subscription/{id}/plan` — payment-gw fulfilment of a cabinet
+/// purchase. No key is issued for these: the payment itself buys the grant.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PlanPurchaseRequest {
+    /// `standard` or `lite` (`super-duper` is accepted too).
+    pub plan: String,
+    /// Purchased period in days; 0 for a volume-only Super Duper pack.
+    #[serde(default)]
+    pub days: i64,
+    /// Purchased volume in bytes: added to the plan's quota.
+    #[serde(default)]
+    pub traffic_bytes: Option<i64>,
+    /// Same volume in GiB, for callers that speak the key vocabulary.
+    #[serde(default)]
+    pub traffic_gib: Option<i64>,
+    /// Gateway reference (transaction or trace id): the idempotency key. A
+    /// duplicate delivery of the same reference changes nothing.
+    #[serde(default, alias = "trace_id", alias = "transaction_id")]
+    pub payment_ref: Option<String>,
+    /// Source label recorded in `sources`; `payment` when absent.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Protocol tags of the grant; both peer protocols when absent.
+    #[serde(default)]
+    pub protos: Option<Vec<String>>,
+}
+
+/// One GiB, the unit `POST /key` already speaks.
+const GIB: i64 = 1024 * 1024 * 1024;
+
+/// Upper bound of a single purchase's term: ten years. Guards the date
+/// arithmetic in `plans::purchase_terms` from absurd payloads.
+const MAX_PURCHASE_DAYS: i64 = 3650;
+
 // --------------------------------------------------------------- responses
 
-#[derive(Clone, Debug, Serialize)]
+/// What the client does with a card. `Peer` is the original shape: the app
+/// calls `POST /v1/peers` with a key and gets a tunnel. `ClientConfig` cards
+/// are rendered from each node's `payload` and never hit the peer endpoint
+/// (`docs/v2-card-contract.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardKind {
+    /// Absent in the JSON of old responses and old clients: `peer`.
+    #[default]
+    Peer,
+    ClientConfig,
+}
+
+/// Protocol a location card is built for. Peer protocols keep the v1 shape;
+/// `Hysteria2` and `VlessXhttpCdn` are served as client-built configs: the
+/// api hands out the parameters, the app assembles the tunnel itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardProto {
+    Peer(PeerProto),
+    Hysteria2,
+    /// VLESS over xHTTP behind the CDN: plain TLS (no reality), so the whole
+    /// client config is described by the node's announced inbound plus the
+    /// subscription's existing VLESS uuid.
+    VlessXhttpCdn,
+}
+
+impl CardProto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Peer(proto) => proto.as_str(),
+            Self::Hysteria2 => "hysteria2",
+            Self::VlessXhttpCdn => "vless_xhttp_cdn",
+        }
+    }
+
+    pub fn tag(self) -> fcore::Tag {
+        match self {
+            Self::Peer(proto) => proto.tag(),
+            Self::Hysteria2 => fcore::Tag::Hysteria2,
+            Self::VlessXhttpCdn => fcore::Tag::VlessXhttpCdn,
+        }
+    }
+
+    pub fn kind(self) -> CardKind {
+        match self {
+            Self::Peer(_) => CardKind::Peer,
+            Self::Hysteria2 | Self::VlessXhttpCdn => CardKind::ClientConfig,
+        }
+    }
+
+    /// Both spellings of every card protocol: peer protocols keep their
+    /// historic aliases (`amnezia`), client_config protocols arrive as the
+    /// contract name (`hysteria2`, `vless_xhttp_cdn`).
+    pub fn parse(value: &str) -> Option<Self> {
+        if let Some(proto) = PeerProto::parse(value) {
+            return Some(Self::Peer(proto));
+        }
+        match value {
+            "hysteria2" | "Hysteria2" => Some(Self::Hysteria2),
+            "vless_xhttp_cdn" | "VlessXhttpCdn" => Some(Self::VlessXhttpCdn),
+            _ => None,
+        }
+    }
+
+    pub fn from_tag(tag: fcore::Tag) -> Option<Self> {
+        PeerProto::from_tag(tag)
+            .map(Self::Peer)
+            .or_else(|| (tag == fcore::Tag::Hysteria2).then_some(Self::Hysteria2))
+            .or_else(|| (tag == fcore::Tag::VlessXhttpCdn).then_some(Self::VlessXhttpCdn))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PoolNode {
     pub endpoint: String,
     /// ISO country of the machine (`[node] country`, e.g. `NL`). A pool may
@@ -184,9 +324,19 @@ pub struct PoolNode {
     pub dns: Vec<String>,
     pub keepalive: Option<u16>,
     pub obfuscation: Option<serde_json::Value>,
+    /// Client parameters of a `client_config` card (hysteria2 today). Opaque
+    /// to the api; absent on peer cards, so their JSON stays as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    /// The same entry point in the ONE `[[node.endpoints]]` shape: `ip` +
+    /// `port` + `weight` (+ `label`). One record per card row, mirroring
+    /// `endpoint` — a client that reads `endpoints` gains the weight, one that
+    /// reads `endpoint` stays byte-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<Endpoint>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PoolCard {
     /// Opaque handle of this card: `<shard>:<pool>:<proto>`. The app echoes it
     /// back in `POST /v1/peers`; the shard id is not a field the client reads.
@@ -201,6 +351,9 @@ pub struct PoolCard {
     /// client translates the code.
     pub country_name: Option<String>,
     pub proto: String,
+    /// Absent in old responses and old clients, which read it as `peer`.
+    #[serde(default)]
+    pub kind: CardKind,
     pub nodes: Vec<PoolNode>,
 }
 
@@ -234,6 +387,31 @@ pub struct DeviceView {
     pub peers: usize,
 }
 
+/// One tunnel of `POST /v1/peers/prepare`: the allocated address plus the card
+/// the client builds its config from — the same card object `/v1/locations`
+/// hands out, so the app parses one shape everywhere.
+#[derive(Clone, Debug, Serialize)]
+pub struct PreparedPeer {
+    pub card_id: String,
+    pub pool: String,
+    pub proto: String,
+    pub address: String,
+    pub peer_id: Uuid,
+    pub config: PoolCard,
+}
+
+/// A pool the batch did not provision, and the stable code that says why
+/// (`peers_limit`, `card_kind_not_peer`, `proto_not_granted`, `db`, ...).
+#[derive(Clone, Debug, Serialize)]
+pub struct SkippedPool {
+    pub card_id: String,
+    pub reason: String,
+}
+
+fn prepare_body(prepared: &[PreparedPeer], skipped: &[SkippedPool]) -> serde_json::Value {
+    serde_json::json!({ "prepared": prepared, "skipped": skipped })
+}
+
 fn device_view(row: &crate::postgres::peers::DeviceRow, live_peers: usize) -> DeviceView {
     DeviceView {
         id: row.id,
@@ -264,7 +442,7 @@ pub struct AccessView {
 /// form of the contract (`amnezia_peer`), everything else keeps the config
 /// spelling the rest of the panel already uses.
 fn proto_wire_name(tag: &fcore::Tag) -> String {
-    PeerProto::from_tag(*tag)
+    CardProto::from_tag(*tag)
         .map(|proto| proto.as_str().to_string())
         .unwrap_or_else(|| tag.to_string())
 }
@@ -274,77 +452,123 @@ fn proto_wire_name(tag: &fcore::Tag) -> String {
 /// The app never reads the shard id — it echoes this handle back when it creates
 /// a tunnel, and the api resolves it here. Keeping the mapping server-side means
 /// the client payloads carry no env at all (see the app contract).
-fn card_handle(env: &Env, pool: &str, proto: PeerProto) -> String {
-    format!("{}:{}:{}", env, pool, proto.as_str())
+fn card_handle(env: &Env, pool: &str, proto: &str) -> String {
+    format!("{}:{}:{}", env, pool, proto)
+}
+
+/// Why a `card_id` cannot name a peer tunnel. Split from the HTTP reply so the
+/// decision (and its error code) is testable without a socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardError {
+    BadCardId,
+    CardRequired,
+    UnknownProto,
+    BadEnv,
+    /// The card exists but is built client-side: `POST /v1/peers` has nothing
+    /// to allocate for it.
+    CardKindNotPeer,
+}
+
+impl CardError {
+    fn status(self) -> u16 {
+        400
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::BadCardId => "bad card_id",
+            Self::CardRequired => "card_id (or env plus proto) is required",
+            Self::UnknownProto => "unknown proto",
+            Self::BadEnv => "bad env",
+            Self::CardKindNotPeer => "card is not a peer card",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::BadCardId => "bad_card_id",
+            Self::CardRequired => "card_required",
+            Self::UnknownProto => "unknown_proto",
+            Self::BadEnv => "bad_env",
+            Self::CardKindNotPeer => "card_kind_not_peer",
+        }
+    }
+
+    fn reply(self) -> Box<dyn warp::Reply> {
+        json_reply(
+            self.status(),
+            self.message(),
+            serde_json::json!({ "error": self.code() }),
+        )
+    }
 }
 
 /// Resolve the card the client picked: `card_id` first, `env` + `proto` as the
 /// manual/legacy form.
+fn resolve_card_inner(
+    card_id: &Option<String>,
+    env: Option<&str>,
+    proto: Option<&str>,
+) -> Result<(Env, PeerProto, Option<String>), CardError> {
+    let (env_raw, proto_raw, pool) = match card_id.as_deref() {
+        Some(raw) => {
+            let Some((head, proto_raw)) = raw.rsplit_once(':') else {
+                return Err(CardError::BadCardId);
+            };
+            let Some((env_raw, pool)) = head.split_once(':') else {
+                return Err(CardError::BadCardId);
+            };
+            (env_raw, proto_raw, (!pool.is_empty()).then(|| pool.to_string()))
+        }
+        None => {
+            let (Some(env_raw), Some(proto_raw)) = (env, proto) else {
+                return Err(CardError::CardRequired);
+            };
+            // The manual form names no pool, so the tunnel is not tied to a card.
+            (env_raw, proto_raw, None)
+        }
+    };
+
+    // `resolve_card` has to name the peer protocol of the card, so anything
+    // that is not a peer is refused here instead of being tried as one.
+    let proto = match CardProto::parse(proto_raw) {
+        Some(CardProto::Peer(proto)) => proto,
+        // hysteria2 and vless_xhttp_cdn are built client-side: no address, no
+        // key, nothing this endpoint could allocate.
+        Some(CardProto::Hysteria2 | CardProto::VlessXhttpCdn) => {
+            return Err(CardError::CardKindNotPeer)
+        }
+        None => return Err(CardError::UnknownProto),
+    };
+    let env = Env::from_str(env_raw).map_err(|_| CardError::BadEnv)?;
+    Ok((env, proto, pool))
+}
+
+/// The reply-producing wrapper of `resolve_card_inner`.
 fn resolve_card(
     card_id: &Option<String>,
     env: Option<&str>,
     proto: Option<&str>,
 ) -> Result<(Env, PeerProto, Option<String>), Box<dyn warp::Reply>> {
-    if let Some(raw) = card_id.as_deref() {
-        let Some((head, proto_raw)) = raw.rsplit_once(':') else {
-            return Err(json_reply(
-                400,
-                "bad card_id",
-                serde_json::json!({ "error": "bad_card_id" }),
-            ));
-        };
-        let Some((env_raw, pool)) = head.split_once(':') else {
-            return Err(json_reply(
-                400,
-                "bad card_id",
-                serde_json::json!({ "error": "bad_card_id" }),
-            ));
-        };
-        let Some(proto) = PeerProto::parse(proto_raw) else {
-            return Err(json_reply(
-                400,
-                "unknown proto",
-                serde_json::json!({ "error": "unknown_proto" }),
-            ));
-        };
-        return match Env::from_str(env_raw) {
-            // The pool rides along: it is what the app needs to place the
-            // tunnel on the right card when it re-reads `GET /v1/peers`.
-            Ok(env) => Ok((
-                env,
-                proto,
-                (!pool.is_empty()).then(|| pool.to_string()),
-            )),
-            Err(_) => Err(json_reply(
-                400,
-                "bad env",
-                serde_json::json!({ "error": "bad_env" }),
-            )),
-        };
-    }
+    resolve_card_inner(card_id, env, proto).map_err(CardError::reply)
+}
 
-    let (Some(env_raw), Some(proto_raw)) = (env, proto) else {
-        return Err(json_reply(
-            400,
-            "card_id (or env plus proto) is required",
-            serde_json::json!({ "error": "card_required" }),
-        ));
-    };
-    let Some(proto) = PeerProto::parse(proto_raw) else {
-        return Err(json_reply(
-            400,
-            "unknown proto",
-            serde_json::json!({ "error": "unknown_proto" }),
-        ));
-    };
-    match Env::from_str(env_raw) {
-        // The manual form names no pool, so the tunnel is not tied to a card.
-        Ok(env) => Ok((env, proto, None)),
-        Err(_) => Err(json_reply(
-            400,
-            "bad env",
-            serde_json::json!({ "error": "bad_env" }),
-        )),
+/// The pool `POST /v1/peers/prepare` allocates for this card, or `None` when
+/// the card is built client-side: a `client_config` card (hysteria2,
+/// `vless_xhttp_cdn`) is reported as `card_kind_not_peer` and never reaches
+/// the peer path.
+fn prepare_target(card: &PoolCard) -> Option<PoolTarget> {
+    if card.kind != CardKind::Peer {
+        return None;
+    }
+    match resolve_card_inner(&Some(card.card_id.clone()), None, None) {
+        Ok((env, proto, pool)) => Some(PoolTarget {
+            card_id: card.card_id.clone(),
+            env,
+            pool: pool.unwrap_or_else(|| "default".to_string()),
+            proto,
+        }),
+        Err(_) => None,
     }
 }
 
@@ -358,7 +582,7 @@ fn peer_view(row: &PeerRow) -> PeerView {
             .pool
             .as_deref()
             .zip(proto)
-            .map(|(pool, proto)| card_handle(&row.env, pool, proto)),
+            .map(|(pool, proto)| card_handle(&row.env, pool, proto.as_str())),
         address: row.address.clone(),
         label: row.label.clone(),
         created_at: row.created_at,
@@ -367,16 +591,10 @@ fn peer_view(row: &PeerRow) -> PeerView {
     }
 }
 
-/// Display name of a plan. The single place where "ite is Super Duper" lives.
+/// Display name of a plan. The single place where «lite is Super Duper» lives
+/// is `crate::plans::title`; this is the local spelling of it.
 fn plan_title(plan: Option<&str>) -> String {
-    match plan {
-        Some("standard") => "Standard".to_string(),
-        Some("lite") => "Super Duper".to_string(),
-        Some("gaming") => "Gaming".to_string(),
-        Some("bs-prem") => "BS Premium".to_string(),
-        Some(other) => other.to_string(),
-        None => "Доступ".to_string(),
-    }
+    crate::plans::title(plan)
 }
 
 fn access_view(row: &AccessRow, used_bytes: i64) -> AccessView {
@@ -384,7 +602,9 @@ fn access_view(row: &AccessRow, used_bytes: i64) -> AccessView {
         plan: row.plan.clone(),
         plan_title: plan_title(row.plan.as_deref()),
         protos: row.protos.iter().map(proto_wire_name).collect(),
-        sources: row.sources.clone(),
+        // The payment reference marker is our idempotency ledger, not a fact
+        // about the purchase: the buyer sees «payment», never `pay:<uuid>`.
+        sources: crate::plans::public_sources(&row.sources),
         expires_at: row.expires_at,
         traffic_limit: row.traffic_limit,
         used_bytes,
@@ -408,6 +628,7 @@ fn grant_of(row: &AccessRow) -> Grant {
 /// A node with several addresses (`[node] node_ips`) serves the same config on
 /// all of them, and the app may dial any — reducing the card to the primary
 /// address silently hides the rest of the node's entry points.
+#[cfg(test)]
 fn card_endpoints(hosts: Vec<String>, port: u16) -> Vec<String> {
     hosts
         .into_iter()
@@ -415,12 +636,123 @@ fn card_endpoints(hosts: Vec<String>, port: u16) -> Vec<String> {
         .collect()
 }
 
+/// Credentials the v1 plane already issues for a subscription: one uuid per
+/// (env, protocol). The v2 card hands out this very uuid, so one credential
+/// authenticates both planes and `access.rs` needs no change; a protocol the
+/// subscription holds no live connection for gets no card instead of a
+/// made-up one.
+///
+/// hysteria2 keeps its password on the connection (`Proto::Hysteria2.token`);
+/// a VLESS uuid **is** the connection id, because v1 links are
+/// `vless://<conn_id>@host`.
+fn card_creds<C>(
+    connections: &impl ConnectionStorageApiOperations<C>,
+    subscription_id: &Uuid,
+) -> HashMap<(Env, fcore::Tag), Uuid>
+where
+    C: ConnectionApiOperations + ConnectionBaseOperations + Clone + Send + Sync + 'static,
+{
+    connections
+        .get_by_subscription_id(subscription_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, conn)| !conn.get_deleted())
+        .filter_map(|(conn_id, conn)| {
+            let tag = conn.get_proto().proto();
+            if tag != fcore::Tag::Hysteria2 && tag != fcore::Tag::VlessXhttpCdn {
+                return None;
+            }
+            Some(((conn.get_env(), tag), conn.get_token().unwrap_or(conn_id)))
+        })
+        .collect()
+}
+
+/// Client parameters of a `vless_xhttp_cdn` card, built only from what the
+/// node announces: an inbound without the xHTTP path and the CDN host it
+/// terminates TLS for cannot produce a config, so it produces no card.
+///
+/// The announcement (`xraySettings.inbounds[]` on the node):
+///
+/// ```json
+/// "streamSettings": {
+///   "network": "xhttp",
+///   "xhttpSettings": {
+///     "path": "/downloads",
+///     "mode": "packet-up",
+///     "extra": { "padding": { "header": "X-Cache", "key": "_dc", "bytes": "100-1000" } }
+///   },
+///   "tlsSettings": { "serverName": "bs.frkn.org", "alpn": ["h2"], "certificates": [...] }
+/// }
+/// ```
+///
+/// `host` and `sni` are the announced TLS name (the CDN edge the client dials;
+/// the node's own address stays the card `endpoint`), `padding` is passed
+/// through verbatim from `extra.padding` only when it carries all three fields.
+fn vless_xhttp_cdn_payload(
+    inbound: &fcore::Inbound,
+    uuid: &Uuid,
+) -> Option<serde_json::Value> {
+    let stream = inbound.stream_settings.as_ref()?;
+    let transport = match stream.network {
+        fcore::Network::Xhttp => "xhttp",
+        // The tag says xhttp: an inbound announcing another network is not
+        // the thing this card describes.
+        _ => return None,
+    };
+    let xhttp = stream.xhttp_settings.as_ref()?;
+    if xhttp.path.trim().is_empty() {
+        return None;
+    }
+    let tls = stream.tls_settings.as_ref()?;
+    let host = tls
+        .server_name
+        .as_ref()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())?;
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("uuid".to_string(), uuid.to_string().into());
+    payload.insert("transport".to_string(), transport.into());
+    payload.insert("path".to_string(), xhttp.path.clone().into());
+    payload.insert("host".to_string(), host.to_string().into());
+    // The CDN terminates TLS under one name: `sni` is that same announcement.
+    payload.insert("sni".to_string(), host.to_string().into());
+    if let Some(mode) = xhttp.mode.as_ref().filter(|mode| !mode.trim().is_empty()) {
+        payload.insert("mode".to_string(), mode.clone().into());
+    }
+    if let Some(alpn) = tls.alpn.as_ref().filter(|alpn| !alpn.is_empty()) {
+        payload.insert("alpn".to_string(), serde_json::json!(alpn));
+    }
+    let padding = xhttp
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get("padding"))
+        .filter(|padding| {
+            ["header", "key", "bytes"]
+                .iter()
+                .all(|field| padding.get(*field).is_some_and(|value| value.is_string()))
+        });
+    if let Some(padding) = padding {
+        payload.insert("padding".to_string(), padding.clone());
+    }
+    Some(serde_json::Value::Object(payload))
+}
+
 /// Group the live nodes of one env into the cards the client shows.
 ///
 /// A card is a `pool`: all its nodes share the client-facing parameters
 /// (`pool_inbounds_conflict` enforces that at registration), so one config is
 /// valid for any node of the card — only the endpoint differs.
-fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) -> Vec<PoolCard> {
+///
+/// `cred` is the subscription's existing credential for this protocol in this
+/// env (hysteria2 token / VLESS uuid, see `card_creds`); it is only read by the
+/// client_config branches and a missing one drops the card.
+fn pool_cards<N: NodeStorageOperations>(
+    nodes: &N,
+    env: &Env,
+    proto: CardProto,
+    cred: Option<Uuid>,
+) -> Vec<PoolCard> {
     let tag = proto.tag();
     /// One card while it is being filled: the pool's own attributes plus the
     /// nodes that carry them.
@@ -438,21 +770,26 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
     let mut grouped: HashMap<String, Group> = HashMap::new();
 
     for (uuid, node) in nodes.iter_nodes() {
-        if &node.env != env || !node.status.is_serving() {
+        // Premium and self-hosted boxes keep their card while down; a dead core
+        // node is hidden so nobody connects to an entry that is gone.
+        if &node.env != env
+            || (!node.status.is_serving() && !super::amnezia::keeps_card_while_offline(node))
+        {
             continue;
         }
         let Some(inbound) = node.inbounds.get(&tag) else {
             continue;
         };
 
-        let (server_public_key, mtu, dns, keepalive, obfuscation): (
+        let (server_public_key, mtu, dns, keepalive, obfuscation, payload): (
             String,
             u16,
             Vec<String>,
             Option<u16>,
             Option<serde_json::Value>,
+            Option<serde_json::Value>,
         ) = match proto {
-            PeerProto::Amnezia => {
+            CardProto::Peer(PeerProto::Amnezia) => {
                 let Some(awg) = inbound.awg.as_ref() else {
                     continue;
                 };
@@ -467,9 +804,10 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
                     awg.obfuscation
                         .as_ref()
                         .and_then(|o| serde_json::to_value(o).ok()),
+                    None,
                 )
             }
-            PeerProto::Wireguard => {
+            CardProto::Peer(PeerProto::Wireguard) => {
                 let Some(wg) = inbound.wg.as_ref() else {
                     continue;
                 };
@@ -482,7 +820,61 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
                     wg.dns.iter().map(|ip| ip.to_string()).collect(),
                     wg.keepalive,
                     None,
+                    None,
                 )
+            }
+            CardProto::Hysteria2 => {
+                let Some(h2) = inbound.h2.as_ref() else {
+                    continue;
+                };
+                // No credential of this subscription in this env: a card with
+                // an invented password would only fail at connect time.
+                let Some(auth) = cred else {
+                    continue;
+                };
+                // What the client dials: the host the inbound declares (its
+                // `host`/ACME domain, or the external `server`), else the
+                // node's primary entry IP.
+                let server = if h2.host.trim().is_empty() {
+                    node.entry_ips()
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| node.pool.clone().unwrap_or_default())
+                } else {
+                    h2.host.clone()
+                };
+                let payload = serde_json::json!({
+                    "server": server,
+                    "port": inbound.port,
+                    "sni": h2.sni.clone().unwrap_or_else(|| h2.host.clone()),
+                    "auth": auth.to_string(),
+                    "insecure": h2.insecure,
+                    "obfs": h2
+                        .obfs
+                        .as_ref()
+                        .and_then(|o| serde_json::to_value(o).ok())
+                        .unwrap_or(serde_json::Value::Null),
+                });
+                // A client-built config has no server key, address budget or
+                // DNS to hand out: the node terminates the tunnel itself.
+                (String::new(), 0, Vec::new(), None, None, Some(payload))
+            }
+            CardProto::VlessXhttpCdn => {
+                // No credential of this subscription in this env: the uuid is
+                // the v1 one, never invented here.
+                let Some(uuid) = cred else {
+                    continue;
+                };
+                let Some(payload) = vless_xhttp_cdn_payload(inbound, &uuid) else {
+                    tracing::warn!(
+                        "peers: vless_xhttp_cdn inbound on {} announces no path/host — node skipped",
+                        node.hostname
+                    );
+                    continue;
+                };
+                // Same shape as hysteria2: the node terminates the tunnel, so
+                // no server key, address budget or DNS travel with the card.
+                (String::new(), 0, Vec::new(), None, None, Some(payload))
             }
         };
 
@@ -510,7 +902,9 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
         // stays valid for every address, so the card carries one entry per IP
         // instead of only the primary one — otherwise the client silently
         // loses the extra addresses of a node.
-        for endpoint in card_endpoints(node.entry_ips(), inbound.port) {
+        for entry_point in node.endpoints_with_port(inbound.port) {
+            let port = entry_point.port.unwrap_or(inbound.port);
+            let endpoint = format!("{}:{}", entry_point.ip, port);
             entry.nodes.push((
                 *uuid,
                 PoolNode {
@@ -521,6 +915,8 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
                     dns: dns.clone(),
                     keepalive,
                     obfuscation: obfuscation.clone(),
+                    payload: payload.clone(),
+                    endpoints: vec![entry_point],
                 },
             ));
         }
@@ -535,12 +931,13 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
                 None => (group.first_node_country, None),
             };
             PoolCard {
-                card_id: card_handle(env, &pool, proto),
+                card_id: card_handle(env, &pool, proto.as_str()),
                 pool,
                 pool_translation: group.translation,
                 country,
                 country_name,
                 proto: proto.as_str().to_string(),
+                kind: proto.kind(),
                 nodes: group.nodes.into_iter().map(|(_, node)| node).collect(),
             }
         })
@@ -549,37 +946,55 @@ fn pool_cards<N: NodeStorageOperations>(nodes: &N, env: &Env, proto: PeerProto) 
     cards
 }
 
-fn cards_for_grants<N: NodeStorageOperations>(nodes: &N, grants: &[AccessRow]) -> Vec<PoolCard> {
+/// Cards of every protocol the subscription may actually use: the granted tags
+/// (`subscription_access.protos`) intersected with what the env's serving nodes
+/// announce. A tag outside the intersection produces no card at all, and tags
+/// the api cannot card yet (VLESS, M3) are skipped.
+fn cards_for_grants<N: NodeStorageOperations>(
+    nodes: &N,
+    grants: &[AccessRow],
+    creds: &HashMap<(Env, fcore::Tag), Uuid>,
+) -> Vec<PoolCard> {
     let mut out = Vec::new();
     for grant in grants {
-        for proto in [PeerProto::Amnezia, PeerProto::Wireguard] {
-            if grant.protos.contains(&proto.tag()) {
-                let cards = pool_cards(nodes, &grant.env, proto);
-                if cards.is_empty() {
-                    // One line per empty card: which env, which proto, and what
-                    // the nodes of that env announce — the answer to "почему
-                    // /v1/locations вернул pools: []".
-                    let seen: Vec<String> = nodes
-                        .iter_nodes()
-                        .filter(|(_, node)| &node.env == &grant.env)
-                        .map(|(_, node)| {
-                            format!(
-                                "{:?} serving={} tags=[{}]",
-                                node.status,
-                                node.status.is_serving(),
-                                node.inbounds.keys().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
-                            )
-                        })
-                        .collect();
-                    tracing::warn!(
-                        "peers: no cards for env {:?} proto {} — nodes: [{}]",
-                        grant.env,
-                        proto.as_str(),
-                        seen.join("; ")
-                    );
-                }
-                out.extend(cards);
+        let mut seen: Vec<CardProto> = Vec::new();
+        for tag in &grant.protos {
+            let Some(proto) = CardProto::from_tag(*tag) else {
+                continue;
+            };
+            if seen.contains(&proto) {
+                continue;
             }
+            seen.push(proto);
+            // The subscription's own credential for this protocol, if the v1
+            // plane already issued one; client_config branches drop the card
+            // when it is absent.
+            let cred = creds.get(&(grant.env.clone(), proto.tag())).copied();
+            let cards = pool_cards(nodes, &grant.env, proto, cred);
+            if cards.is_empty() {
+                // One line per empty card: which env, which proto, and what
+                // the nodes of that env announce — the answer to "почему
+                // /v1/locations вернул pools: []".
+                let announced: Vec<String> = nodes
+                    .iter_nodes()
+                    .filter(|(_, node)| &node.env == &grant.env)
+                    .map(|(_, node)| {
+                        format!(
+                            "{:?} serving={} tags=[{}]",
+                            node.status,
+                            node.status.is_serving(),
+                            node.inbounds.keys().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+                        )
+                    })
+                    .collect();
+                tracing::warn!(
+                    "peers: no cards for env {:?} proto {} — nodes: [{}]",
+                    grant.env,
+                    proto.as_str(),
+                    announced.join("; ")
+                );
+            }
+            out.extend(cards);
         }
     }
     out
@@ -676,12 +1091,19 @@ where
 
 // ---------------------------------------------------------------- publish
 
-/// Push one peer change to every node of the env.
+/// Push one peer change to every node of the pool the peer belongs to.
+///
+/// The stream is pool-scoped: the same device key may hold one address per
+/// pool, and a node of another pool must not receive (nor apply) it.
 ///
 /// A failure is logged and swallowed: the peer already exists in the database,
 /// and the node plane heals on its next start (authoritative `peers-init`),
 /// so a transient bus hiccup must not fail the user's request.
-async fn publish_peer<N, C, S>(memory: &MemSync<N, C, S>, action: fcore::Action, peer: &PeerRow)
+pub(crate) async fn publish_peer<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    action: fcore::Action,
+    peer: &PeerRow,
+)
 where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
     C: ConnectionApiOperations
@@ -711,13 +1133,75 @@ where
             return;
         }
     };
-    let topic = fcore::Topic::PeersUpdates(peer.env.clone());
+
+    // An account-owned shard is not a shard we run: its stream must never be
+    // readable by subscribing to `peers-update-<env>-<pool>`, because that
+    // string is derived from what the installer prints. Every node of the shard
+    // gets the authoritative set on its own `peers-init-<uuid>` topic instead —
+    // unicast, and the set is selected here from the *stored* env, never from a
+    // request.
+    if peer.env.is_personal() {
+        let targets: Vec<(Uuid, Option<String>, Vec<fcore::Tag>)> = {
+            let mem = memory.memory.read().await;
+            mem.nodes
+                .get_by_env(&peer.env)
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .map(|node| {
+                            (
+                                node.uuid,
+                                node.pool.clone(),
+                                node.inbounds
+                                    .keys()
+                                    .copied()
+                                    .filter(|tag| tag.is_peer())
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for (node_uuid, pool, tags) in targets {
+            if tags.is_empty() {
+                continue;
+            }
+            publish_peers_init(memory, node_uuid, &peer.env, pool.as_deref(), &tags).await;
+        }
+        return;
+    }
+
+    let topic = fcore::Topic::PeersUpdates(peer.env.clone(), peer.pool.clone());
     if let Err(e) = memory.publisher.send_binary(&topic, bytes.as_ref()).await {
         tracing::error!("peers: publish {} failed: {}", topic, e);
     }
 }
 
-/// Publish the authoritative peer set of an env to one node.
+/// The live peer rows one node must hold: its own pool, or the whole env when
+/// the node declares no pool (pre-pool config).
+///
+/// A node programs `(public_key, address)` pairs, and the pool decides which of
+/// them are its business. Sending the env's whole set is what put the EU
+/// address of a US device key on the US interface, so the tunnel came up with
+/// no traffic: the kernel only accepted an address the client did not have.
+pub(crate) fn peers_for_node<'a>(
+    rows: &'a [PeerRow],
+    env: &Env,
+    tags: &[fcore::Tag],
+    pool: Option<&str>,
+) -> Vec<&'a PeerRow> {
+    rows.iter()
+        // Defence in depth for own shards: the set is chosen from the env the
+        // api stored for the node, so a row of another account can never ride
+        // along even if a caller hands us a wider slice.
+        .filter(|row| &row.env == env)
+        .filter(|row| tags.contains(&row.proto))
+        .filter(|row| pool.map_or(true, |pool| row.pool.as_deref() == Some(pool)))
+        .collect()
+}
+
+/// Publish the authoritative peer set of one node's `(env, pool)` to it.
 ///
 /// Called when a node registers: the node subscribes to `peers-init-<uuid>`
 /// at start, and without this push it would sit empty until somebody created
@@ -727,6 +1211,7 @@ pub async fn publish_peers_init<N, C, S>(
     memory: &MemSync<N, C, S>,
     node_uuid: Uuid,
     env: &Env,
+    pool: Option<&str>,
     tags: &[fcore::Tag],
 ) where
     N: NodeStorageOperations + Sync + Send + Clone + 'static,
@@ -748,9 +1233,9 @@ pub async fn publish_peers_init<N, C, S>(
         }
     };
 
+    let rows = peers_for_node(&rows, env, tags, pool);
     let messages: Vec<fcore::PeerMessage> = rows
-        .iter()
-        .filter(|row| tags.contains(&row.proto))
+        .into_iter()
         .map(|row| {
             let host = row.address.split('/').next().unwrap_or(&row.address);
             fcore::PeerMessage {
@@ -775,9 +1260,10 @@ pub async fn publish_peers_init<N, C, S>(
     let topic = fcore::Topic::PeersInit(node_uuid);
     match memory.publisher.send_binary(&topic, bytes.as_ref()).await {
         Ok(_) => tracing::info!(
-            "peers: sent {} tunnels of {} to node {}",
+            "peers: sent {} tunnels of {} pool {:?} to node {}",
             count,
             env,
+            pool,
             node_uuid
         ),
         Err(e) => tracing::error!("peers: init publish {} failed: {}", topic, e),
@@ -785,6 +1271,118 @@ pub async fn publish_peers_init<N, C, S>(
 }
 
 // ---------------------------------------------------------------- handlers
+
+/// Find or create the device row of an installation.
+///
+/// Shared by `POST /v1/peers` (one tunnel) and `POST /v1/peers/prepare` (every
+/// pool of the grant): the device is created lazily on its first tunnel, counts
+/// against the subscription's device cap only when it is new, and is written
+/// through to memory so the per-device caps see it immediately.
+async fn ensure_device<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: Uuid,
+    device_uid: Uuid,
+    device_name: Option<&str>,
+    platform: Option<&str>,
+    public_key: Option<&str>,
+    default_limits: Limits,
+) -> Result<crate::postgres::peers::DeviceRow, Box<dyn warp::Reply>>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let db = memory.db.peers();
+    let mut device = match db.device_by_uid(subscription_id, device_uid).await {
+        Ok(device) => device,
+        Err(e) => return Err(db_error("device_by_uid", e)),
+    };
+
+    if device.is_none() {
+        // A new installation counts against the subscription's device cap; an
+        // existing one creating another tunnel must not be counted twice.
+        let devices_live = {
+            let mem = memory.memory.read().await;
+            mem.peers_state.devices.of_sub(&subscription_id).len() as i64
+        };
+        if let Err(refusal) = default_limits.check_devices(devices_live) {
+            return Err(refusal_reply(refusal));
+        }
+        let Some(key) = public_key else {
+            return Err(refusal_reply(Refusal::BadPublicKey));
+        };
+        let mut created = false;
+        for _ in 0..5 {
+            let tag = support_tag();
+            match db
+                .insert_device(
+                    subscription_id,
+                    device_uid,
+                    device_name,
+                    key,
+                    platform,
+                    &tag,
+                )
+                .await
+            {
+                Ok(Inserted::Done) => {
+                    created = true;
+                    break;
+                }
+                Ok(Inserted::Conflict) => {
+                    // Either the support tag or (subscription, device_uid)
+                    // collided. A concurrent create of the same device is not
+                    // an error: adopt the existing row.
+                    if let Ok(Some(existing)) = db.device_by_uid(subscription_id, device_uid).await {
+                        device = Some(existing);
+                        break;
+                    }
+                }
+                Err(e) => return Err(db_error("insert_device", e)),
+            }
+        }
+        if device.is_none() {
+            if !created {
+                return Err(json_reply(
+                    409,
+                    "support tag collision",
+                    serde_json::json!({ "error": "support_tag_taken" }),
+                ));
+            }
+            match db.device_by_uid(subscription_id, device_uid).await {
+                Ok(existing) => device = existing,
+                Err(e) => return Err(db_error("device_by_uid", e)),
+            }
+        }
+    }
+
+    let device = match device {
+        Some(device) => device,
+        None => return Err(refusal_reply(Refusal::DeviceNotFound)),
+    };
+
+    // Write-through of the device row: the per-device peer cap counts tunnels
+    // through `devices.public_key`, so a device this request just created must
+    // be visible in memory — otherwise it would look like it has no tunnels at
+    // all (and `devices_per_subscription` would not see it either) until the
+    // next restart.
+    memory
+        .memory
+        .write()
+        .await
+        .peers_state
+        .devices
+        .insert(device.clone());
+
+    Ok(device)
+}
 
 /// POST /v1/peers
 pub async fn post_peers_handler<N, C, S>(
@@ -833,92 +1431,20 @@ where
 
     let db = memory.db.peers();
 
-    // The device is created lazily on the first tunnel of an installation.
-    let mut device = match db.device_by_uid(req.subscription_id, req.device_uid).await {
+    let device = match ensure_device(
+        &memory,
+        req.subscription_id,
+        req.device_uid,
+        req.device_name.as_deref(),
+        None,
+        req.public_key.as_deref(),
+        default_limits,
+    )
+    .await
+    {
         Ok(device) => device,
-        Err(e) => return db_error("device_by_uid", e),
+        Err(reply) => return reply,
     };
-
-    if device.is_none() {
-        // A new installation counts against the subscription's device cap; an
-        // existing one creating another tunnel must not be counted twice.
-        let devices_live = {
-            let mem = memory.memory.read().await;
-            mem.peers_state
-                .devices
-                .of_sub(&req.subscription_id)
-                .len() as i64
-        };
-        if let Err(refusal) = default_limits.check_devices(devices_live) {
-            return refusal_reply(refusal);
-        }
-        let Some(key) = req.public_key.as_deref() else {
-            return refusal_reply(Refusal::BadPublicKey);
-        };
-        let mut created = false;
-        for _ in 0..5 {
-            let tag = support_tag();
-            match db
-                .insert_device(
-                    req.subscription_id,
-                    req.device_uid,
-                    req.device_name.as_deref(),
-                    key,
-                    None,
-                    &tag,
-                )
-                .await
-            {
-                Ok(Inserted::Done) => {
-                    created = true;
-                    break;
-                }
-                Ok(Inserted::Conflict) => {
-                    // Either the support tag or (subscription, device_uid)
-                    // collided. A concurrent create of the same device is not
-                    // an error: adopt the existing row.
-                    if let Ok(Some(existing)) =
-                        db.device_by_uid(req.subscription_id, req.device_uid).await
-                    {
-                        device = Some(existing);
-                        break;
-                    }
-                }
-                Err(e) => return db_error("insert_device", e),
-            }
-        }
-        if device.is_none() {
-            if !created {
-                return json_reply(
-                    409,
-                    "support tag collision",
-                    serde_json::json!({ "error": "support_tag_taken" }),
-                );
-            }
-            match db.device_by_uid(req.subscription_id, req.device_uid).await {
-                Ok(existing) => device = existing,
-                Err(e) => return db_error("device_by_uid", e),
-            }
-        }
-    }
-
-    let device = match device {
-        Some(device) => device,
-        None => return refusal_reply(Refusal::DeviceNotFound),
-    };
-
-    // Write-through of the device row: the per-device peer cap counts tunnels
-    // through `devices.public_key`, so a device this request just created must
-    // be visible in memory — otherwise it would look like it has no tunnels at
-    // all (and `devices_per_subscription` would not see it either) until the
-    // next restart.
-    memory
-        .memory
-        .write()
-        .await
-        .peers_state
-        .devices
-        .insert(device.clone());
 
     // Grant decides whether this env/protocol is allowed at all.
     let grant = {
@@ -944,22 +1470,26 @@ where
         .clone()
         .unwrap_or_else(|| device.public_key.clone());
 
-    // Idempotency first: the same key in the same env is the same tunnel, and a
-    // re-create must not be refused by a cap it already occupies. A client
-    // retrying after a timeout lands here and gets its peer back, even at the
-    // limit.
+    // Idempotency first: the same key in the same env **and pool** is the same
+    // tunnel, and a re-create must not be refused by a cap it already occupies.
+    // A client retrying after a timeout lands here and gets its peer back, even
+    // at the limit. The pool matters: one device may hold a tunnel in every
+    // pool of the shard, and the card the caller named decides which one this
+    // request means.
     let existing = {
         let mem = memory.memory.read().await;
         mem.peers_state
             .peers
-            .live_by_key(&env, &public_key)
+            .live_by_key_in(&env, pool.as_deref(), &public_key)
             .cloned()
     };
     match existing {
         Some(existing) if existing.subscription_id == req.subscription_id => {
             let cards = {
                 let mem = memory.memory.read().await;
-                pool_cards(&mem.nodes, &env, proto)
+                // The caller's card is a peer card (hysteria2 is refused in
+                // `resolve_card`), so the reply lists peer cards only.
+                pool_cards(&mem.nodes, &env, CardProto::Peer(proto), None)
             };
             return json_reply(
                 200,
@@ -979,14 +1509,15 @@ where
         mem.peers_state.limits_for(&req.subscription_id)
     };
     let limits = Limits::resolve(default_limits, per_device, per_subscription);
-    // The peer cap is per physical device, not per subscription: every live
-    // tunnel of this X25519 key counts, including the ones a second
-    // subscription (another device row, same key) or an extra router channel
-    // opened.
+    // The peer cap is per physical device **per pool**: three tunnels in one
+    // pool (a router keeps two up for failover), and every pool has its own
+    // three. Counting across all pools refused the fourth pool's tunnel while
+    // each pool still had a free slot.
     let (device_live, sub_live) = {
         let mem = memory.memory.read().await;
         (
-            mem.peers_state.peers_of_device_key(&device.public_key),
+            mem.peers_state
+                .peers_of_device_key_in(&device.public_key, &env, pool.as_deref().unwrap_or("")),
             mem.peers_state
                 .peers
                 .counts(&req.subscription_id, &device.id)
@@ -1003,7 +1534,7 @@ where
     let (mut blocks, mut used) = {
         let mem = memory.memory.read().await;
         (
-            mem.peers_state.block_masks(&env),
+            mem.peers_state.block_masks_for(&env, pool.as_deref()),
             mem.peers_state.peers.used_in(&env),
         )
     };
@@ -1111,7 +1642,7 @@ where
 
     let cards = {
         let mem = memory.memory.read().await;
-        pool_cards(&mem.nodes, &env, proto)
+        pool_cards(&mem.nodes, &env, CardProto::Peer(proto), None)
     };
 
     json_reply(
@@ -1123,6 +1654,356 @@ where
             "pools": cards,
         }),
     )
+}
+
+/// `POST /v1/peers/prepare`
+///
+/// Provisions one tunnel per peer pool of the subscription's grant in a single
+/// call, so the client can store every config at device login / subscription
+/// import and run its speed test without connecting first.
+///
+/// One pool never fails the call: a full pool, a refused protocol or a database
+/// hiccup lands in `skipped` with the code `POST /v1/peers` would have answered
+/// for it, and the other pools are still provisioned. Every insert is its own
+/// statement, so there is no batch-wide transaction to roll back.
+pub async fn post_peers_prepare_handler<N, C, S>(
+    req: PeerPrepareRequest,
+    memory: MemSync<N, C, S>,
+    default_limits: Limits,
+    auto_pool: Option<fcore::IpAddrMask>,
+    auto_prefix: u8,
+) -> Box<dyn warp::Reply>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    if !peers::is_valid_public_key(&req.public_key) {
+        return refusal_reply(Refusal::BadPublicKey);
+    }
+
+    {
+        let mem = memory.memory.read().await;
+        match mem.subscriptions.find_by_id(&req.subscription_id) {
+            Some(sub) if !sub.is_deleted() => {}
+            _ => return refusal_reply(Refusal::NoSubscription),
+        }
+    }
+
+    let device = match ensure_device(
+        &memory,
+        req.subscription_id,
+        req.device_uid,
+        req.device_name.as_deref(),
+        req.platform.as_deref(),
+        Some(&req.public_key),
+        default_limits,
+    )
+    .await
+    {
+        Ok(device) => device,
+        Err(reply) => return reply,
+    };
+
+    let db = memory.db.peers();
+
+    // Grants of this subscription, their peer cards and the effective limits:
+    // the same sources the single create reads, so a pool cannot be allowed
+    // here and refused there.
+    let (grants, cards, limits) = {
+        let mem = memory.memory.read().await;
+        let grants: Vec<AccessRow> = mem
+            .peers_state
+            .access
+            .of_sub(&req.subscription_id)
+            .into_iter()
+            .cloned()
+            .collect();
+        let creds = card_creds(&mem.connections, &req.subscription_id);
+        let cards = cards_for_grants(&mem.nodes, &grants, &creds);
+        let (per_device, per_subscription) = mem.peers_state.limits_for(&req.subscription_id);
+        (
+            grants,
+            cards,
+            Limits::resolve(default_limits, per_device, per_subscription),
+        )
+    };
+    let grants_as_grant: Vec<Grant> = grants.iter().map(grant_of).collect();
+
+    // The optional filter names `<shard>:<pool>`: the same handle minus the
+    // protocol. A requested handle that names no card is reported, otherwise a
+    // typo would silently prepare nothing.
+    let requested: Option<HashSet<String>> = req.pools.as_ref().map(|pools| {
+        pools
+            .iter()
+            .map(|pool| pool.trim().to_string())
+            .filter(|pool| !pool.is_empty())
+            .collect()
+    });
+    let mut matched: HashSet<String> = HashSet::new();
+    let mut targets: Vec<PoolTarget> = Vec::new();
+    let mut non_peer: Vec<(String, String)> = Vec::new();
+    let mut card_by_id: HashMap<String, PoolCard> = HashMap::new();
+
+    for card in cards {
+        let handle = card
+            .card_id
+            .rsplit_once(':')
+            .map(|(head, _proto)| head.to_string())
+            .unwrap_or_else(|| card.card_id.clone());
+        if let Some(wanted) = &requested {
+            if !wanted.contains(&handle) {
+                continue;
+            }
+            matched.insert(handle);
+        }
+        card_by_id.insert(card.card_id.clone(), card.clone());
+        match prepare_target(&card) {
+            Some(target) => targets.push(target),
+            // A `client_config` card (hysteria2, vless_xhttp_cdn) has no peer
+            // to allocate: the app builds it from `nodes[].payload` and must
+            // not be told to dial `POST /v1/peers`. An unparsable protocol is
+            // reported the same way instead of failing the batch.
+            None => non_peer.push((card.card_id.clone(), card.proto.clone())),
+        }
+    }
+
+    let mut skipped: Vec<SkippedPool> = Vec::new();
+    if let Some(wanted) = &requested {
+        let mut unknown: Vec<&String> = wanted
+            .iter()
+            .filter(|handle| !matched.contains(*handle))
+            .collect();
+        unknown.sort();
+        for handle in unknown {
+            skipped.push(SkippedPool {
+                card_id: handle.clone(),
+                reason: "unknown_pool".to_string(),
+            });
+        }
+    }
+
+    if targets.is_empty() {
+        return json_reply(200, "peers prepared", prepare_body(&[], &skipped));
+    }
+
+    // Per-env prerequisites: address space (the auto pool carves a block for a
+    // shard whose number is not known in advance) and the traffic meter.
+    let mut envs: Vec<Env> = targets.iter().map(|target| target.env.clone()).collect();
+    envs.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    envs.dedup();
+
+    let mut env_errors: HashMap<Env, &'static str> = HashMap::new();
+    let mut quota_spent: HashSet<Env> = HashSet::new();
+    for env in &envs {
+        let blocks = {
+            let mem = memory.memory.read().await;
+            mem.peers_state.block_masks(env)
+        };
+        if blocks.is_empty() {
+            match auto_pool.as_ref() {
+                Some(pool) => match db.allocate_env_block(env, pool, auto_prefix).await {
+                    Ok(Some(block)) => {
+                        tracing::info!(
+                            "peers: prepare got {} for shard {} from the auto pool",
+                            block,
+                            env
+                        );
+                        memory
+                            .memory
+                            .write()
+                            .await
+                            .peers_state
+                            .env_networks
+                            .entry(env.clone())
+                            .or_default()
+                            .push(block.to_string());
+                    }
+                    Ok(None) => {
+                        tracing::error!(
+                            "peers: the auto pool is exhausted, shard {} cannot hand out an address",
+                            env
+                        );
+                        env_errors.insert(env.clone(), "env_not_served");
+                    }
+                    Err(e) => {
+                        tracing::error!("peers: prepare auto block for {} failed: {}", env, e);
+                        env_errors.insert(env.clone(), "db");
+                    }
+                },
+                None => {
+                    env_errors.insert(env.clone(), "env_not_served");
+                }
+            }
+        }
+
+        if let Some(grant) = grants_as_grant.iter().find(|grant| &grant.env == env) {
+            if let Some(limit) = grant.traffic_limit {
+                match db.used_bytes(req.subscription_id, env).await {
+                    Ok(used) if used >= limit => {
+                        quota_spent.insert(env.clone());
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("peers: prepare used_bytes for {} failed: {}", env, e);
+                        env_errors.insert(env.clone(), "db");
+                    }
+                }
+            }
+        }
+    }
+
+    let blocks: HashMap<Env, Vec<fcore::IpAddrMask>> = {
+        let mem = memory.memory.read().await;
+        envs.iter()
+            .map(|env| (env.clone(), mem.peers_state.block_masks(env)))
+            .collect()
+    };
+
+    let decisions = {
+        let mem = memory.memory.read().await;
+        let batch = Batch {
+            state: &mem.peers_state,
+            subscription_id: req.subscription_id,
+            device_key: &device.public_key,
+            peer_key: &req.public_key,
+            limits,
+            now: Utc::now(),
+            quota_spent: &quota_spent,
+            blocks: &blocks,
+            env_errors: &env_errors,
+        };
+        prepare::plan(&batch, &grants_as_grant, &targets, &non_peer)
+    };
+
+    let mut prepared: Vec<PreparedPeer> = Vec::new();
+    for decision in decisions {
+        match decision {
+            Decision::Skip { card_id, reason } => skipped.push(SkippedPool {
+                card_id,
+                reason: reason.to_string(),
+            }),
+            Decision::Existing { target, peer } => {
+                let Some(config) = card_by_id.get(&target.card_id) else {
+                    skipped.push(SkippedPool {
+                        card_id: target.card_id,
+                        reason: "card_missing".to_string(),
+                    });
+                    continue;
+                };
+                prepared.push(PreparedPeer {
+                    card_id: target.card_id,
+                    pool: target.pool,
+                    proto: target.proto.as_str().to_string(),
+                    address: peer.address,
+                    peer_id: peer.id,
+                    config: config.clone(),
+                });
+            }
+            Decision::Create { target, address } => {
+                let Some(config) = card_by_id.get(&target.card_id) else {
+                    skipped.push(SkippedPool {
+                        card_id: target.card_id,
+                        reason: "card_missing".to_string(),
+                    });
+                    continue;
+                };
+
+                // One insert per pool, autocommitted: a failure here is this
+                // pool's failure only. A conflict (another api instance took
+                // the address or the key) retries with the next free address,
+                // like the single create does.
+                let (blocks_env, mut used) = {
+                    let mem = memory.memory.read().await;
+                    (
+                        mem.peers_state.block_masks_for(&target.env, Some(target.pool.as_str())),
+                        mem.peers_state.peers.used_in(&target.env),
+                    )
+                };
+                let mut next = address;
+                let mut reason = "no_free_address";
+                let mut created: Option<PeerRow> = None;
+                for attempt in 0..3 {
+                    match db
+                        .insert_peer(
+                            device.id,
+                            req.subscription_id,
+                            &target.env,
+                            target.proto.tag(),
+                            &req.public_key,
+                            next,
+                            Some(target.pool.as_str()),
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(Some(row)) => {
+                            created = Some(row);
+                            break;
+                        }
+                        Ok(None) => {
+                            tracing::info!(
+                                "peers: prepare insert conflict (attempt {}) for {} in {}:{}",
+                                attempt,
+                                req.public_key,
+                                target.env,
+                                target.pool
+                            );
+                            used.insert(next);
+                            match alloc::first_free(&blocks_env, &used) {
+                                Some(free) => next = free,
+                                None => break,
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "peers: prepare insert_peer for {}:{} failed: {}",
+                                target.env,
+                                target.pool,
+                                e
+                            );
+                            reason = "db";
+                            break;
+                        }
+                    }
+                }
+                let Some(peer) = created else {
+                    skipped.push(SkippedPool {
+                        card_id: target.card_id,
+                        reason: reason.to_string(),
+                    });
+                    continue;
+                };
+
+                memory
+                    .memory
+                    .write()
+                    .await
+                    .peers_state
+                    .peers
+                    .insert(peer.clone());
+                publish_peer(&memory, fcore::Action::Create, &peer).await;
+
+                prepared.push(PreparedPeer {
+                    card_id: target.card_id,
+                    pool: target.pool,
+                    proto: target.proto.as_str().to_string(),
+                    address: peer.address,
+                    peer_id: peer.id,
+                    config: config.clone(),
+                });
+            }
+        }
+    }
+
+    json_reply(200, "peers prepared", prepare_body(&prepared, &skipped))
 }
 
 /// `POST /v1/peers/list`
@@ -1386,13 +2267,16 @@ where
 
     let cards = {
         let mem = memory.memory.read().await;
-        cards_for_grants(&mem.nodes, &grants)
+        let creds = card_creds(&mem.connections, &subscription_id);
+        cards_for_grants(&mem.nodes, &grants, &creds)
     };
 
     json_reply(
         200,
         "ok",
-        serde_json::json!({ "access": access, "pools": cards }),
+        // `contract` lets the app tell a v2 answer (kind/payload cards) from a
+        // v1 one without sniffing the cards themselves.
+        serde_json::json!({ "contract": 2, "access": access, "pools": cards }),
     )
 }
 
@@ -1841,7 +2725,8 @@ where
 
     let (cards, connections, devices) = {
         let mem = memory.memory.read().await;
-        let cards = cards_for_grants(&mem.nodes, &grants);
+        let creds = card_creds(&mem.connections, &subscription_id);
+        let cards = cards_for_grants(&mem.nodes, &grants, &creds);
         let connections = mem
             .connections
             .get_by_subscription_id(&subscription_id)
@@ -1890,15 +2775,510 @@ where
         })
         .collect();
 
+    // Both sold plans, each with its own term and quota: the page renders
+    // «Standard активен / Super Duper — Докупить» from this list instead of
+    // guessing the second plan from the subscription row.
+    let mut used_by_env: HashMap<String, i64> = HashMap::new();
+    for grant in &grants {
+        let used = memory
+            .db
+            .peers()
+            .used_bytes(subscription_id, &grant.env)
+            .await
+            .unwrap_or(0);
+        used_by_env.insert(grant.env.to_string(), used);
+    }
+    let purchasable = purchasable_plans(&memory).await;
+    let sub_facts = {
+        let mem = memory.memory.read().await;
+        mem.subscriptions
+            .find_by_id(&subscription_id)
+            .map(|sub| crate::plans::SubFacts {
+                plan_kind: sub.plan_kind(),
+                expires_at: sub.expires_at(),
+                limit_bytes: sub.limit_bytes(),
+                used_bytes: 0,
+            })
+    };
+    // Only the legacy shape (a subscription without grants) needs the
+    // subscription-wide traffic: with grants, every plan has its own number.
+    let sub_facts = match sub_facts {
+        Some(facts) if grants.is_empty() => {
+            let used = memory
+                .db
+                .traffic()
+                .total_for_subscription(subscription_id)
+                .await
+                .map(|(uplink, downlink)| uplink + downlink)
+                .unwrap_or(0);
+            Some(crate::plans::SubFacts {
+                used_bytes: used,
+                ..facts
+            })
+        }
+        other => other,
+    };
+    let plans = crate::plans::statuses(
+        sub_facts.as_ref(),
+        &grants,
+        &used_by_env,
+        &purchasable,
+        Utc::now(),
+    );
+
     json_reply(
         200,
         "cabinet",
         serde_json::json!({
             "scheme": scheme,
             "grants": access,
+            "plans": plans,
             "cards": cards_json,
             "connections": connections,
             "devices": devices,
+        }),
+    )
+}
+
+/// Which sold plans can take a buyer right now, plan → purchasable.
+///
+/// A plan is purchasable only when a shard is declared for it *and* that shard
+/// has a live machine with address space: selling a plan with nowhere to put
+/// the buyer is how a Super Duper purchase ends up on the standard shard.
+async fn purchasable_plans<N, C, S>(memory: &MemSync<N, C, S>) -> HashMap<String, bool>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let mut out = HashMap::new();
+    for plan in crate::plans::SELLABLE {
+        out.insert(
+            plan.to_string(),
+            !live_shards(memory, plan).await.is_empty(),
+        );
+    }
+    out
+}
+
+/// The plan's grant as the cabinet shows it, from the in-memory rights.
+fn plan_grant<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: &Uuid,
+    plan: &str,
+) -> Option<AccessRow>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let mem = memory.memory.try_read().ok()?;
+    mem.peers_state
+        .access
+        .of_sub(subscription_id)
+        .into_iter()
+        .find(|grant| grant.plan.as_deref() == Some(plan))
+        .cloned()
+}
+
+/// 503 with the stable code the cabinet and the app switch on, or `None` when
+/// the plan can be sold.
+async fn plan_sale_refusal<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    plan: &str,
+) -> Option<(&'static str, usize)>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let declared = memory
+        .db
+        .peers()
+        .plan_shards(plan)
+        .await
+        .unwrap_or_default()
+        .len();
+    let live = live_shards(memory, plan).await.len();
+    crate::plans::sale_refusal(declared, live).map(|code| (code, declared))
+}
+
+/// `POST /subscription/{id}/buy` — what the cabinet needs to start a payment
+/// for one plan of an existing subscription.
+///
+/// It answers the two questions the cabinet must not guess: **may this plan be
+/// sold right now** (`503 plan_not_configured` when no shard declares it,
+/// `no_live_shard` when the shard has no machine — never a silent fallback onto
+/// another plan's shard) and **what does the payment call look like**
+/// (`payment.routes` plus the exact body). The price stays where it is today:
+/// `[[app.plans]]` of the payment gateway — the api has no prices and must not
+/// invent them.
+///
+/// No auth beyond the path id, exactly like `/cabinet/{id}` and
+/// `/subscription/{id}`: the UUID is the capability, and the body cannot name a
+/// different subscription.
+pub async fn post_buy_plan_handler<N, C, S>(
+    subscription_id: Uuid,
+    req: BuyPlanRequest,
+    memory: MemSync<N, C, S>,
+) -> Box<dyn warp::Reply>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let Some(plan) = crate::plans::canonical_plan(&req.plan) else {
+        return json_reply(
+            400,
+            "unknown plan",
+            serde_json::json!({ "error": "unknown_plan", "plan": req.plan }),
+        );
+    };
+
+    let exists = {
+        let mem = memory.memory.read().await;
+        mem.subscriptions.find_by_id(&subscription_id).is_some()
+    };
+    if !exists {
+        return json_reply(
+            404,
+            "subscription not found",
+            serde_json::json!({ "error": "subscription_not_found" }),
+        );
+    }
+
+    if let Some((code, declared)) = plan_sale_refusal(&memory, plan).await {
+        let message = match code {
+            "plan_not_configured" => {
+                "Этот тариф сейчас не продаётся: для него не объявлен ни один сервер."
+            }
+            _ => "Сейчас нет доступных серверов для этого тарифа. Попробуйте позже.",
+        };
+        return json_reply(
+            503,
+            message,
+            serde_json::json!({ "error": code, "plan": plan, "declared_shards": declared }),
+        );
+    }
+
+    let (active, traffic_limit, expires_at) = match plan_grant(&memory, &subscription_id, plan) {
+        Some(grant) => {
+            let used = memory
+                .db
+                .peers()
+                .used_bytes(subscription_id, &grant.env)
+                .await
+                .unwrap_or(0);
+            (
+                crate::plans::grant_is_active(&grant, used, Utc::now()),
+                grant.traffic_limit,
+                grant.expires_at,
+            )
+        }
+        None => (false, None, None),
+    };
+
+    json_reply(
+        200,
+        "plan available",
+        serde_json::json!({
+            "subscription_id": subscription_id,
+            "plan": plan,
+            "title": crate::plans::title(Some(plan)),
+            "active": active,
+            "expires_at": expires_at,
+            "traffic_limit": traffic_limit,
+            "payment": {
+                "method": "POST",
+                "routes": {
+                    "platega": "/payment/platega/subscription/create",
+                    "planta": "/payment/planta/subscription/create",
+                },
+                // Exactly what the cabinet posts to the gateway: the plan is
+                // what makes it a plan purchase instead of a plain renewal.
+                "body": { "subscription_id": subscription_id, "plan": plan },
+            },
+        }),
+    )
+}
+
+/// `POST /subscription/{id}/plan` (service token) — payment-gw fulfils a
+/// cabinet purchase: create or extend the grant of that plan.
+///
+/// The purchased period and volume come from the gateway, which owns the price
+/// list: `days` is the term (standard) and `traffic_bytes` the volume (Super
+/// Duper). The grant is the only place a plan's rights live, so the second plan
+/// of a subscription never touches the first one — its own shard, its own term,
+/// its own quota.
+///
+/// `payment_ref` is mandatory: it is the idempotency key. A webhook delivered
+/// twice (the provider retries, the gateway retries) answers 200 with
+/// `duplicate: true` and changes nothing — the reference is recorded in the
+/// grant's `sources` as `pay:<ref>`.
+pub async fn post_plan_purchase_handler<N, C, S>(
+    subscription_id: Uuid,
+    req: PlanPurchaseRequest,
+    memory: MemSync<N, C, S>,
+) -> Box<dyn warp::Reply>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static + From<Subscription>,
+    Connection: From<C>,
+{
+    let Some(plan) = crate::plans::canonical_plan(&req.plan) else {
+        return json_reply(
+            400,
+            "unknown plan",
+            serde_json::json!({ "error": "unknown_plan", "plan": req.plan }),
+        );
+    };
+
+    let exists = {
+        let mem = memory.memory.read().await;
+        mem.subscriptions.find_by_id(&subscription_id).is_some()
+    };
+    if !exists {
+        return json_reply(
+            404,
+            "subscription not found",
+            serde_json::json!({ "error": "subscription_not_found" }),
+        );
+    }
+
+    let Some(payment_ref) = req
+        .payment_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|reference| !reference.is_empty() && reference.len() <= 128)
+    else {
+        return json_reply(
+            400,
+            "payment_ref is required",
+            serde_json::json!({ "error": "payment_ref_required" }),
+        );
+    };
+
+    // Ten years of access in one purchase is already absurd; anything beyond it
+    // is a caller bug that must not reach the date arithmetic.
+    if !(0..=MAX_PURCHASE_DAYS).contains(&req.days) {
+        return json_reply(
+            400,
+            "days out of range",
+            serde_json::json!({ "error": "bad_days", "max": MAX_PURCHASE_DAYS }),
+        );
+    }
+    let traffic_bytes = req
+        .traffic_bytes
+        .or_else(|| {
+            req.traffic_gib
+                .and_then(|gib| gib.checked_mul(GIB))
+        })
+        .filter(|bytes| *bytes > 0);
+    if traffic_bytes.is_some_and(|bytes| bytes < 0) {
+        return json_reply(
+            400,
+            "traffic_bytes must be positive",
+            serde_json::json!({ "error": "bad_traffic" }),
+        );
+    }
+
+    // A purchase that buys neither time nor traffic is a bug on the caller's
+    // side, not something to write into a grant.
+    if req.days == 0 && traffic_bytes.is_none() {
+        return json_reply(
+            400,
+            "nothing to purchase: pass days and/or traffic_bytes",
+            serde_json::json!({ "error": "empty_purchase" }),
+        );
+    }
+    if plan == crate::plans::STANDARD && req.days == 0 {
+        // Standard is sold by time; a Super Duper grant never becomes a
+        // standard one, so a volume-only standard purchase would be a freebie.
+        return json_reply(
+            400,
+            "the standard plan is sold by time: days is required",
+            serde_json::json!({ "error": "days_required" }),
+        );
+    }
+
+    let protos: Vec<fcore::Tag> = match &req.protos {
+        Some(names) => {
+            let mut out = Vec::with_capacity(names.len());
+            for name in names {
+                match peers::tag_from_wire(name) {
+                    Some(tag) => out.push(tag),
+                    None => {
+                        return json_reply(
+                            400,
+                            "unknown proto",
+                            serde_json::json!({ "error": "unknown_proto", "proto": name }),
+                        )
+                    }
+                }
+            }
+            out
+        }
+        // Same default the key activation grants: a shard serves both peer
+        // protocols, the runtime filters the cards by what its nodes expose.
+        None => vec![fcore::Tag::AmneziaPeer, fcore::Tag::WireguardPeer],
+    };
+    if protos.is_empty() {
+        return json_reply(
+            400,
+            "empty protos",
+            serde_json::json!({ "error": "empty_protos" }),
+        );
+    }
+
+    if let Some((code, declared)) = plan_sale_refusal(&memory, plan).await {
+        let message = match code {
+            "plan_not_configured" => {
+                "Этот тариф сейчас не продаётся: для него не объявлен ни один сервер."
+            }
+            _ => "Сейчас нет доступных серверов для этого тарифа.",
+        };
+        return json_reply(
+            503,
+            message,
+            serde_json::json!({ "error": code, "plan": plan, "declared_shards": declared }),
+        );
+    }
+
+    let shards = live_shards(&memory, plan).await;
+    let source = req
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .unwrap_or("payment");
+    let marker = crate::plans::payment_marker(payment_ref);
+
+    let fulfilled = match memory
+        .db
+        .peers()
+        .fulfil_plan_grant(
+            subscription_id,
+            plan,
+            &protos,
+            source,
+            &marker,
+            req.days,
+            traffic_bytes.unwrap_or(0),
+            &shards,
+        )
+        .await
+    {
+        Ok(fulfilled) => fulfilled,
+        Err(e) => return db_error("fulfil_plan_grant", e),
+    };
+
+    let Some(row) = fulfilled.row else {
+        // Everything was re-checked inside the transaction and nothing can take
+        // this plan (a shard went away in between): the payer must not be told
+        // they own something nobody serves.
+        return json_reply(
+            503,
+            "Сейчас нет доступных серверов для этого тарифа.",
+            serde_json::json!({ "error": "no_live_shard", "plan": plan }),
+        );
+    };
+
+    if fulfilled.overflow {
+        tracing::error!(
+            "plan purchase: shards of plan '{}' are over capacity ({}/{}), add a node",
+            plan,
+            fulfilled.used,
+            fulfilled.limit
+        );
+    }
+
+    // Write-through: `POST /v1/peers` of this very subscription must see the
+    // new right without waiting for the next DB sync.
+    memory
+        .memory
+        .write()
+        .await
+        .peers_state
+        .access
+        .insert(subscription_id, row.clone());
+
+    // The subscription row itself still carries the term the legacy surfaces
+    // read (`/sub`, the app's «expires», the reminder mails). Keep it in step
+    // for the time plan only: a lite purchase is a quota and must never make a
+    // standard subscription look metered.
+    if !fulfilled.duplicate && plan == crate::plans::STANDARD && req.days > 0 {
+        if let Err(e) = SyncOp::add_days(&memory, &subscription_id, req.days).await {
+            tracing::error!(
+                "plan purchase: grant written but subscription {} not extended by {} days: {}",
+                subscription_id,
+                req.days,
+                e
+            );
+        }
+    }
+
+    let used = memory
+        .db
+        .peers()
+        .used_bytes(subscription_id, &row.env)
+        .await
+        .unwrap_or(0);
+
+    json_reply(
+        200,
+        if fulfilled.duplicate {
+            "plan purchase already fulfilled"
+        } else {
+            "plan purchase fulfilled"
+        },
+        serde_json::json!({
+            "subscription_id": subscription_id,
+            "plan": plan,
+            "title": crate::plans::title(Some(plan)),
+            "duplicate": fulfilled.duplicate,
+            "grant": access_view(&row, used),
+            "capacity": {
+                "plan": plan,
+                "used": fulfilled.used,
+                "limit": fulfilled.limit,
+                "overflow": fulfilled.overflow,
+            },
         }),
     )
 }
@@ -2089,21 +3469,102 @@ mod tests {
         assert!(peer_view(&peer_row(None)).card_id.is_none());
     }
 
+    fn keyed_row(pool: Option<&str>, public_key: &str, address: &str) -> PeerRow {
+        let mut row = peer_row(pool);
+        row.public_key = public_key.to_string();
+        row.address = address.to_string();
+        row
+    }
+
+    /// The authoritative set of a node is its own pool, not the env: sending
+    /// the whole env is what left a US node's EU address of a device key on the
+    /// interface, so the tunnel came up and carried nothing.
+    #[test]
+    fn a_pool_node_gets_its_pool_and_nothing_else() {
+        let rows = vec![
+            keyed_row(Some("us"), "KEY", "10.88.0.12"),
+            keyed_row(Some("eu"), "OTHER", "10.88.0.3"),
+        ];
+        let tags = [fcore::Tag::AmneziaPeer];
+        let env = Env::from_str("0001").unwrap();
+
+        let us = peers_for_node(&rows, &env, &tags, Some("us"));
+        assert_eq!(us.len(), 1);
+        assert_eq!(us[0].address, "10.88.0.12");
+        assert!(
+            us.iter().all(|row| row.pool.as_deref() != Some("eu")),
+            "an EU peer must not reach a US node"
+        );
+
+        // A node without a pool (pre-pool config) still gets the whole env.
+        assert_eq!(peers_for_node(&rows, &env, &tags, None).len(), 2);
+        // The tag filter still decides what a node serves at all.
+        assert!(peers_for_node(&rows, &env, &[], Some("us")).is_empty());
+    }
+
+    /// An own shard is one account: nothing of another subscription may ride
+    /// along, whatever a caller hands the selector. The check is keyed on the
+    /// stored env, not on the request, so a mixed slice cannot leak.
+    #[test]
+    fn an_own_shard_sees_only_its_own_subscription() {
+        let own: Env = Env::personal_for(
+            uuid::Uuid::parse_str("f76c2814-f9ed-4a40-a231-d34ec51f7584").unwrap(),
+        );
+        let other: Env = Env::personal_for(
+            uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap(),
+        );
+
+        let mut mine = peer_row(Some("own"));
+        mine.env = own.clone();
+        mine.public_key = "MINE".to_string();
+        mine.address = "10.89.0.2".to_string();
+
+        let mut theirs = peer_row(Some("own"));
+        theirs.env = other;
+        theirs.public_key = "THEIRS".to_string();
+        theirs.address = "10.90.0.2".to_string();
+
+        let rows = vec![mine, theirs];
+        let tags = [fcore::Tag::AmneziaPeer];
+        let set = peers_for_node(&rows, &own, &tags, Some("own"));
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].public_key, "MINE");
+        assert!(
+            set.iter().all(|row| row.address.starts_with("10.89.")),
+            "an address of another account must never reach this node"
+        );
+    }
+
+    /// One device key, an address per pool: each side gets exactly its own.
+    #[test]
+    fn one_key_in_two_pools_keeps_one_address_per_pool() {
+        let rows = vec![
+            keyed_row(Some("eu"), "KEY", "10.88.0.2"),
+            keyed_row(Some("us"), "KEY", "10.88.0.12"),
+        ];
+        let tags = [fcore::Tag::AmneziaPeer];
+        let env = Env::from_str("0001").unwrap();
+
+        let us = peers_for_node(&rows, &env, &tags, Some("us"));
+        let eu = peers_for_node(&rows, &env, &tags, Some("eu"));
+
+        assert_eq!(us.len(), 1);
+        assert_eq!(eu.len(), 1);
+        assert_eq!(us[0].public_key, eu[0].public_key);
+        assert_eq!(us[0].address, "10.88.0.12");
+        assert_eq!(eu[0].address, "10.88.0.2");
+    }
+
     /// A node with two entry IPs must not be reduced to its primary address:
     /// the card would silently lose an endpoint the client is meant to dial.
     #[test]
     fn a_card_carries_every_entry_ip_of_a_node() {
         let endpoints = card_endpoints(
-            vec![
-                "132.243.203.40".to_string(),
-                "132.243.203.41".to_string(),
-            ],
+            vec!["132.243.203.40".to_string(), "132.243.203.41".to_string()],
             443,
         );
-        assert_eq!(
-            endpoints,
-            vec!["132.243.203.40:443", "132.243.203.41:443"]
-        );
+        assert_eq!(endpoints, vec!["132.243.203.40:443", "132.243.203.41:443"]);
     }
 
     #[test]
@@ -2142,5 +3603,615 @@ mod tests {
             .chars()
             .all(|c| c == '-' || CROCKFORD.contains(&(c as u8))));
         assert_ne!(a, b);
+    }
+
+    // ------------------------------------------------ v2 cards (kind/payload)
+
+    /// The shape of `POST /v1/peers/prepare`: every prepared pool carries the
+    /// card the client builds its config from (the same object `/v1/locations`
+    /// hands out), every skipped pool carries a stable reason.
+    #[test]
+    fn prepare_body_matches_the_contract() {
+        let card = PoolCard {
+            card_id: "0001:eu:amnezia_peer".to_string(),
+            pool: "eu".to_string(),
+            pool_translation: None,
+            country: Some("NL".to_string()),
+            country_name: Some("Netherlands".to_string()),
+            proto: "amnezia_peer".to_string(),
+            kind: CardKind::Peer,
+            nodes: Vec::new(),
+        };
+        let body = prepare_body(
+            &[PreparedPeer {
+                card_id: card.card_id.clone(),
+                pool: card.pool.clone(),
+                proto: card.proto.clone(),
+                address: "10.88.0.2/32".to_string(),
+                peer_id: Uuid::nil(),
+                config: card,
+            }],
+            &[SkippedPool {
+                card_id: "0001:eu:hysteria2".to_string(),
+                reason: "card_kind_not_peer".to_string(),
+            }],
+        );
+        println!("{}", body);
+        assert_eq!(body["prepared"][0]["card_id"], "0001:eu:amnezia_peer");
+        assert_eq!(body["prepared"][0]["address"], "10.88.0.2/32");
+        assert_eq!(body["prepared"][0]["config"]["proto"], "amnezia_peer");
+        assert!(body["prepared"][0]["config"]["nodes"].is_array());
+        assert_eq!(body["skipped"][0]["card_id"], "0001:eu:hysteria2");
+        assert_eq!(body["skipped"][0]["reason"], "card_kind_not_peer");
+    }
+
+    use fcore::{
+        H2Settings, Inbound, Node, NodeStatus, NodeType, Tag, WgKeys, WireguardSettings,
+    };
+    use std::collections::BTreeMap;
+
+    const H2_HOST: &str = "prem-0001.beacon.frkn.org";
+    const SUB_TOKEN: &str = "b1c0c0de-1111-4222-8333-444455556666";
+
+    fn h2_inbound(port: u16, host: &str) -> Inbound {
+        Inbound {
+            tag: Tag::Hysteria2,
+            port,
+            stream_settings: None,
+            wg: None,
+            awg: None,
+            h2: Some(H2Settings {
+                host: host.to_string(),
+                port,
+                sni: Some(host.to_string()),
+                insecure: false,
+                obfs: None,
+                alpn: None,
+                up_mbps: None,
+                down_mbps: None,
+                auth_info: None,
+            }),
+            mtproto_secret: None,
+        }
+    }
+
+    fn wg_inbound(port: u16) -> Inbound {
+        Inbound {
+            tag: Tag::WireguardPeer,
+            port,
+            stream_settings: None,
+            wg: Some(WireguardSettings {
+                interface: "wg-peers".to_string(),
+                address: "10.88.0.1/24".parse().unwrap(),
+                port,
+                keys: WgKeys::default(),
+                dns: vec!["1.1.1.1".parse().unwrap()],
+                keepalive: None,
+            }),
+            awg: None,
+            h2: None,
+            mtproto_secret: None,
+        }
+    }
+
+    fn node_with(env: &str, pool: &str, inbound: Inbound) -> Node {
+        let tag = inbound.tag;
+        Node {
+            uuid: Uuid::new_v4(),
+            env: Env::from_str(env).unwrap(),
+            hostname: H2_HOST.to_string(),
+            address: "203.0.113.10".parse().unwrap(),
+            status: NodeStatus::Online,
+            label: "prem-0001".to_string(),
+            interface: "eth0".to_string(),
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            inbounds: HashMap::from([(tag, inbound)]),
+            cores: 4,
+            max_bandwidth_bps: 0,
+            country: "DE".to_string(),
+            r#type: NodeType::Core,
+            cluster: None,
+            node_ips: Some(vec!["203.0.113.10".parse().unwrap()]),
+            endpoints: Vec::new(),
+            endpoints_legacy: false,
+            pool: Some(pool.to_string()),
+            pool_translation: None,
+            pool_country_code: Some("DE".to_string()),
+            pool_country_name: Some("Germany".to_string()),
+            node_weights: BTreeMap::new(),
+            bench_url: None,
+        }
+    }
+
+    fn storage(nodes: Vec<Node>) -> HashMap<Env, Vec<Node>> {
+        let mut out: HashMap<Env, Vec<Node>> = HashMap::new();
+        for node in nodes {
+            out.entry(node.env.clone()).or_default().push(node);
+        }
+        out
+    }
+
+    fn grant(env: Env, protos: Vec<Tag>) -> AccessRow {
+        AccessRow {
+            id: Uuid::nil(),
+            plan: Some("standard".to_string()),
+            env,
+            protos,
+            sources: vec!["standard".to_string()],
+            expires_at: None,
+            traffic_limit: None,
+        }
+    }
+
+    /// Credentials the subscription already holds, keyed as `card_creds` keys
+    /// them: `(env, protocol) -> uuid`.
+    fn creds_with(env: &Env, tag: Tag, uuid: &str) -> HashMap<(Env, Tag), Uuid> {
+        HashMap::from([((env.clone(), tag), Uuid::parse_str(uuid).unwrap())])
+    }
+
+    /// A dead premium or self-hosted box keeps its card, a dead core node does
+    /// not: the subscriber still sees the machine he owns, while a core entry
+    /// that is down would only produce failed connects.
+    #[test]
+    fn offline_private_nodes_keep_their_card() {
+        let env = Env::from_str("0001").unwrap();
+
+        let mut core = node_with("0001", "eu", wg_inbound(51820));
+        core.status = NodeStatus::Offline;
+        let cards = pool_cards(
+            &storage(vec![core]),
+            &env,
+            CardProto::Peer(PeerProto::Wireguard),
+            None,
+        );
+        assert!(cards.is_empty(), "an offline core node must be hidden");
+
+        let mut prem = node_with("0001", "prem", wg_inbound(51820));
+        prem.status = NodeStatus::Offline;
+        prem.r#type = NodeType::PremiumNode;
+        let cards = pool_cards(
+            &storage(vec![prem]),
+            &env,
+            CardProto::Peer(PeerProto::Wireguard),
+            None,
+        );
+        assert_eq!(cards.len(), 1, "an offline premium node keeps its card");
+
+        let own_env = Env::from_str("selfhosted1").unwrap();
+        let mut own = node_with("selfhosted1", "own", wg_inbound(51820));
+        own.status = NodeStatus::Offline;
+        own.r#type = NodeType::SelfHosted;
+        let cards = pool_cards(
+            &storage(vec![own]),
+            &own_env,
+            CardProto::Peer(PeerProto::Wireguard),
+            None,
+        );
+        assert_eq!(
+            cards.len(),
+            1,
+            "an offline self-hosted node keeps its card"
+        );
+    }
+
+    /// A card exists only where the grant and what the nodes announce overlap:
+    /// a granted-but-unserved protocol and a served-but-ungranted one both
+    /// produce nothing.
+    #[test]
+    fn cards_are_announced_inbounds_intersected_with_the_grant() {
+        let env = Env::from_str("0001").unwrap();
+        let nodes = storage(vec![
+            node_with("0001", "prem", h2_inbound(8443, H2_HOST)),
+            node_with("0001", "prem", wg_inbound(51820)),
+        ]);
+
+        // hysteria2 is granted and announced -> a client_config card.
+        let cards = cards_for_grants(&nodes, &[grant(env.clone(), vec![Tag::Hysteria2])], &creds_with(&env, Tag::Hysteria2, SUB_TOKEN));
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].card_id, "0001:prem:hysteria2");
+        assert_eq!(cards[0].kind, CardKind::ClientConfig);
+        assert_eq!(cards[0].nodes.len(), 1);
+
+        // The peer protocol is granted but not announced -> no card.
+        let cards = cards_for_grants(&nodes, &[grant(env.clone(), vec![Tag::AmneziaPeer])], &HashMap::new());
+        assert!(cards.is_empty(), "an unannounced peer must not produce a card");
+
+        // hysteria2 is announced but not granted -> no card; the granted peer
+        // protocol that IS announced keeps its card.
+        let cards = cards_for_grants(&nodes, &[grant(env.clone(), vec![Tag::AmneziaPeer, Tag::WireguardPeer])], &creds_with(&env, Tag::Hysteria2, SUB_TOKEN));
+        assert!(
+            cards.iter().all(|card| card.proto != "hysteria2"),
+            "an ungranted protocol must not produce a card"
+        );
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].kind, CardKind::Peer);
+        assert_eq!(cards[0].card_id, "0001:prem:wireguard_peer");
+        assert!(cards[0].nodes[0].payload.is_none());
+
+        // Granted tags without a card implementation (VLESS, M3) are skipped.
+        let cards = cards_for_grants(&nodes, &[grant(env, vec![Tag::VlessXhttpCdn])], &HashMap::new());
+        assert!(cards.is_empty());
+    }
+
+    /// The card the client renders: `kind`, and one payload per node with the
+    /// fields of `docs/v2-card-contract.md`.
+    #[test]
+    fn hysteria2_card_matches_the_contract() {
+        let env = Env::from_str("0001").unwrap();
+        let nodes = storage(vec![node_with("0001", "prem", h2_inbound(8443, H2_HOST))]);
+        let cards = cards_for_grants(&nodes, &[grant(env.clone(), vec![Tag::Hysteria2])], &creds_with(&env, Tag::Hysteria2, SUB_TOKEN));
+        assert_eq!(cards.len(), 1);
+
+        let card = serde_json::to_value(&cards[0]).unwrap();
+        println!("{}", serde_json::to_string(&card).unwrap());
+        assert_eq!(
+            card,
+            serde_json::json!({
+                "card_id": "0001:prem:hysteria2",
+                "pool": "prem",
+                "pool_translation": null,
+                "country": "DE",
+                "country_name": "Germany",
+                "proto": "hysteria2",
+                "kind": "client_config",
+                "nodes": [{
+                    "endpoint": "203.0.113.10:8443",
+                    // Same entry point in the ONE endpoint shape (additive:
+                    // `endpoint` stays for old clients).
+                    "endpoints": [{ "ip": "203.0.113.10", "port": 8443, "weight": 100 }],
+                    "country": "DE",
+                    "server_public_key": "",
+                    "mtu": 0,
+                    "dns": [],
+                    "keepalive": null,
+                    "obfuscation": null,
+                    "payload": {
+                        "server": H2_HOST,
+                        "port": 8443,
+                        "sni": H2_HOST,
+                        "auth": SUB_TOKEN,
+                        "insecure": false,
+                        "obfs": null
+                    }
+                }]
+            })
+        );
+    }
+
+    /// A node that declares a per-address port (`[[node.endpoints]]`) hands the
+    /// client that port — in the card row's `endpoint` string and in the ONE
+    /// endpoint record (with its weight and label). The inbound's own port is
+    /// the fallback for an address that declares none.
+    #[test]
+    fn card_node_carries_the_declared_endpoint_port_and_weight() {
+        let env = Env::from_str("0001").unwrap();
+        let mut node = node_with("0001", "prem", h2_inbound(8443, H2_HOST));
+        node.endpoints = vec![
+            Endpoint {
+                ip: "203.0.113.10".parse().unwrap(),
+                port: Some(9443),
+                weight: 250,
+                label: Some("de-01".to_string()),
+            },
+            Endpoint {
+                ip: "203.0.113.11".parse().unwrap(),
+                port: None,
+                weight: 100,
+                label: None,
+            },
+        ];
+        let nodes = storage(vec![node]);
+        let cards = cards_for_grants(
+            &nodes,
+            &[grant(env.clone(), vec![Tag::Hysteria2])],
+            &creds_with(&env, Tag::Hysteria2, SUB_TOKEN),
+        );
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].nodes.len(), 2);
+        assert_eq!(cards[0].nodes[0].endpoint, "203.0.113.10:9443");
+        assert_eq!(cards[0].nodes[0].endpoints[0].port, Some(9443));
+        assert_eq!(cards[0].nodes[0].endpoints[0].weight, 250);
+        assert_eq!(
+            cards[0].nodes[0].endpoints[0].label.as_deref(),
+            Some("de-01")
+        );
+        // No declared port -> the inbound's 8443, not an empty one.
+        assert_eq!(cards[0].nodes[1].endpoint, "203.0.113.11:8443");
+        assert_eq!(cards[0].nodes[1].endpoints[0].port, Some(8443));
+    }
+
+    /// The token is the credential the v1 plane already issues: without one
+    /// there is no card, never a made-up password.
+    #[test]
+    fn hysteria2_card_needs_the_existing_subscription_token() {
+        let env = Env::from_str("0001").unwrap();
+        let nodes = storage(vec![node_with("0001", "prem", h2_inbound(8443, H2_HOST))]);
+        let cards = cards_for_grants(&nodes, &[grant(env, vec![Tag::Hysteria2])], &HashMap::new());
+        assert!(cards.is_empty());
+    }
+
+    // ------------------------------------------- vless_xhttp_cdn cards
+
+    const XHTTP_HOST: &str = "bs.frkn.org";
+
+    /// `streamSettings` of a `vless_xhttp_cdn` inbound as the node announces
+    /// it: xHTTP over plain TLS behind the CDN, padding in `extra.padding`.
+    fn xhttp_stream(path: &str, host: Option<&str>) -> serde_json::Value {
+        let mut tls = serde_json::json!({ "certificates": [] });
+        if let Some(host) = host {
+            tls["serverName"] = serde_json::Value::from(host);
+            tls["alpn"] = serde_json::json!(["h2"]);
+        }
+        serde_json::json!({
+            "network": "xhttp",
+            "xhttpSettings": {
+                "path": path,
+                "mode": "packet-up",
+                "extra": {
+                    "padding": { "header": "X-Cache", "key": "_dc", "bytes": "100-1000" }
+                }
+            },
+            "tlsSettings": tls
+        })
+    }
+
+    /// Built from the announcement JSON itself: the test then also proves the
+    /// fields the card reads survive the wire shape the node registers with.
+    fn vless_inbound(port: u16, stream: serde_json::Value) -> Inbound {
+        serde_json::from_value(serde_json::json!({
+            "tag": "VlessXhttpCdn",
+            "port": port,
+            "streamSettings": stream
+        }))
+        .expect("a vless_xhttp_cdn announcement must parse")
+    }
+
+    /// The card the app renders: `kind`, and one payload per node built from
+    /// the announced inbound plus the subscription's own uuid.
+    #[test]
+    fn vless_xhttp_cdn_card_matches_the_contract() {
+        let env = Env::from_str("0001").unwrap();
+        let nodes = storage(vec![node_with(
+            "0001",
+            "prem",
+            vless_inbound(443, xhttp_stream("/downloads", Some(XHTTP_HOST))),
+        )]);
+        let creds = creds_with(&env, Tag::VlessXhttpCdn, SUB_TOKEN);
+        let cards = cards_for_grants(
+            &nodes,
+            &[grant(env.clone(), vec![Tag::VlessXhttpCdn])],
+            &creds,
+        );
+        assert_eq!(cards.len(), 1);
+
+        let card = serde_json::to_value(&cards[0]).unwrap();
+        println!("{}", serde_json::to_string(&card).unwrap());
+        assert_eq!(
+            card,
+            serde_json::json!({
+                "card_id": "0001:prem:vless_xhttp_cdn",
+                "pool": "prem",
+                "pool_translation": null,
+                "country": "DE",
+                "country_name": "Germany",
+                "proto": "vless_xhttp_cdn",
+                "kind": "client_config",
+                "nodes": [{
+                    "endpoint": "203.0.113.10:443",
+                    "endpoints": [{ "ip": "203.0.113.10", "port": 443, "weight": 100 }],
+                    "country": "DE",
+                    "server_public_key": "",
+                    "mtu": 0,
+                    "dns": [],
+                    "keepalive": null,
+                    "obfuscation": null,
+                    "payload": {
+                        "uuid": SUB_TOKEN,
+                        "transport": "xhttp",
+                        "path": "/downloads",
+                        "host": XHTTP_HOST,
+                        "sni": XHTTP_HOST,
+                        "mode": "packet-up",
+                        "alpn": ["h2"],
+                        "padding": { "header": "X-Cache", "key": "_dc", "bytes": "100-1000" }
+                    }
+                }]
+            })
+        );
+    }
+
+    /// The uuid is the v1 VLESS credential the subscription already holds:
+    /// without such a connection there is no card, and a credential of another
+    /// protocol does not substitute for it.
+    #[test]
+    fn vless_xhttp_cdn_card_needs_the_existing_subscription_uuid() {
+        let env = Env::from_str("0001").unwrap();
+        let nodes = storage(vec![node_with(
+            "0001",
+            "prem",
+            vless_inbound(443, xhttp_stream("/downloads", Some(XHTTP_HOST))),
+        )]);
+
+        let cards = cards_for_grants(
+            &nodes,
+            &[grant(env.clone(), vec![Tag::VlessXhttpCdn])],
+            &HashMap::new(),
+        );
+        assert!(cards.is_empty(), "no VLESS connection: no uuid, no card");
+
+        let cards = cards_for_grants(
+            &nodes,
+            &[grant(env, vec![Tag::VlessXhttpCdn])],
+            &creds_with(&Env::from_str("0001").unwrap(), Tag::Hysteria2, SUB_TOKEN),
+        );
+        assert!(
+            cards.is_empty(),
+            "a hysteria2 token is not a VLESS uuid"
+        );
+    }
+
+    /// The card can only carry what the node announces: without a path and the
+    /// CDN host there is no client config to build.
+    #[test]
+    fn vless_xhttp_cdn_card_needs_the_announced_path_and_host() {
+        let env = Env::from_str("0001").unwrap();
+        let creds = creds_with(&env, Tag::VlessXhttpCdn, SUB_TOKEN);
+
+        for stream in [
+            xhttp_stream("", Some(XHTTP_HOST)),
+            xhttp_stream("/downloads", None),
+        ] {
+            let nodes = storage(vec![node_with("0001", "prem", vless_inbound(443, stream))]);
+            let cards = cards_for_grants(
+                &nodes,
+                &[grant(env.clone(), vec![Tag::VlessXhttpCdn])],
+                &creds,
+            );
+            assert!(cards.is_empty(), "path and host are required for a card");
+        }
+    }
+
+    /// A card exists only where the grant and the announcement overlap: the
+    /// announced inbound alone produces nothing.
+    #[test]
+    fn vless_xhttp_cdn_card_needs_the_grant() {
+        let env = Env::from_str("0001").unwrap();
+        let nodes = storage(vec![node_with(
+            "0001",
+            "prem",
+            vless_inbound(443, xhttp_stream("/downloads", Some(XHTTP_HOST))),
+        )]);
+        let cards = cards_for_grants(
+            &nodes,
+            &[grant(env.clone(), vec![Tag::Hysteria2])],
+            &creds_with(&env, Tag::VlessXhttpCdn, SUB_TOKEN),
+        );
+        assert!(
+            cards.is_empty(),
+            "an ungranted protocol must not produce a card"
+        );
+    }
+
+    /// `/v1/peers` has nothing to allocate for this card either: 400
+    /// `card_kind_not_peer`, never the peer path.
+    #[test]
+    fn post_peers_refuses_a_vless_xhttp_cdn_card() {
+        let err = resolve_card_inner(&Some("0001:prem:vless_xhttp_cdn".to_string()), None, None)
+            .expect_err("a client_config card is not a peer card");
+        assert_eq!(err, CardError::CardKindNotPeer);
+        assert_eq!(err.status(), 400);
+        assert_eq!(err.code(), "card_kind_not_peer");
+
+        // The manual form (`env` + `proto`) is refused the same way.
+        assert_eq!(
+            resolve_card_inner(&None, Some("0001"), Some("vless_xhttp_cdn")),
+            Err(CardError::CardKindNotPeer)
+        );
+
+        // The proto names itself the same way everywhere the client reads it.
+        assert_eq!(CardProto::VlessXhttpCdn.as_str(), "vless_xhttp_cdn");
+        assert_eq!(CardProto::VlessXhttpCdn.kind(), CardKind::ClientConfig);
+        assert_eq!(
+            CardProto::parse("vless_xhttp_cdn"),
+            Some(CardProto::VlessXhttpCdn)
+        );
+        assert_eq!(
+            CardProto::from_tag(Tag::VlessXhttpCdn),
+            Some(CardProto::VlessXhttpCdn)
+        );
+    }
+
+    /// `POST /v1/peers/prepare` reports the card as `card_kind_not_peer`
+    /// instead of allocating a peer for it (peers::prepare turns `None` into
+    /// that refusal code).
+    #[test]
+    fn prepare_skips_a_vless_xhttp_cdn_card() {
+        let env = Env::from_str("0001").unwrap();
+        let nodes = storage(vec![node_with(
+            "0001",
+            "prem",
+            vless_inbound(443, xhttp_stream("/downloads", Some(XHTTP_HOST))),
+        )]);
+        let cards = cards_for_grants(
+            &nodes,
+            &[grant(env.clone(), vec![Tag::VlessXhttpCdn])],
+            &creds_with(&env, Tag::VlessXhttpCdn, SUB_TOKEN),
+        );
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].card_id, "0001:prem:vless_xhttp_cdn");
+        assert!(prepare_target(&cards[0]).is_none());
+
+        // A peer card of the same env still resolves into a target.
+        let peer = PoolCard {
+            card_id: "0001:prem:wireguard_peer".to_string(),
+            pool: "prem".to_string(),
+            pool_translation: None,
+            country: None,
+            country_name: None,
+            proto: "wireguard_peer".to_string(),
+            kind: CardKind::Peer,
+            nodes: Vec::new(),
+        };
+        let target = prepare_target(&peer).expect("a peer card is allocatable");
+        assert_eq!(target.pool, "prem");
+    }
+
+    /// `/v1/peers` has nothing to allocate for a `client_config` card: it must
+    /// answer 400 `card_kind_not_peer`, not try the peer path.
+    #[test]
+    fn post_peers_refuses_a_client_config_card() {
+        let err = resolve_card_inner(&Some("0001:prem:hysteria2".to_string()), None, None)
+            .expect_err("a client_config card is not a peer card");
+        assert_eq!(err, CardError::CardKindNotPeer);
+        assert_eq!(err.status(), 400);
+        assert_eq!(err.code(), "card_kind_not_peer");
+
+        // The manual form (`env` + `proto`) is refused the same way.
+        assert_eq!(
+            resolve_card_inner(&None, Some("0001"), Some("hysteria2")),
+            Err(CardError::CardKindNotPeer)
+        );
+        // Garbage stays `unknown_proto`, a peer card still resolves.
+        assert_eq!(
+            resolve_card_inner(&Some("0001:prem:vless".to_string()), None, None),
+            Err(CardError::UnknownProto)
+        );
+        assert!(resolve_card_inner(&Some("0001:prem:wireguard_peer".to_string()), None, None).is_ok());
+    }
+
+    /// An old response has no `kind` and no `payload`: it must read as a peer
+    /// card, and its nodes must not grow a `payload` key on the way out.
+    #[test]
+    fn absent_kind_reads_as_peer() {
+        let old = serde_json::json!({
+            "card_id": "0001:eu:wireguard_peer",
+            "pool": "eu",
+            "pool_translation": null,
+            "country": "FI",
+            "country_name": null,
+            "proto": "wireguard_peer",
+            "nodes": [{
+                "endpoint": "132.243.203.40:51820",
+                "country": "FI",
+                "server_public_key": "key",
+                "mtu": 1420,
+                "dns": ["1.1.1.1"],
+                "keepalive": null,
+                "obfuscation": null
+            }]
+        });
+        let card: PoolCard = serde_json::from_value(old).unwrap();
+        assert_eq!(card.kind, CardKind::Peer);
+        assert!(card.nodes[0].payload.is_none());
+
+        let json = serde_json::to_value(&card).unwrap();
+        assert_eq!(json["kind"], "peer");
+        assert!(json["nodes"][0].get("payload").is_none());
+        // The wire name of the other kind is the snake_case contract value.
+        assert_eq!(
+            serde_json::to_value(CardKind::ClientConfig).unwrap(),
+            "client_config"
+        );
     }
 }

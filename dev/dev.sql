@@ -19,7 +19,11 @@ CREATE TABLE subscriptions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
     expires_at TIMESTAMP WITH TIME ZONE ,
-    is_deleted BOOL NOT NULL DEFAULT false
+    is_deleted BOOL NOT NULL DEFAULT false,
+    -- Migration plane (migration 0030): v1 = per-protocol connections,
+    -- v2 = shard peers, dual = both at once.
+    plane TEXT NOT NULL DEFAULT 'v1',
+    v2_since TIMESTAMP WITH TIME ZONE
 );
 
 INSERT INTO subscriptions (refer_code, expires_at)

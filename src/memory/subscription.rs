@@ -109,6 +109,12 @@ pub struct Subscription {
 pub const DEFAULT_SERVER_LIMIT: i64 = 3;
 pub const DEFAULT_USER_LIMIT: i64 = 20;
 
+/// Own-node quota of a new top-level subscription. Hosting one node is a
+/// capability of any account (the paid pools stay as they are), so every new
+/// account is born with it; 0 in the api config disables the default. Child
+/// subscriptions never get it — they live on their owner's nodes.
+pub const DEFAULT_OWN_NODES_LIMIT: i64 = 3;
+
 fn default_true() -> bool {
     true
 }
@@ -159,6 +165,8 @@ impl Subscription {
             plan_kind: PlanKind::Standard,
 
             shared_access: true,
+            // Applied by `SyncOp::add_sub` from `[service.private]` — the
+            // quota is a deployment setting, not a constant of the type.
             own_nodes_limit: 0,
             resell_enabled: false,
 
@@ -189,6 +197,7 @@ impl Subscription {
             plan_kind: PlanKind::Lite,
 
             shared_access: true,
+            // Applied by `SyncOp::add_sub` from `[service.private]`.
             own_nodes_limit: 0,
             resell_enabled: false,
 
@@ -276,13 +285,25 @@ impl Subscription {
     }
 
     /// May register its own nodes (`POST /private/node` via install token).
+    /// An own node is a capability of any account, not a plan: the quota is
+    /// the only gate (`plan_kind = selfhosted` is the old reseller concept).
+    /// A user (child) of an own-node account never hosts nodes of its own.
     pub fn can_own_nodes(&self) -> bool {
-        self.own_nodes_limit > 0 || self.plan_kind == PlanKind::Selfhosted
+        self.parent_id.is_none()
+            && (self.own_nodes_limit > 0 || self.plan_kind == PlanKind::Selfhosted)
     }
 
     /// May create child users and hand them access (partner resell).
     pub fn can_resell(&self) -> bool {
         self.resell_enabled || self.plan_kind == PlanKind::Selfhosted
+    }
+
+    /// The account keeps serving its own private shard after the paid term
+    /// or the traffic balance ends (selfhosted account or resell partner).
+    /// Owning a node is not enough: every new account has a quota, so the
+    /// paywall must key off the reseller plane, not the quota.
+    pub fn keeps_own_plane(&self) -> bool {
+        self.can_resell()
     }
 
     /// Whether the env belongs to this account and is served regardless of
@@ -308,6 +329,17 @@ impl Subscription {
     /// product are rejected before expiry/consumption change).
     pub fn with_product(mut self, product: Product) -> Subscription {
         self.product = product;
+        self
+    }
+
+    /// Applies the deployment own-node quota (`[service.private]
+    /// default_own_nodes_limit`) to a **new** subscription. Children live on
+    /// their owner's nodes and never get one; an explicit quota already set
+    /// (selfhosted account, admin grant) is kept as is.
+    pub fn with_own_nodes_default(mut self, limit: i64) -> Subscription {
+        if self.parent_id.is_none() && self.own_nodes_limit <= 0 {
+            self.own_nodes_limit = limit.max(0);
+        }
         self
     }
 }
@@ -482,23 +514,25 @@ pub trait Operations {
         self.plan_kind() != PlanKind::Selfhosted
     }
 
-    /// May register its own nodes via install tokens.
+    /// May register its own nodes via install tokens. An own node is a
+    /// capability of the account (its quota), not a plan.
     fn can_own_nodes(&self) -> bool {
-        self.plan_kind() == PlanKind::Selfhosted
+        self.own_nodes_limit() > 0
     }
 
     /// How many own nodes are allowed (0 = none).
     fn own_nodes_limit(&self) -> i64 {
-        if self.can_own_nodes() {
-            self.server_limit()
-        } else {
-            0
-        }
+        0
     }
 
     /// May create child users and hand them access (partner resell).
     fn can_resell(&self) -> bool {
         self.plan_kind() == PlanKind::Selfhosted
+    }
+
+    /// Keeps its own private shard served after the paid term ends.
+    fn keeps_own_plane(&self) -> bool {
+        self.can_resell()
     }
 
     /// Whether the env belongs to this account and must be served regardless
@@ -715,6 +749,10 @@ impl Operations for Subscription {
 
     fn can_resell(&self) -> bool {
         Subscription::can_resell(self)
+    }
+
+    fn keeps_own_plane(&self) -> bool {
+        Subscription::keeps_own_plane(self)
     }
 
     fn owns_env(&self, env: &Env) -> bool {
@@ -1064,16 +1102,51 @@ mod tests {
     }
 
     #[test]
-    fn paid_account_may_gain_own_nodes_without_losing_shared() {
-        let mut sub = Subscription::new(uuid::Uuid::new_v4(), "ref".into(), None, None);
-        assert!(sub.has_shared_access());
-        assert!(!sub.can_own_nodes());
-
-        // "Paid plan + own server" is the combination the old plan_kind model
-        // could not express.
-        sub.own_nodes_limit = 2;
+    fn paid_account_gets_own_node_quota_and_keeps_shared() {
+        let sub = Subscription::new(uuid::Uuid::new_v4(), "ref".into(), None, None)
+            .with_own_nodes_default(DEFAULT_OWN_NODES_LIMIT);
+        assert_eq!(sub.plan_kind, PlanKind::Standard);
+        assert_eq!(sub.own_nodes_limit, DEFAULT_OWN_NODES_LIMIT);
         assert!(sub.has_shared_access(), "shared configs stay available");
         assert!(sub.can_own_nodes(), "own node slots are available too");
+
+        // A zero quota is the only way to turn the capability off.
+        let mut off = sub.clone();
+        off.own_nodes_limit = 0;
+        assert!(!off.can_own_nodes());
+        // A quota is not a plan: the paywall keys off the reseller plane.
+        assert!(!off.keeps_own_plane());
+    }
+
+    #[test]
+    fn every_new_top_level_account_has_own_node_quota() {
+        let default = DEFAULT_OWN_NODES_LIMIT;
+        let lite = Subscription::new_lite(uuid::Uuid::new_v4(), "ref".into(), 100)
+            .with_own_nodes_default(default);
+        assert_eq!(lite.own_nodes_limit, default);
+        assert!(lite.can_own_nodes());
+
+        // `0` in the config disables the default for new accounts.
+        let disabled = Subscription::new(uuid::Uuid::new_v4(), "ref".into(), None, None)
+            .with_own_nodes_default(0);
+        assert_eq!(disabled.own_nodes_limit, 0);
+        assert!(!disabled.can_own_nodes());
+
+        // A user (child) of an own-node account never gets one.
+        let child = Subscription::new_user_child(uuid::Uuid::new_v4());
+        assert_eq!(child.own_nodes_limit, 0);
+        assert!(!child.can_own_nodes());
+        let child = child.with_own_nodes_default(default);
+        assert_eq!(child.own_nodes_limit, 0, "children live on owner's nodes");
+        assert!(!child.can_own_nodes());
+
+        // An explicit quota (selfhosted account) is never overridden.
+        let id = uuid::Uuid::new_v4();
+        let env = Env::personal_for(id);
+        let selfhosted =
+            Subscription::new_selfhosted(id, "ref".into(), env).with_own_nodes_default(0);
+        assert_eq!(selfhosted.own_nodes_limit(), DEFAULT_SERVER_LIMIT);
+        assert!(selfhosted.can_own_nodes());
     }
 
     #[test]

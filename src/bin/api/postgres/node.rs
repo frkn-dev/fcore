@@ -19,10 +19,10 @@ use super::pg::PgClientManager;
 /// constant so the COALESCE semantics below are testable without a database.
 const NODE_UPSERT_SQL: &str = "
         INSERT INTO nodes (
-            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, pool_country_code, pool_country_name, node_weights, bench_url
+            id, uuid, env, hostname, address, status, created_at, modified_at, label, interface, cores, max_bandwidth_bps, country, node_type, cluster, node_ips, pool, pool_translation, pool_country_code, pool_country_name, node_weights, bench_url, endpoints, endpoints_legacy
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19, $20, $21, $22
+            $1, $2, $3, $4, $5, $6::node_status, $7, $8, $9, $10, $11, $12, $13, $14::node_type, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
         )
         ON CONFLICT (id) DO UPDATE SET
             uuid = EXCLUDED.uuid,
@@ -49,7 +49,12 @@ const NODE_UPSERT_SQL: &str = "
             -- The bench URL may still be set by hand or by an older node build
             -- that does not send it: absent keeps the stored value, an explicit
             -- one overwrites it.
-            bench_url = COALESCE(EXCLUDED.bench_url, nodes.bench_url)
+            bench_url = COALESCE(EXCLUDED.bench_url, nodes.bench_url),
+            -- An old node build sends no endpoints: the stored list and the
+            -- legacy flag must survive its re-registration (COALESCE), and an
+            -- explicit list replaces both.
+            endpoints = COALESCE(EXCLUDED.endpoints, nodes.endpoints),
+            endpoints_legacy = EXCLUDED.endpoints_legacy
     ";
 
 pub struct PgNode {
@@ -85,7 +90,14 @@ impl PgNode {
                  ALTER TABLE nodes ADD COLUMN IF NOT EXISTS node_weights JSONB;
                  ALTER TABLE nodes ADD COLUMN IF NOT EXISTS bench_url TEXT;
                  ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_country_code TEXT;
-                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_country_name TEXT;",
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pool_country_name TEXT;
+                 -- Single endpoint shape (`[[node.endpoints]]`): list of
+                 -- {ip, port?, weight, label?}. Additive and self-healing, so
+                 -- an api that starts before the column exists still serves.
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS endpoints JSONB;
+                 -- Migration counter: the node still declares the DEPRECATED
+                 -- node_ips/node_weights keys.
+                 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS endpoints_legacy BOOLEAN NOT NULL DEFAULT FALSE;",
             )
             .await?;
         Ok(())
@@ -135,6 +147,14 @@ impl PgNode {
             serde_json::to_value(&node.node_weights).ok()
         };
 
+        // JSONB list in the ONE endpoint shape. Empty -> NULL so the COALESCE
+        // keeps a list stored by an earlier registration of a newer node.
+        let endpoints: Option<serde_json::Value> = if node.endpoints.is_empty() {
+            None
+        } else {
+            serde_json::to_value(&node.endpoints).ok()
+        };
+
         let node_query = NODE_UPSERT_SQL;
 
         tx.execute(
@@ -162,6 +182,8 @@ impl PgNode {
                 &node.pool_country_name,
                 &node_weights,
                 &node.bench_url,
+                &endpoints,
+                &node.endpoints_legacy,
             ],
         )
         .await?;
@@ -396,6 +418,8 @@ impl PgNode {
                       n.pool_country_name,
                       n.node_weights,
                       n.bench_url,
+                      n.endpoints,
+                      n.endpoints_legacy,
 
                       i.id AS inbound_id,
                       i.tag,
@@ -458,6 +482,17 @@ impl PgNode {
                 .and_then(|v| serde_json::from_value(v).ok());
             let pool_country_code: Option<String> = row.get("pool_country_code");
             let pool_country_name: Option<String> = row.get("pool_country_name");
+            let endpoints_legacy: bool = row
+                .try_get::<_, Option<bool>>("endpoints_legacy")
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            let endpoints: Vec<fcore::Endpoint> = row
+                .try_get::<_, Option<serde_json::Value>>("endpoints")
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
 
             // Stored as TEXT[]; parse each entry back into Ipv4Addr.
             // Unparseable entries are skipped with a warning rather than
@@ -513,6 +548,10 @@ impl PgNode {
                 .get::<_, Option<serde_json::Value>>("h2")
                 .and_then(|v| serde_json::from_value(v).ok());
 
+            // A row written before the `endpoints` column existed has no list:
+            // its legacy `node_ips` then means the node was never migrated.
+            let stored_endpoints = !endpoints.is_empty();
+
             if let IpAddr::V4(ipv4) = address {
                 let node_entry = nodes_map.entry(node_id).or_insert_with(|| Node {
                     uuid,
@@ -531,6 +570,29 @@ impl PgNode {
                     r#type,
                     cluster: cluster.clone(),
                     node_ips: node_ips.clone(),
+                    endpoints: if endpoints.is_empty() {
+                        // Row written before the column existed / node never
+                        // re-registered since: expand the legacy pair so every
+                        // consumer sees one shape.
+                        let ips: Vec<Ipv4Addr> = node_ips
+                            .clone()
+                            .filter(|ips| !ips.is_empty())
+                            .unwrap_or_else(|| vec![ipv4]);
+                        ips.iter()
+                            .map(|ip| fcore::Endpoint {
+                                ip: *ip,
+                                port: None,
+                                weight: node_weights
+                                    .get(&ip.to_string())
+                                    .copied()
+                                    .unwrap_or(fcore::DEFAULT_NODE_WEIGHT),
+                                label: None,
+                            })
+                            .collect()
+                    } else {
+                        endpoints.clone()
+                    },
+                    endpoints_legacy: endpoints_legacy || (!stored_endpoints && node_ips.is_some()),
                     pool: pool.clone(),
                     node_weights: node_weights.clone(),
                     pool_translation: pool_translation.clone(),
@@ -693,8 +755,37 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert_eq!(
-            max_param, 22,
-            "bench_url binds $22; upsert takes 22 parameters"
+            max_param, 24,
+            "endpoints/endpoints_legacy bind $23/$24; upsert takes 24 parameters"
         );
+    }
+
+    // The endpoint list is the single source of truth for clients, but an old
+    // node build re-registering without it must not wipe what a newer
+    // registration stored — exactly the bench_url rule.
+    #[test]
+    fn node_upsert_keeps_stored_endpoints_when_absent() {
+        assert!(
+            NODE_UPSERT_SQL.contains("endpoints = COALESCE(EXCLUDED.endpoints, nodes.endpoints)"),
+            "endpoints must be merged with COALESCE, got:\n{NODE_UPSERT_SQL}"
+        );
+        assert!(
+            NODE_UPSERT_SQL.contains("endpoints_legacy = EXCLUDED.endpoints_legacy"),
+            "the migration counter always follows the node's own report"
+        );
+        let columns = NODE_UPSERT_SQL
+            .split_once("INSERT INTO nodes (")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(cols, _)| cols)
+            .expect("node upsert INSERT column list")
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .collect::<Vec<_>>();
+        for column in ["endpoints", "endpoints_legacy"] {
+            assert!(
+                columns.iter().any(|c| c == column),
+                "{column} must be in the INSERT column list"
+            );
+        }
     }
 }

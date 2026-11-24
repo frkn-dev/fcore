@@ -60,6 +60,12 @@ pub struct SubscriptionResponse {
     pub remaining_bytes: Option<i64>,
     pub env_traffic: Vec<EnvTrafficInfo>,
     pub connections: Vec<ConnectionInfo>,
+    /// One entry per plan the subscription may hold (`standard`, `lite` = «Super
+    /// Duper»), each with its own term and quota: the cabinet and the app render
+    /// «Standard активен / Super Duper — Докупить» from this list instead of
+    /// deriving the second plan from the subscription row.
+    #[serde(default)]
+    pub plans: Vec<PlanStatus>,
     /// Live whole-region share links (`frkn://sub/shared/<uuid>`), one per
     /// shared env+protocol. Older backends omit the field.
     #[serde(default)]
@@ -67,6 +73,61 @@ pub struct SubscriptionResponse {
     /// Private scope of the subscription (a dedicated env serving only its
     /// owner); null for regular subscriptions.
     pub scope: Option<ScopeInfo>,
+    /// A user account: a subscription created by a selfhosted owner
+    /// (`parent_id` set). It cannot host nodes and must not see the
+    /// selfhosted blocks of the cabinet. Older backends omit the field.
+    #[serde(default)]
+    pub is_child: bool,
+    /// How many own nodes the account may register (0 = none). Hosting a
+    /// node is a capability of any account, not a plan: the cabinet shows the
+    /// own-node block on `> 0`. Older backends omit the field.
+    #[serde(default)]
+    pub own_nodes_limit: i64,
+    /// The owning selfhosted account of a user account; `null` otherwise.
+    /// Only the id is exposed — no data of the parent.
+    #[serde(default)]
+    pub parent_id: Option<uuid::Uuid>,
+    /// Migration plane of the subscription (`v1` | `v2` | `dual`, migration
+    /// 0030). `v1` when an older backend omits the field, so an old consumer
+    /// keeps working.
+    #[serde(default = "default_plane")]
+    pub plane: String,
+    /// When the subscription first got a v2 (peer) tunnel; `null` for a pure
+    /// v1 subscription.
+    #[serde(default)]
+    pub v2_since: Option<DateTime<Utc>>,
+}
+
+fn default_plane() -> String {
+    "v1".to_string()
+}
+
+/// One plan as the cabinet and the app show it.
+///
+/// Plans are paid for separately and one subscription may hold both, so this is
+/// per plan, not per subscription: `lite` carries no term (a volume plan) while
+/// `standard` carries no traffic limit (unlimited). Both are always present, so
+/// the UI can render «Standard активен» and «Super Duper — Докупить» without
+/// knowing which plans exist.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PlanStatus {
+    /// Machine value, the same string a grant stores (`standard`, `lite`).
+    pub plan: String,
+    /// Human name; `lite` is sold as «Super Duper».
+    pub title: String,
+    /// A live grant covers this plan right now: its own term is not over and
+    /// its own quota is not spent.
+    pub active: bool,
+    /// Term of this plan alone (a grant's clock, not the subscription's).
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Traffic spent in this plan's shard over the subscription's lifetime.
+    pub traffic_used: i64,
+    /// Traffic bought for this plan; null = unlimited (standard).
+    pub traffic_limit: Option<i64>,
+    /// The api can place a buyer of this plan right now: a shard is declared for
+    /// it and that shard has a live machine and address space. False is what the
+    /// cabinet renders as a disabled button, never as a silent sale.
+    pub purchasable: bool,
 }
 
 /// Kind of a subscription's private scope: `premium` — our managed premium

@@ -67,6 +67,11 @@ pub struct XhttpSettings {
 pub struct TlsSettings {
     #[serde(rename = "serverName")]
     pub server_name: Option<String>,
+    /// ALPN the TLS leg offers (`["h2"]` behind an HTTPS CDN). Optional: an
+    /// inbound registered before this field existed announces nothing, and an
+    /// empty list means the client keeps its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpn: Option<Vec<String>>,
     pub certificates: Vec<Certificate>,
 }
 
@@ -688,9 +693,19 @@ PersistentKeepalive = {keepalive}
 
         if let Some(token) = conn.get_token() {
             let mut url = Url::parse(&format!("hysteria2://{token}@{}:{}", h2.host, self.port))?;
-            url.query_pairs_mut()
-                .append_pair("insecure", &h2.insecure.to_string())
-                .append_pair("up-mbps", &h2.up_mbps.unwrap_or(0).to_string());
+            {
+                let mut q = url.query_pairs_mut();
+                q.append_pair("insecure", &h2.insecure.to_string())
+                    .append_pair("up-mbps", &h2.up_mbps.unwrap_or(0).to_string());
+                // Third-party clients dial this URI: without the salamander PSK
+                // they time out on the QUIC handshake instead of failing loudly.
+                if let Some(obfs) = h2.obfs.as_ref().filter(|o| !o.r#type.is_empty()) {
+                    q.append_pair("obfs", &obfs.r#type);
+                    if !obfs.password.is_empty() {
+                        q.append_pair("obfs-password", &obfs.password);
+                    }
+                }
+            }
 
             url.set_fragment(Some(&format!(
                 "{} | {} H2",
@@ -920,6 +935,7 @@ mod tests {
                 }),
                 tls_settings: Some(TlsSettings {
                     server_name: Some("cdn.example.com".into()),
+                    alpn: None,
                     certificates: vec![],
                 }),
             }),
@@ -964,5 +980,66 @@ mod tests {
             "unexpected fragment: {}",
             link
         );
+    }
+}
+
+#[cfg(test)]
+mod h2_link_tests {
+    use super::*;
+    use crate::config::h2::H2Obfs;
+    use crate::memory::connection::proto::Proto;
+    use crate::memory::env::Env;
+
+    fn h2_inbound(obfs: Option<H2Obfs>) -> Inbound {
+        Inbound {
+            tag: Tag::Hysteria2,
+            port: 8443,
+            stream_settings: None,
+            wg: None,
+            awg: None,
+            h2: Some(H2Settings {
+                host: "prem-0001.beacon.frkn.org".into(),
+                port: 8443,
+                sni: Some("prem-0001.beacon.frkn.org".into()),
+                insecure: false,
+                obfs,
+                alpn: None,
+                up_mbps: None,
+                down_mbps: None,
+                auth_info: None,
+            }),
+            mtproto_secret: None,
+        }
+    }
+
+    fn conn() -> Connection {
+        Connection::new(
+            &Env::Dev,
+            None,
+            Proto::Hysteria2 {
+                token: uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            },
+            None,
+        )
+    }
+
+    /// A third-party client dials this URI: the salamander PSK must be in it,
+    /// otherwise the QUIC handshake times out with no hint why.
+    #[test]
+    fn h2_link_carries_the_salamander_psk() {
+        let inbound = h2_inbound(Some(H2Obfs {
+            r#type: "salamander".into(),
+            password: "pool-psk".into(),
+        }));
+        let uri = inbound.h2("node", "Test", &conn()).unwrap();
+        assert!(uri.starts_with("hysteria2://"), "uri: {uri}");
+        assert!(uri.contains("obfs=salamander"), "uri: {uri}");
+        assert!(uri.contains("obfs-password=pool-psk"), "uri: {uri}");
+    }
+
+    #[test]
+    fn h2_link_stays_plain_without_obfs() {
+        let uri = h2_inbound(None).h2("node", "Test", &conn()).unwrap();
+        assert!(!uri.contains("obfs"), "uri: {uri}");
     }
 }

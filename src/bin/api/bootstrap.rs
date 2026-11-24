@@ -194,7 +194,8 @@ where
         }
 
         let publisher = Publisher::new(&settings.service.updates_endpoint_zmq).await?;
-        let mem_sync = MemSync::new(mem.clone(), db.clone(), publisher);
+        let mem_sync = MemSync::new(mem.clone(), db.clone(), publisher)
+            .with_own_nodes_default(settings.service.private.default_own_nodes_limit);
         let metric_storage = match MetricStorage::load_snapshot(
             &settings.metrics.snapshot_path,
             settings.metrics.max_points,

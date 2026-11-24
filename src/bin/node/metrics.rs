@@ -383,7 +383,15 @@ where
 
         let peers = self.peers.read().await;
         for (public_key, uplink, downlink) in samples {
-            let Some(meta) = peers.get(&public_key) else {
+            // Counters are kept per kernel peer, i.e. per public key, while the
+            // mirror holds one entry per `(public_key, address)`. Billing every
+            // address would multiply the same bytes, so the sample goes to the
+            // first address in order and the total stays correct.
+            let Some(meta) = peers
+                .values()
+                .filter(|peer| peer.tag == tag && peer.public_key == public_key)
+                .min_by(|a, b| a.address.cmp(&b.address))
+            else {
                 // A peer the api never announced (left over from an older
                 // config) has no owner to bill: skip instead of inventing one.
                 continue;

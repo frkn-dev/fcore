@@ -1,0 +1,22 @@
+[Unit]
+Description=FRKN geo lists: resolve + TLS-verify the Chinese-crypto-exchange IPv4 zone (api.frkn.org /router/geo/exch4.zone)
+Documentation=https://github.com/frkn-dev/fcore/blob/main/docs/router-geo.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Same resolver as the `ai` / `ai-cn` groups, different inputs. This zone is an
+# EXIT group on the nodes (mark 0x2 -> table 200 -> the RU exits), because the
+# exchanges refuse or degrade US/EU addresses and work from RU ones.
+ExecStart=/usr/local/lib/frkn/geo/update-ai4-zone.py --group exch4 --domains /etc/frkn/geo/domains/exchanges.txt --zone-name exch4.zone
+Environment=GEO_DIR=/var/lib/frkn/geo
+# ~39 hosts x 2 resolvers + a couple hundred TLS probes; the cap only bounds a
+# network that hangs.
+TimeoutStartSec=300
+# Writes its own directory only; /etc stays readable (the domain list).
+ProtectSystem=strict
+ReadWritePaths=/var/lib/frkn/geo
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true

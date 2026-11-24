@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 /// Настройки оповещений (`[alerts]` в config.toml).
@@ -39,6 +39,10 @@ pub struct AlertsConfig {
     /// Минимальный интервал между одинаковыми алертами по одной ноде.
     #[serde(default = "default_throttle")]
     pub throttle_sec: u64,
+    /// Напоминание о группе выходов, которая всё ещё мертва: не чаще этого
+    /// интервала. Переходы (dead<->degraded<->recovered) шлются сразу, мимо него.
+    #[serde(default = "default_exit_reminder")]
+    pub exit_reminder_sec: u64,
     /// Тишина короче порога офлайна, но длиннее этого значения, считается «миганием».
     #[serde(default = "default_flap_gap")]
     pub flap_gap_sec: u64,
@@ -154,6 +158,10 @@ fn default_new_node_grace() -> u64 {
 fn default_throttle() -> u64 {
     1800
 }
+/// 30 минут: напоминание по всё ещё мёртвой группе без повторов на каждый тик.
+fn default_exit_reminder() -> u64 {
+    1800
+}
 fn default_offline_long() -> u64 {
     3600
 }
@@ -218,6 +226,7 @@ impl Default for AlertsConfig {
             recovery_grace_sec: default_recovery_grace(),
             new_node_grace_sec: default_new_node_grace(),
             throttle_sec: default_throttle(),
+            exit_reminder_sec: default_exit_reminder(),
             offline_long_sec: default_offline_long(),
             disk_threshold_pct: default_disk_threshold(),
             disk_hold_sec: default_disk_hold(),
@@ -1027,6 +1036,314 @@ pub async fn notify_report(
     report
 }
 
+// ---------------------------------------------------------------------------------------------
+// Exit-health alerts (группы выходов ru/ai/gov/…)
+//
+// События приходят из watchdog'ов на нодах (они видят туннели и exit IP), а
+// почтовый канал и дедупликация живут здесь: SMTP-креденшелов на нодах нет.
+// Контракт: нода сообщает текущее состояние группы, api решает, писать ли
+// письмо. Переход шлётся сразу, повтор того же состояния — не чаще
+// `exit_reminder_sec`, поэтому тик watchdog'а (10 с) письма не размножает.
+// ---------------------------------------------------------------------------------------------
+
+/// Состояние группы выходов, как его видит watchdog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitEvent {
+    /// Все выходы группы мертвы: трафик группы заблокирован (fail-closed).
+    Dead,
+    /// Primary мёртв, secondary везёт трафик.
+    Degraded,
+    /// Группа вернулась к нормальному выходу.
+    Recovered,
+}
+
+impl ExitEvent {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "exit_dead" | "dead" => Some(Self::Dead),
+            "exit_degraded" | "degraded" => Some(Self::Degraded),
+            "exit_recovered" | "recovered" => Some(Self::Recovered),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dead => "exit_dead",
+            Self::Degraded => "exit_degraded",
+            Self::Recovered => "exit_recovered",
+        }
+    }
+
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            Self::Dead => "⛔",
+            Self::Degraded => "🟡",
+            Self::Recovered => "🟢",
+        }
+    }
+
+    pub fn label_ru(&self) -> &'static str {
+        match self {
+            Self::Dead => "выход мёртв",
+            Self::Degraded => "выход деградировал",
+            Self::Recovered => "выход восстановлен",
+        }
+    }
+}
+
+/// Одна проба выхода в сообщении ноды.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ExitProbe {
+    #[serde(default)]
+    pub iface: String,
+    /// `primary` | `secondary`.
+    #[serde(default)]
+    pub role: String,
+    /// Какой exit IP ждали (из /etc/frkn/<group>-exit.conf).
+    #[serde(default)]
+    pub expected_ip: String,
+    /// Что реально ответил эхо-сервис; `None`/пусто — ответа не было.
+    #[serde(default)]
+    pub observed_ip: Option<String>,
+    #[serde(default)]
+    pub alive: bool,
+    #[serde(default)]
+    pub handshake_age_sec: Option<i64>,
+}
+
+/// Что решила дедупликация.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitDecision {
+    /// Письмо уходит; `reminder` — это повтор по всё ещё мёртвой группе.
+    Send { reminder: bool },
+    /// Молчим, причина в тексте ответа ручки.
+    Suppress(&'static str),
+}
+
+#[derive(Debug, Clone)]
+struct ExitTrack {
+    event: ExitEvent,
+    /// Когда последний раз реально ушло письмо (UTC: переживает сид из БД).
+    sent_at: DateTime<Utc>,
+    /// Начало текущего эпизода (для «мертва N мин»).
+    episode_start: DateTime<Utc>,
+}
+
+/// Состояние дедупликации по паре (группа, нода). В памяти процесса; после
+/// рестарта подтягивается из `alert_events` (см. `seed`), чтобы письмо не
+/// ушло заново только из-за перезапуска api.
+#[derive(Debug, Default)]
+pub struct ExitDedupe {
+    map: HashMap<(String, String), ExitTrack>,
+    /// Потолок числа пар: групп и нод мало, но карта не должна расти вечно.
+    cap: usize,
+}
+
+impl ExitDedupe {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            cap: 256,
+        }
+    }
+
+    pub fn contains(&self, group: &str, node: &str) -> bool {
+        self.map
+            .contains_key(&(group.to_string(), node.to_string()))
+    }
+
+    /// Восстановить состояние из истории: api перезапустился посреди аварии.
+    pub fn seed(&mut self, group: &str, node: &str, event: ExitEvent, sent_at: DateTime<Utc>) {
+        self.map.insert(
+            (group.to_string(), node.to_string()),
+            ExitTrack {
+                event,
+                sent_at,
+                episode_start: sent_at,
+            },
+        );
+    }
+
+    /// Одно событие от watchdog'а → одно решение.
+    pub fn decide(
+        &mut self,
+        group: &str,
+        node: &str,
+        event: ExitEvent,
+        reminder_sec: u64,
+        now: DateTime<Utc>,
+    ) -> ExitDecision {
+        let key = (group.to_string(), node.to_string());
+
+        let Some(track) = self.map.get(&key) else {
+            // «Восстановилось» без открытого эпизода — это не новость и не
+            // повод для письма (в том числе сразу после рестарта api).
+            if event == ExitEvent::Recovered {
+                return ExitDecision::Suppress("nothing-to-recover");
+            }
+            self.store(key, event, now, now);
+            return ExitDecision::Send { reminder: false };
+        };
+
+        if track.event == event {
+            let age = (now - track.sent_at).num_seconds().max(0) as u64;
+            if age < reminder_sec {
+                return ExitDecision::Suppress("repeat");
+            }
+            let start = track.episode_start;
+            self.store(key, event, now, start);
+            return ExitDecision::Send { reminder: true };
+        }
+
+        // Переход состояния: dead -> degraded (стало легче) и degraded -> dead
+        // (стало хуже) одинаково важны, поэтому троттл не применяется.
+        let start = if event == ExitEvent::Recovered {
+            track.episode_start
+        } else {
+            now
+        };
+        self.store(key, event, now, start);
+        ExitDecision::Send { reminder: false }
+    }
+
+    /// Сколько длится текущий эпизод — для строки «мертва N мин» на отбое.
+    pub fn episode_secs(&self, group: &str, node: &str, now: DateTime<Utc>) -> Option<i64> {
+        self.map
+            .get(&(group.to_string(), node.to_string()))
+            .map(|t| (now - t.episode_start).num_seconds().max(0))
+    }
+
+    /// Доставка не удалась (SMTP лежит, канал отвалился): следующее событие
+    /// должно попробовать снова сразу, а не через полный интервал напоминания.
+    /// Эпизод при этом не начинается заново.
+    pub fn delivery_failed(&mut self, group: &str, node: &str, reminder_sec: u64) {
+        if let Some(track) = self.map.get_mut(&(group.to_string(), node.to_string())) {
+            track.sent_at -= chrono::Duration::seconds(reminder_sec.min(86_400) as i64);
+        }
+    }
+
+    fn store(
+        &mut self,
+        key: (String, String),
+        event: ExitEvent,
+        sent_at: DateTime<Utc>,
+        episode_start: DateTime<Utc>,
+    ) {
+        if self.map.len() >= self.cap && !self.map.contains_key(&key) {
+            // Самая старая пара уходит: она всё равно напишет переход заново.
+            if let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, t)| t.sent_at)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(
+            key,
+            ExitTrack {
+                event,
+                sent_at,
+                episode_start,
+            },
+        );
+    }
+}
+
+/// Тело письма по группе выходов: что именно проверяли, что ждали, что
+/// увидели и сколько это длится. Первые строки читаются в превью.
+pub fn format_exit_message(
+    event: ExitEvent,
+    group: &str,
+    node: &str,
+    table: Option<u16>,
+    probes: &[ExitProbe],
+    duration_sec: i64,
+    detail: Option<&str>,
+    active_iface: Option<&str>,
+) -> String {
+    let table = table
+        .map(|t| format!(", таблица {t}"))
+        .unwrap_or_default();
+    let head = match event {
+        ExitEvent::Dead => format!(
+            "⛔ Группа {group}: все выходы мертвы — трафик группы заблокирован\nнода: {node}{table}"
+        ),
+        ExitEvent::Degraded => format!(
+            "🟡 Группа {group}: primary мёртв, трафик несёт secondary\nнода: {node}{table}"
+        ),
+        ExitEvent::Recovered => format!(
+            "🟢 Группа {group}: выход вернулся{}\nнода: {node}{table}",
+            active_iface
+                .filter(|i| !i.is_empty())
+                .map(|i| format!(" ({i})"))
+                .unwrap_or_default()
+        ),
+    };
+
+    let duration = match event {
+        ExitEvent::Recovered => format!("лежала: {}", human_duration(duration_sec)),
+        _ => format!("длится: {}", human_duration(duration_sec)),
+    };
+
+    let mut body = String::new();
+    if !probes.is_empty() {
+        body.push_str("\nпробы (bind на интерфейс, сверка exit IP):");
+        for p in probes {
+            let role = if p.role.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", p.role)
+            };
+            let seen = p
+                .observed_ip
+                .as_deref()
+                .filter(|ip| !ip.trim().is_empty())
+                .unwrap_or("нет ответа");
+            let hs = p
+                .handshake_age_sec
+                .map(|a| {
+                    if a >= 999999 {
+                        ", handshake: нет".to_string()
+                    } else {
+                        format!(", handshake {a}s")
+                    }
+                })
+                .unwrap_or_default();
+            body.push_str(&format!(
+                "\n  • {}{role} — ожидали {}, получили {} — {}{hs}",
+                if p.iface.is_empty() { "?" } else { &p.iface },
+                if p.expected_ip.is_empty() {
+                    "?"
+                } else {
+                    &p.expected_ip
+                },
+                seen,
+                if p.alive { "ok" } else { "DEAD" },
+            ));
+        }
+        body.push('\n');
+    }
+
+    let detail = detail
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+        .map(|d| format!("\n{d}\n"))
+        .unwrap_or_default();
+
+    format!(
+        "{head}\n{duration} · {}\n{body}{detail}\nвремя: {}",
+        match event {
+            ExitEvent::Dead => "fail-closed: пакеты получают ICMP unreachable, не уходят с IP ноды",
+            ExitEvent::Degraded => "пользователи едут через резервный выход (другая страна/ДЦ)",
+            ExitEvent::Recovered => "primary снова отвечает ожидаемым exit IP",
+        },
+        Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    )
+}
+
 /// Отправка по SMTP (`[alerts.email]`). Тема — первая строка сообщения,
 /// тело — весь текст: алерт остаётся читаемым в превью и в поиске.
 /// SMTP-транспорт из конфига: один и тот же для алертов и для сводок.
@@ -1093,7 +1410,17 @@ pub async fn send_email_html(
     smtp_transport(cfg)?
         .send(message)
         .await
-        .map(|_| ())
+        .map(|response| {
+            // Ответ провайдера на DATA (`250 2.0.0 Ok: queued as <id>`) —
+            // единственное подтверждение, что письмо принято, а не просто
+            // «сокет открылся». В журнал, чтобы доставку можно было доказать.
+            tracing::info!(
+                "alerts: email accepted by {}: {} {}",
+                cfg.smtp_host,
+                response.code(),
+                response.first_line().unwrap_or_default()
+            );
+        })
         .map_err(|e| format!("smtp send failed: {e}"))
 }
 
@@ -1151,7 +1478,16 @@ pub async fn send_email(
     transport
         .send(message)
         .await
-        .map(|_| ())
+        .map(|response| {
+            // Ответ провайдера на DATA — доказательство приёма письма (в
+            // журнале рядом с `delivered=true`), а не только успешный коннект.
+            tracing::info!(
+                "alerts: email accepted by {}: {} {}",
+                cfg.smtp_host,
+                response.code(),
+                response.first_line().unwrap_or_default()
+            );
+        })
         .map_err(|e| format!("smtp send failed: {e}"))
 }
 
@@ -1270,6 +1606,7 @@ mod tests {
             recovery_grace_sec: 120,
             new_node_grace_sec: 0,
             throttle_sec: 1800,
+            exit_reminder_sec: default_exit_reminder(),
             offline_long_sec: 3600,
             disk_threshold_pct: 90.0,
             disk_hold_sec: 900,
@@ -1819,5 +2156,220 @@ mod tests {
         assert_eq!(human_duration(45), "45 с");
         assert_eq!(human_duration(600), "10 мин");
         assert_eq!(human_duration(3720), "1 ч 2 мин");
+    }
+
+    fn probe(iface: &str, role: &str, expect: &str, seen: Option<&str>, alive: bool) -> ExitProbe {
+        ExitProbe {
+            iface: iface.into(),
+            role: role.into(),
+            expected_ip: expect.into(),
+            observed_ip: seen.map(Into::into),
+            alive,
+            handshake_age_sec: Some(if alive { 12 } else { 999999 }),
+        }
+    }
+
+    #[test]
+    fn exit_dedupe_fires_on_transitions_and_reminds_every_30_min() {
+        let mut d = ExitDedupe::new();
+        let t0 = Utc::now();
+
+        // Первое «мёртво» — письмо.
+        assert_eq!(
+            d.decide("ru", "sh-0001-nl02", ExitEvent::Dead, 1800, t0),
+            ExitDecision::Send { reminder: false }
+        );
+        // Тик watchdog'а через 10 с повторяет то же состояние — тишина.
+        assert_eq!(
+            d.decide(
+                "ru",
+                "sh-0001-nl02",
+                ExitEvent::Dead,
+                1800,
+                t0 + chrono::Duration::seconds(10)
+            ),
+            ExitDecision::Suppress("repeat")
+        );
+        // Через 29 минут — всё ещё тишина, на 30-й минуте — напоминание.
+        assert_eq!(
+            d.decide(
+                "ru",
+                "sh-0001-nl02",
+                ExitEvent::Dead,
+                1800,
+                t0 + chrono::Duration::seconds(1790)
+            ),
+            ExitDecision::Suppress("repeat")
+        );
+        assert_eq!(
+            d.decide(
+                "ru",
+                "sh-0001-nl02",
+                ExitEvent::Dead,
+                1800,
+                t0 + chrono::Duration::seconds(1801)
+            ),
+            ExitDecision::Send { reminder: true }
+        );
+        // Отбой — сразу, мимо троттла, и эпизод при этом закрывается.
+        assert_eq!(
+            d.decide(
+                "ru",
+                "sh-0001-nl02",
+                ExitEvent::Recovered,
+                1800,
+                t0 + chrono::Duration::seconds(1805)
+            ),
+            ExitDecision::Send { reminder: false }
+        );
+        // «Восстановилось» второй раз подряд — уже не новость.
+        assert_eq!(
+            d.decide(
+                "ru",
+                "sh-0001-nl02",
+                ExitEvent::Recovered,
+                1800,
+                t0 + chrono::Duration::seconds(1810)
+            ),
+            ExitDecision::Suppress("repeat")
+        );
+    }
+
+    #[test]
+    fn exit_dedupe_alerts_again_right_after_recovery() {
+        let mut d = ExitDedupe::new();
+        let t0 = Utc::now();
+        assert!(matches!(
+            d.decide("ai", "sh-0001-nl01", ExitEvent::Dead, 1800, t0),
+            ExitDecision::Send { .. }
+        ));
+        assert!(matches!(
+            d.decide(
+                "ai",
+                "sh-0001-nl01",
+                ExitEvent::Recovered,
+                1800,
+                t0 + chrono::Duration::seconds(60)
+            ),
+            ExitDecision::Send { .. }
+        ));
+        // Вторая авария через минуту — это новый эпизод, а не «повтор».
+        assert_eq!(
+            d.decide(
+                "ai",
+                "sh-0001-nl01",
+                ExitEvent::Dead,
+                1800,
+                t0 + chrono::Duration::seconds(120)
+            ),
+            ExitDecision::Send { reminder: false }
+        );
+    }
+
+    #[test]
+    fn exit_dedupe_is_per_group_and_node_and_recovers_without_history() {
+        let mut d = ExitDedupe::new();
+        let t0 = Utc::now();
+        // Отбой без открытого эпизода (рестарт api, неудачный деплой) — молчим.
+        assert_eq!(
+            d.decide("gov", "sh-0001-nl01", ExitEvent::Recovered, 1800, t0),
+            ExitDecision::Suppress("nothing-to-recover")
+        );
+        // Та же группа на другой ноде — отдельное состояние.
+        assert!(matches!(
+            d.decide("ru", "sh-0001-nl01", ExitEvent::Degraded, 1800, t0),
+            ExitDecision::Send { .. }
+        ));
+        assert!(matches!(
+            d.decide("ru", "sh-0001-nl02", ExitEvent::Degraded, 1800, t0),
+            ExitDecision::Send { .. }
+        ));
+        // Ужесточение degraded -> dead на той же паре — письмо сразу.
+        assert!(matches!(
+            d.decide(
+                "ru",
+                "sh-0001-nl01",
+                ExitEvent::Dead,
+                1800,
+                t0 + chrono::Duration::seconds(20)
+            ),
+            ExitDecision::Send { .. }
+        ));
+    }
+
+    #[test]
+    fn failed_delivery_is_retried_on_the_next_report() {
+        let mut d = ExitDedupe::new();
+        let t0 = Utc::now();
+        assert!(matches!(
+            d.decide("ru", "sh-0001-nl01", ExitEvent::Dead, 1800, t0),
+            ExitDecision::Send { .. }
+        ));
+        // SMTP отказал: следующее событие (через тик) должно снова попытаться.
+        d.delivery_failed("ru", "sh-0001-nl01", 1800);
+        assert_eq!(
+            d.decide(
+                "ru",
+                "sh-0001-nl01",
+                ExitEvent::Dead,
+                1800,
+                t0 + chrono::Duration::seconds(10)
+            ),
+            ExitDecision::Send { reminder: true }
+        );
+    }
+
+    #[test]
+    fn exit_message_carries_group_node_probes_and_duration() {
+        let probes = vec![
+            probe("wg-ru-ufo", "primary", "171.22.134.156", None, false),
+            probe("wg-ru-aeza", "secondary", "171.22.130.17", None, false),
+        ];
+        let text = format_exit_message(
+            ExitEvent::Dead,
+            "ru",
+            "sh-0001-nl02",
+            Some(200),
+            &probes,
+            42,
+            Some("both exits dead"),
+            None,
+        );
+        assert!(text.starts_with("⛔ Группа ru: все выходы мертвы"), "{text}");
+        assert!(text.contains("нода: sh-0001-nl02, таблица 200"), "{text}");
+        assert!(text.contains("wg-ru-ufo primary — ожидали 171.22.134.156, получили нет ответа — DEAD"), "{text}");
+        assert!(text.contains("wg-ru-aeza secondary — ожидали 171.22.130.17"), "{text}");
+        assert!(text.contains("длится: 42 с"), "{text}");
+        assert!(text.contains("both exits dead"), "{text}");
+
+        let recovered = format_exit_message(
+            ExitEvent::Recovered,
+            "ru",
+            "sh-0001-nl02",
+            Some(200),
+            &[probe("wg-ru-ufo", "primary", "171.22.134.156", Some("171.22.134.156"), true)],
+            3720,
+            None,
+            Some("wg-ru-ufo"),
+        );
+        assert!(recovered.starts_with("🟢 Группа ru: выход вернулся (wg-ru-ufo)"));
+        assert!(recovered.contains("лежала: 1 ч 2 мин"), "{recovered}");
+    }
+
+    #[test]
+    fn exit_subject_says_what_happened() {
+        let subject = email_subject_state(
+            "sh-0001-nl01",
+            ExitEvent::Degraded.emoji(),
+            &format!("группа ai: {}", ExitEvent::Degraded.label_ru()),
+        );
+        assert_eq!(
+            subject,
+            "[FRKN] 🟡 sh-0001-nl01 — группа ai: выход деградировал"
+        );
+        assert_eq!(ExitEvent::parse("exit_dead"), Some(ExitEvent::Dead));
+        assert_eq!(ExitEvent::parse("recovered"), Some(ExitEvent::Recovered));
+        assert_eq!(ExitEvent::parse("Exit_Degraded"), Some(ExitEvent::Degraded));
+        assert_eq!(ExitEvent::parse("nope"), None);
     }
 }

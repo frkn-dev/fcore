@@ -21,6 +21,9 @@ path = "/opt/xray/xray-config.json"
 
 [h2]
 enabled = true
+# Hysteria2's own config file is the single source of truth for what this node
+# announces (port from `listen`, name from `host` or the first `acme.domains`
+# entry). fnode never starts the process: it lives in its own systemd unit.
 path = "/opt/hysteria/config.yaml"
 
 [wg]
@@ -79,10 +82,33 @@ country = "RU"
 type = "common"
 # Optional cluster FQDN. When set, client configs use this domain instead of the node IP.
 # cluster = "node-cdn.example.com"
-# Optional extra entry IPs for one node (anti IP-blocking). The first IP is
-# the primary and MUST equal `address` above; all IPs share the same
-# ports/keys/inbounds — only the entry address differs. Clients pick/rotate
-# addresses themselves. Omit for a single-address node.
+# Entry points of this node — the ONE shape everything speaks (node config,
+# node -> api announcement, api -> client payload). One [[node.endpoints]]
+# block per address; the first one MUST equal `address` above.
+#
+#   ip     — a public IPv4 (required, unique within the node)
+#   port   — optional, default = the inbound's port for the protocol
+#   weight — optional, default 100; the client splits traffic by these numbers
+#   label  — optional, logs only (never parsed by a client)
+#
+# Clients pick/rotate addresses themselves. Omit the section for a
+# single-address node (the api then expands `address` into the same shape).
+# [[node.endpoints]]
+# ip = "82.148.231.161"
+# port = 443
+# weight = 200
+# label = "nl-01"
+#
+# [[node.endpoints]]
+# ip = "82.148.231.162"
+# weight = 100
+#
+# DEPRECATED: the two keys below are the legacy form of the section above and
+# are ignored (with a warning) when [[node.endpoints]] is present. They keep
+# working unchanged, and the node reports `endpoints_legacy: true` to the api
+# (/status) until they are migrated. Remove them once no node reports
+# endpoints_legacy; `env/dev/scripts/migrate-node-endpoints.py` converts a
+# config in place (idempotent, keeps a backup).
 # node_ips = ["192.168.1.100", "192.168.1.101"]
 # Optional pool/group name. Clients group identically-named nodes and show a
 # localized title (falling back to `label`). `pool_translation` maps a
@@ -98,10 +124,9 @@ type = "common"
 # Optional human name of that country; absent means the client translates the
 # code itself.
 # pool_country_name = "Netherlands"
-# Optional per-address weights for the pool: address -> weight (default 100).
-# Addresses of one node and of neighbour nodes may share the same weight; the
-# api hands the client `node_weights{ip: weight}` and the client splits traffic
-# by these numbers. Missing address = 100. Zero/negative = "not set" (100).
+# DEPRECATED (see above): per-address weights as `address -> weight`. Express
+# them as `weight =` on the matching [[node.endpoints]] entry instead; a
+# missing weight means 100 and zero/negative is treated as "not set" (100).
 # node_weights = { "192.168.1.100" = 75, "192.168.1.101" = 25 }
 # Optional base URL of THIS node's speed-test endpoint: where the bench serves
 # `/speedtest/1mb.test`, `/speedtest/10mb.test`, `/speedtest/ping.txt`. The node

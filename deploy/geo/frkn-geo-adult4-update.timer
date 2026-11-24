@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly refresh of the FRKN adult-platform IPv4 zone (direct whitelist: verified IPs of pornhub/xvideos/xnxx/xhamster/... always exit from NL)
+
+[Timer]
+# Same cadence as the `ai` / `ai-cn` / `exch` zones: an hour-old answer is still
+# good, and the jitter keeps the four resolvers off the same second.
+OnCalendar=hourly
+RandomizedDelaySec=5m
+# A host that was down at the top of the hour catches up on the next boot.
+Persistent=true
+Unit=frkn-geo-adult4-update.service
+
+[Install]
+WantedBy=timers.target

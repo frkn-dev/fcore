@@ -40,6 +40,20 @@ pub struct RenewedGrant {
     pub revoked_reason: Option<String>,
 }
 
+/// What a plan purchase did (`POST /subscription/{id}/plan`).
+#[derive(Clone, Debug)]
+pub struct PlanFulfilment {
+    /// Grant the purchase wrote or extended; `None` when no shard could take
+    /// the plan (the caller answers 503, the payment is not turned into rights).
+    pub row: Option<AccessRow>,
+    /// The payment reference was already recorded: this call changed nothing.
+    pub duplicate: bool,
+    /// Live grants on the shard and the shard's limit (`0` = no declared cap).
+    pub used: i64,
+    pub limit: i64,
+    pub overflow: bool,
+}
+
 /// One row of `shard_overview`: a declared shard with its live numbers.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ShardRow {
@@ -113,6 +127,27 @@ pub enum Inserted {
     Conflict,
 }
 
+/// One live peer as the cleanup job sees it: its last booked traffic and the
+/// facts about the subscription and grant that own it. The decision itself is
+/// `crate::peers::reap_reason` — pure and tested without a database.
+#[derive(Clone, Debug)]
+pub struct PeerCleanupRow {
+    pub peer: PeerRow,
+    /// Last row written to `peer_traffic` for this peer; `None` when it never
+    /// moved a byte (the idle clock then starts at `peer.created_at`).
+    pub last_traffic_at: Option<DateTime<Utc>>,
+    /// `subscriptions.is_deleted`.
+    pub sub_deleted: bool,
+    /// `subscriptions.expires_at` is set and already over.
+    pub sub_expired: bool,
+    /// The env is the subscription's own (self-hosted node, premium slot).
+    pub env_owned: bool,
+    /// A grant of this (subscription, env) is live.
+    pub grant_live: bool,
+    /// Any grant row (live or revoked) exists for this (subscription, env).
+    pub grant_seen: bool,
+}
+
 pub struct PgPeers {
     pub manager: Arc<Mutex<PgClientManager>>,
 }
@@ -168,7 +203,10 @@ impl PgPeers {
             .collect::<Vec<_>>();
 
         let network_rows = client
-            .query("SELECT env, subnet::text AS subnet FROM env_networks ORDER BY env, subnet", &[])
+            .query(
+                "SELECT env, pool, subnet::text AS subnet FROM env_networks ORDER BY env, pool, subnet",
+                &[],
+            )
             .await?;
 
         let capacity_rows = client
@@ -213,13 +251,19 @@ impl PgPeers {
         }
 
         for row in network_rows {
-            let env = Env::from_str(&row.get::<_, String>("env"))
-                .unwrap_or_else(|_| Env::Custom(row.get::<_, String>("env")));
-            state
-                .env_networks
-                .entry(env)
-                .or_default()
-                .push(row.get::<_, String>("subnet"));
+            let env_name = row.get::<_, String>("env");
+            let env = Env::from_str(&env_name).unwrap_or_else(|_| Env::Custom(env_name));
+            let subnet = row.get::<_, String>("subnet");
+            match row.get::<_, Option<String>>("pool") {
+                // Pool-scoped block: the allocator uses it instead of the
+                // env-wide one, so an address names its pool.
+                Some(pool) if !pool.is_empty() => state
+                    .pool_networks
+                    .entry((env, pool))
+                    .or_default()
+                    .push(subnet),
+                _ => state.env_networks.entry(env).or_default().push(subnet),
+            }
         }
 
         for row in capacity_rows {
@@ -229,6 +273,35 @@ impl PgPeers {
                 .get::<_, Option<String>>("kind")
                 .as_deref()
                 .and_then(crate::peers::ShardKind::parse)
+                // Rows written before `kind` existed carry `legacy`, which is
+                // not a kind: falling back to Core made every personal shard
+                // look like a region and refused private-node registration
+                // ("invalid personal scope"). Derive it from the plan, then
+                // from the env name — both are what the row really means.
+                .or_else(|| {
+                    let plan = row.get::<_, Option<String>>("plan").unwrap_or_default();
+                    crate::peers::ShardKind::for_plan(&plan)
+                })
+                .or_else(|| {
+                    let env = row.get::<_, String>("env");
+                    if env.starts_with("custompersonal") || env.starts_with("personal") {
+                        Some(crate::peers::ShardKind::Selfhosted)
+                    } else if env
+                        .strip_prefix("custom")
+                        .map(|rest| {
+                            rest.len() >= 8 && rest.chars().all(|c| c.is_ascii_hexdigit())
+                        })
+                        .unwrap_or(false)
+                    {
+                        // A reseller shard: `custom<hex>`. Anything else
+                        // custom-shaped stays a legacy region.
+                        Some(crate::peers::ShardKind::Resell)
+                    } else if env.starts_with("premium") {
+                        Some(crate::peers::ShardKind::Premium)
+                    } else {
+                        Some(crate::peers::ShardKind::Core)
+                    }
+                })
                 .unwrap_or_default();
             state.env_capacity.insert(
                 env,
@@ -371,78 +444,8 @@ impl PgPeers {
         .await?;
 
         // Sticky first: an existing grant of this plan pins the shard.
-        let existing = tx
-            .query(
-                r#"
-                SELECT env
-                FROM subscription_access
-                WHERE subscription_id = $1 AND plan = $2 AND revoked_at IS NULL
-                LIMIT 1
-                "#,
-                &[&subscription_id, &plan],
-            )
-            .await?;
-
-        let env = match existing.first() {
-            Some(row) => row.get::<_, String>("env"),
-            None => {
-                // Shards with room first, then the least loaded of them by fill
-                // ratio — a shard whose users were revoked is filled again at
-                // once, because only live grants are counted. A shard at its own
-                // `max_subscriptions` is a soft cap: it is skipped while any
-                // other shard has room, and only an all-full plan lands here.
-                let mut best: Option<(String, f64)> = None;
-                let mut overflow_pick: Option<(String, i64)> = None;
-
-                for (candidate, limit) in shards {
-                    let used: i64 = tx
-                        .query_one(
-                            r#"
-                            SELECT count(*) AS used
-                            FROM subscription_access
-                            WHERE env = $1 AND plan = $2 AND revoked_at IS NULL
-                            "#,
-                            &[candidate, &plan],
-                        )
-                        .await?
-                        .get("used");
-
-                    if *limit > 0 && used >= *limit {
-                        let better = match &overflow_pick {
-                            None => true,
-                            Some((env, used_best)) => {
-                                used < *used_best || (used == *used_best && candidate < env)
-                            }
-                        };
-                        if better {
-                            overflow_pick = Some((candidate.clone(), used));
-                        }
-                        continue;
-                    }
-
-                    let ratio = if *limit > 0 {
-                        used as f64 / *limit as f64
-                    } else {
-                        // No cap on this shard: compare absolute counts, which is
-                        // the same ordering with an unknown denominator.
-                        used as f64
-                    };
-                    let better = match &best {
-                        None => true,
-                        Some((env, best_ratio)) => {
-                            ratio < *best_ratio || (ratio == *best_ratio && candidate < env)
-                        }
-                    };
-                    if better {
-                        best = Some((candidate.clone(), ratio));
-                    }
-                }
-
-                match best.map(|(env, _)| env).or(overflow_pick.map(|(env, _)| env)) {
-                    Some(env) => env,
-                    None => return Ok(None),
-                }
-            }
+        let Some(env) = pick_shard(&tx, subscription_id, plan, shards).await? else {
+            return Ok(None);
         };
 
         let row = tx
@@ -502,6 +505,157 @@ impl PgPeers {
         tx.commit().await?;
 
         Ok(Some((access_from_row(&row), used, limit, overflow)))
+    }
+
+    /// Fulfil a plan purchase: write (or extend) the grant a cabinet purchase
+    /// paid for, exactly once.
+    ///
+    /// `payment_marker` is the recorded payment reference (`pay:<ref>` in
+    /// `sources`). The whole call runs in one transaction under an advisory
+    /// lock keyed by the reference, so a webhook delivered twice — or delivered
+    /// twice at the same instant — extends the term, the quota and the shard
+    /// count only once and answers `duplicate: true` the second time. No new
+    /// table: `sources` already answers «what bought this row».
+    ///
+    /// `days` and `add_traffic_bytes` are what was bought; the arithmetic
+    /// (extension, quota top-up) lives in `plans::purchase_terms` and is applied
+    /// to the row read here, under the same lock, so two concurrent purchases
+    /// cannot both start from the same old value.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fulfil_plan_grant(
+        &self,
+        subscription_id: Uuid,
+        plan: &str,
+        protos: &[Tag],
+        source: &str,
+        payment_marker: &str,
+        days: i64,
+        add_traffic_bytes: i64,
+        shards: &[(String, i64)],
+    ) -> Result<PlanFulfilment> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+        let tx = client.transaction().await?;
+
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            &[&format!("plan-buy:{}:{}", subscription_id, payment_marker)],
+        )
+        .await?;
+
+        // The same payment already bought something: return what it bought and
+        // change nothing. Any row of the plan counts, revoked or not — a
+        // duplicate webhook must not revive a grant support has taken away.
+        let already = tx
+            .query_opt(
+                r#"
+                SELECT id, env, plan, protos, sources, expires_at, traffic_limit
+                FROM subscription_access
+                WHERE subscription_id = $1 AND plan = $2 AND $3 = ANY(sources)
+                ORDER BY (revoked_at IS NULL) DESC, created_at DESC
+                LIMIT 1
+                "#,
+                &[&subscription_id, &plan, &payment_marker],
+            )
+            .await?;
+
+        if let Some(row) = already {
+            let row = access_from_row(&row);
+            let (used, limit, overflow) =
+                shard_load(&tx, &row.env.to_string(), plan, shards).await?;
+            tx.commit().await?;
+            return Ok(PlanFulfilment {
+                row: Some(row),
+                duplicate: true,
+                used,
+                limit,
+                overflow,
+            });
+        }
+
+        let Some(env) = pick_shard(&tx, subscription_id, plan, shards).await? else {
+            // No shard can take this plan: the caller answers 503 and the money
+            // is not turned into rights nobody serves.
+            tx.rollback().await.ok();
+            return Ok(PlanFulfilment {
+                row: None,
+                duplicate: false,
+                used: 0,
+                limit: 0,
+                overflow: false,
+            });
+        };
+
+        // The row this purchase extends, locked: the term and the quota are
+        // computed from it below.
+        let existing = tx
+            .query_opt(
+                r#"
+                SELECT id, env, plan, protos, sources, expires_at, traffic_limit
+                FROM subscription_access
+                WHERE subscription_id = $1 AND env = $2 AND revoked_at IS NULL
+                FOR UPDATE
+                "#,
+                &[&subscription_id, &env],
+            )
+            .await?;
+        let existing_row = existing.as_ref().map(access_from_row);
+
+        let terms = crate::plans::purchase_terms(
+            plan,
+            days,
+            (add_traffic_bytes > 0).then_some(add_traffic_bytes),
+            existing_row
+                .as_ref()
+                .map(|row| (row.expires_at, row.traffic_limit)),
+            Utc::now(),
+        );
+
+        // The payment reference rides in `sources`: it is both the record of
+        // what paid for this row and the key the duplicate check above reads.
+        let sources = crate::plans::purchase_sources(source, payment_marker);
+
+        let row = tx
+            .query_one(
+                r#"
+                INSERT INTO subscription_access
+                    (subscription_id, env, plan, protos, sources, expires_at, traffic_limit)
+                VALUES ($1, $2, $3, $4::proto[], $5, $6, $7)
+                ON CONFLICT (subscription_id, env) WHERE revoked_at IS NULL DO UPDATE
+                SET protos = (
+                        SELECT ARRAY(SELECT DISTINCT unnest(subscription_access.protos || EXCLUDED.protos))
+                    ),
+                    sources = (
+                        SELECT ARRAY(SELECT DISTINCT unnest(subscription_access.sources || EXCLUDED.sources))
+                    ),
+                    plan = COALESCE(subscription_access.plan, EXCLUDED.plan),
+                    expires_at = EXCLUDED.expires_at,
+                    traffic_limit = EXCLUDED.traffic_limit,
+                    updated_at = now()
+                RETURNING id, env, plan, protos, sources, expires_at, traffic_limit
+                "#,
+                &[
+                    &subscription_id,
+                    &env,
+                    &plan,
+                    &protos.to_vec(),
+                    &sources,
+                    &terms.expires_at,
+                    &terms.traffic_limit,
+                ],
+            )
+            .await?;
+
+        let (used, limit, overflow) = shard_load(&tx, &env, plan, shards).await?;
+        tx.commit().await?;
+
+        Ok(PlanFulfilment {
+            row: Some(access_from_row(&row)),
+            duplicate: false,
+            used,
+            limit,
+            overflow,
+        })
     }
 
     /// Registry upkeep on node registration: the shard and the pool exist and
@@ -626,9 +780,17 @@ impl PgPeers {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
 
-        client.execute("DELETE FROM env_networks WHERE env = $1", &[&env.to_string()]).await?;
+        client
+            .execute(
+                "DELETE FROM env_networks WHERE env = $1",
+                &[&env.to_string()],
+            )
+            .await?;
         let policy = client
-            .execute("DELETE FROM env_capacity WHERE env = $1", &[&env.to_string()])
+            .execute(
+                "DELETE FROM env_capacity WHERE env = $1",
+                &[&env.to_string()],
+            )
             .await?;
 
         Ok(policy > 0)
@@ -1011,6 +1173,35 @@ impl PgPeers {
             .collect())
     }
 
+    /// Insert a block for `(env, pool)`. `pool = None` stores the env-wide
+    /// block (the shard's own /16). The unique index makes a re-run a no-op.
+    pub async fn upsert_network(
+        &self,
+        env: &Env,
+        pool: Option<&str>,
+        block: &IpAddrMask,
+    ) -> Result<Inserted> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let inserted = client
+            .execute(
+                r#"
+                INSERT INTO env_networks (env, pool, subnet)
+                VALUES ($1, $2, $3::text::cidr)
+                ON CONFLICT DO NOTHING
+                "#,
+                &[&env.to_string(), &pool.map(|p| p.to_string()), &block.to_string()],
+            )
+            .await?;
+
+        Ok(if inserted > 0 {
+            Inserted::Done
+        } else {
+            Inserted::Conflict
+        })
+    }
+
     /// Insert a block. The exclusion constraint refuses overlaps, so an empty
     /// result means "somebody (another env) already holds this range".
     pub async fn insert_env_block(&self, env: &Env, block: &IpAddrMask) -> Result<Inserted> {
@@ -1309,9 +1500,9 @@ impl PgPeers {
 
     /// Idempotent DDL of the peers layer.
     ///
-    /// `0025` is applied before the binary on a normal deploy, but a rollback
-    /// puts an older tree under a newer database and vice versa; the api must
-    /// not fail every peer query because one column is missing.
+    /// `0025`/`0030` are applied before the binary on a normal deploy, but a
+    /// rollback puts an older tree under a newer database and vice versa; the
+    /// api must not fail every peer query because one column is missing.
     pub async fn ensure_schema(&self) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
@@ -1328,8 +1519,18 @@ impl PgPeers {
                 "ALTER TABLE peers ADD COLUMN IF NOT EXISTS pool text;
                  CREATE INDEX IF NOT EXISTS peers_pool_live
                      ON peers (env, pool) WHERE revoked_at IS NULL;
+                 -- One key per (env, pool) since `POST /v1/peers/prepare`: a
+                 -- device holds one tunnel in every pool of the shard.
+                 CREATE UNIQUE INDEX IF NOT EXISTS peers_live_pool_key
+                     ON peers (env, COALESCE(pool, ''), public_key) WHERE revoked_at IS NULL;
+                 DROP INDEX IF EXISTS peers_live_key;
                  ALTER TABLE subscription_access
-                     ADD COLUMN IF NOT EXISTS revoked_reason text;",
+                     ADD COLUMN IF NOT EXISTS revoked_reason text;
+                 -- Migration marker (0030): a fresh subscription is on the v1
+                 -- plane until its first live peer moves it to v2/dual.
+                 ALTER TABLE subscriptions
+                     ADD COLUMN IF NOT EXISTS plane text NOT NULL DEFAULT 'v1',
+                     ADD COLUMN IF NOT EXISTS v2_since timestamptz;",
             )
             .await?;
 
@@ -1462,6 +1663,92 @@ impl PgPeers {
             .await?;
 
         Ok(rows.iter().map(peer_from_row).collect())
+    }
+
+    /// Live tunnels the cleanup job may revoke, oldest traffic first.
+    ///
+    /// One query per pass, capped by `limit`: the job revokes what it gets, so
+    /// a long-lived deployment drains in batches instead of locking `peers`
+    /// with one giant UPDATE. The row carries everything the pure decision
+    /// needs — the last booked traffic (falling back to `created_at`), the
+    /// subscription's state and whether the grant of this env is revoked.
+    pub async fn peers_for_cleanup(
+        &self,
+        cutoff: DateTime<Utc>,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<PeerCleanupRow>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                r#"
+                SELECT p.id, p.device_id, p.subscription_id, p.env, p.proto, p.public_key,
+                       host(p.address) AS address, p.pool, p.label,
+                       p.created_at, p.revoked_at, p.revoke_reason,
+                       GREATEST(
+                           COALESCE((SELECT max(t.updated_at) FROM peer_traffic t
+                                      WHERE t.peer_id = p.id), p.created_at),
+                           COALESCE((SELECT w.updated_at FROM peer_watermarks w
+                                      WHERE w.peer_id = p.id), p.created_at)
+                       ) AS last_seen,
+                       (SELECT max(t.updated_at) FROM peer_traffic t
+                         WHERE t.peer_id = p.id) AS last_traffic_at,
+                       s.is_deleted AS sub_deleted,
+                       (s.expires_at IS NOT NULL AND s.expires_at <= $2) AS sub_expired,
+                       (COALESCE(s.scope_env = p.env::text, false)) AS env_owned,
+                       EXISTS (SELECT 1 FROM subscription_access g
+                                WHERE g.subscription_id = p.subscription_id
+                                  AND g.env = p.env::text
+                                  AND g.revoked_at IS NULL) AS grant_live,
+                       EXISTS (SELECT 1 FROM subscription_access g
+                                WHERE g.subscription_id = p.subscription_id
+                                  AND g.env = p.env::text) AS grant_seen
+                  FROM peers p
+                  JOIN subscriptions s ON s.id = p.subscription_id
+                 WHERE p.revoked_at IS NULL
+                   AND (
+                        s.is_deleted
+                     OR (s.expires_at IS NOT NULL AND s.expires_at <= $2
+                         AND NOT EXISTS (SELECT 1 FROM subscription_access g
+                                          WHERE g.subscription_id = p.subscription_id
+                                            AND g.env = p.env::text
+                                            AND g.revoked_at IS NULL))
+                     OR (EXISTS (SELECT 1 FROM subscription_access g
+                                  WHERE g.subscription_id = p.subscription_id
+                                    AND g.env = p.env::text
+                                    AND g.revoked_at IS NOT NULL)
+                         AND NOT EXISTS (SELECT 1 FROM subscription_access g
+                                          WHERE g.subscription_id = p.subscription_id
+                                            AND g.env = p.env::text
+                                            AND g.revoked_at IS NULL))
+                     OR GREATEST(
+                          COALESCE((SELECT max(t.updated_at) FROM peer_traffic t
+                                     WHERE t.peer_id = p.id), p.created_at),
+                          COALESCE((SELECT w.updated_at FROM peer_watermarks w
+                                     WHERE w.peer_id = p.id), p.created_at)
+                        ) <= $1
+                   )
+                 ORDER BY last_seen ASC
+                 LIMIT $3
+                "#,
+                &[&cutoff, &now, &limit],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| PeerCleanupRow {
+                peer: peer_from_row(row),
+                last_traffic_at: row.get("last_traffic_at"),
+                sub_deleted: row.get("sub_deleted"),
+                sub_expired: row.get("sub_expired"),
+                env_owned: row.get("env_owned"),
+                grant_live: row.get("grant_live"),
+                grant_seen: row.get("grant_seen"),
+            })
+            .collect())
     }
 
     /// Accumulate peer traffic for one window: advance the peer's watermark and
@@ -1608,15 +1895,37 @@ impl PgPeers {
         let client = manager.get_client().await?;
 
         let host = format!("{}/32", address);
+        // The insert and the subscription's plane marker are one statement:
+        // every create path (`POST /v1/peers` and `POST /v1/peers/prepare`)
+        // funnels through here, and a crash between two round-trips would
+        // leave a live peer on a subscription still counted as v1. The marker
+        // CTE runs only when the insert actually returned a row (`ON CONFLICT
+        // DO NOTHING`), and only on a subscription that is still v1 — a
+        // concurrent create and an already migrated row both no-op.
         let row = client
             .query_opt(
                 &format!(
                     r#"
-                    INSERT INTO peers
-                        (device_id, subscription_id, env, proto, public_key, address, pool, label)
-                    VALUES ($1, $2, $3, $4, $5, $6::text::cidr, $7, $8)
-                    ON CONFLICT DO NOTHING
-                    RETURNING {PEER_COLUMNS}
+                    WITH ins AS (
+                        INSERT INTO peers
+                            (device_id, subscription_id, env, proto, public_key, address, pool, label)
+                        VALUES ($1, $2, $3, $4, $5, $6::text::cidr, $7, $8)
+                        ON CONFLICT DO NOTHING
+                        RETURNING *
+                    ), mark AS (
+                        UPDATE subscriptions s
+                           SET plane = CASE
+                                         WHEN EXISTS (
+                                             SELECT 1 FROM connections c
+                                              WHERE c.subscription_id = s.id
+                                                AND c.is_deleted = false)
+                                         THEN 'dual' ELSE 'v2' END,
+                               v2_since = COALESCE(s.v2_since, now())
+                         WHERE s.id = $2
+                           AND (s.plane IS NULL OR s.plane = 'v1')
+                           AND EXISTS (SELECT 1 FROM ins)
+                    )
+                    SELECT {PEER_COLUMNS} FROM ins
                     "#
                 ),
                 &[
@@ -1779,6 +2088,119 @@ impl PgPeers {
 const PEER_COLUMNS: &str = "id, device_id, subscription_id, env, proto, public_key, \
                             host(address) AS address, pool, label, created_at, revoked_at, \
                             revoke_reason";
+
+/// One plan's shard load: live grants on the env and the shard's limit
+/// (`0` = no declared cap).
+async fn shard_load(
+    tx: &tokio_postgres::Transaction<'_>,
+    env: &str,
+    plan: &str,
+    shards: &[(String, i64)],
+) -> Result<(i64, i64, bool)> {
+    let used: i64 = tx
+        .query_one(
+            r#"
+            SELECT count(*) AS used
+            FROM subscription_access
+            WHERE env = $1 AND plan = $2 AND revoked_at IS NULL
+            "#,
+            &[&env, &plan],
+        )
+        .await?
+        .get("used");
+    let limit = shards
+        .iter()
+        .find(|(candidate, _)| candidate == env)
+        .map(|(_, limit)| *limit)
+        .unwrap_or(0);
+    Ok((used, limit, limit > 0 && used > limit))
+}
+
+/// Sticky shard for a plan: one the subscription already holds, otherwise the
+/// least loaded of `shards` (room first, then fill ratio). `None` = nothing can
+/// take this plan at all.
+///
+/// Runs inside the caller's transaction so the choice and the write are one
+/// step: two concurrent buyers of the same plan must not read the same count.
+async fn pick_shard(
+    tx: &tokio_postgres::Transaction<'_>,
+    subscription_id: Uuid,
+    plan: &str,
+    shards: &[(String, i64)],
+) -> Result<Option<String>> {
+    // Sticky first: an existing grant of this plan pins the shard.
+    let existing = tx
+        .query(
+            r#"
+            SELECT env
+            FROM subscription_access
+            WHERE subscription_id = $1 AND plan = $2 AND revoked_at IS NULL
+            LIMIT 1
+            "#,
+            &[&subscription_id, &plan],
+        )
+        .await?;
+
+    if let Some(row) = existing.first() {
+        return Ok(Some(row.get::<_, String>("env")));
+    }
+
+    // Shards with room first, then the least loaded of them by fill ratio — a
+    // shard whose users were revoked is filled again at once, because only live
+    // grants are counted. A shard at its own `max_subscriptions` is a soft cap:
+    // it is skipped while any other shard has room, and only an all-full plan
+    // lands here.
+    let mut best: Option<(String, f64)> = None;
+    let mut overflow_pick: Option<(String, i64)> = None;
+
+    for (candidate, limit) in shards {
+        let used: i64 = tx
+            .query_one(
+                r#"
+                SELECT count(*) AS used
+                FROM subscription_access
+                WHERE env = $1 AND plan = $2 AND revoked_at IS NULL
+                "#,
+                &[candidate, &plan],
+            )
+            .await?
+            .get("used");
+
+        if *limit > 0 && used >= *limit {
+            let better = match &overflow_pick {
+                None => true,
+                Some((env, used_best)) => {
+                    used < *used_best || (used == *used_best && candidate < env)
+                }
+            };
+            if better {
+                overflow_pick = Some((candidate.clone(), used));
+            }
+            continue;
+        }
+
+        let ratio = if *limit > 0 {
+            used as f64 / *limit as f64
+        } else {
+            // No cap on this shard: compare absolute counts, which is the same
+            // ordering with an unknown denominator.
+            used as f64
+        };
+        let better = match &best {
+            None => true,
+            Some((env, best_ratio)) => {
+                ratio < *best_ratio || (ratio == *best_ratio && candidate < env)
+            }
+        };
+        if better {
+            best = Some((candidate.clone(), ratio));
+        }
+    }
+
+    Ok(best
+        .map(|(env, _)| env)
+        .or_else(|| overflow_pick.map(|(env, _)| env)))
+}
 
 fn access_from_row(row: &tokio_postgres::Row) -> AccessRow {
     let env: String = row.get("env");

@@ -1,0 +1,41 @@
+[Unit]
+Description=FRKN geo lists: resolve + TLS-verify the Russian state-site IPv4 zone (api.frkn.org /router/geo/gov4.zone)
+Documentation=https://github.com/frkn-dev/fcore/blob/main/docs/router-geo.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Same resolver as the `ai` / `ai-cn` / `exch` / `adult` groups, different
+# inputs. This zone feeds ONE dedicated exit group on the nodes (mark 0x7 ->
+# table 700 -> msk-tw): Russian state sites are WAF-flagged on the general RU
+# hosting ranges, so they must never fall into the `ru` group. The rule sits
+# above every other group and is fail-closed, which is why the list must be
+# verified like all the others: an unverified address here would drag unrelated
+# traffic through the state-site exit.
+#
+# The two flags below are the gov-only relaxed-trust mode (the resolver refuses
+# them for every other group):
+#   --extra-ca    adds the Минцифры root + sub CA next to the default store.
+#                 Many state sites present that chain after their public certs
+#                 were revoked; without it the chain cannot be built at all.
+#                 Hostname matching and chain-to-a-trusted-root stay mandatory.
+#   --probe-via   Russian state sites do not answer the CZ api host (TCP never
+#                 establishes), so everything the local pass could not verify is
+#                 re-probed on nl01 through the gov tunnel itself
+#                 (--probe-source = wg-gov-msk address of that node, which
+#                 `ip rule from 10.200.7.10 lookup 700` sends down table 700).
+#                 The probe key is /etc/frkn/geo/probe_ed25519 (ssh, root,
+#                 authorized_keys entry is `restrict`).
+ExecStart=/usr/local/lib/frkn/geo/update-ai4-zone.py --group gov4 --domains /etc/frkn/geo/domains/gov.txt --zone-name gov4.zone --extra-ca /etc/frkn/geo/ru-trusted-ca.pem --probe-via root@132.243.203.40 --probe-source 10.200.7.10
+Environment=GEO_DIR=/var/lib/frkn/geo
+# ~31 hosts x 2 resolvers + a few dozen local TLS probes + one ssh batch on
+# the node; the cap only bounds a network that hangs.
+TimeoutStartSec=300
+# Writes its own directory only; /etc stays readable (the domain list and the
+# probe key/host keys). ProtectHome stays on: the key is under /etc/frkn/geo.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/frkn/geo
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true

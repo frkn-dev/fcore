@@ -7,8 +7,9 @@ use std::str::FromStr;
 use std::collections::HashSet;
 
 use fcore::{
-    normalize_bench_url, normalize_pool_country, normalize_pool_country_name, Env, Error, Inbound,
-    Node, NodeStatus, NodeType, Tag,
+    normalize_bench_url, normalize_pool_country, normalize_pool_country_name,
+    validate_endpoint_list, Endpoint, Env, Error, Inbound, Node, NodeStatus, NodeType, Tag,
+    DEFAULT_NODE_WEIGHT,
 };
 
 /// Normalizes an optional `pool_translation` map received from a node (or a
@@ -184,10 +185,27 @@ pub struct NodeRequest {
     pub r#type: Option<NodeType>,
     #[serde(default)]
     pub cluster: Option<String>,
+    /// Entry points of the node in the ONE `[[node.endpoints]]` shape
+    /// (`ip` + optional `port`/`weight`/`label`), as sent by the node's
+    /// registration. Old node binaries omit the field entirely, so the api
+    /// falls back to `node_ips`/`node_weights` below.
+    #[serde(default)]
+    pub endpoints: Vec<Endpoint>,
+    /// What the node says about itself: `true` = its config still uses the
+    /// DEPRECATED `node_ips`/`node_weights` keys. Absent from old binaries and
+    /// then derived from the payload (`node_ips` present = legacy).
+    #[serde(default)]
+    pub endpoints_legacy: Option<bool>,
+    /// DEPRECATED — use `[[node.endpoints]]`.
+    /// TODO(remove-legacy-endpoints): delete once every node sends
+    /// `endpoints` and `endpoints_legacy: false`.
     /// Extra entry IPs sent by the node at registration: node_ips[0] is the
     /// primary and must equal `address`; absent = single-address node
     /// (old node binaries simply omit the field).
     #[serde(default)]
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_ips: Option<Vec<Ipv4Addr>>,
     /// Optional pool/group name (config.toml `[node] pool`). Old node
     /// binaries omit it, so old clients keep the previous behavior.
@@ -196,7 +214,13 @@ pub struct NodeRequest {
     /// Per-entry weights (config.toml `[node] node_weights`), keyed by address.
     /// Old node binaries omit the field (and send the legacy `weight`, which the
     /// api ignores), so every address falls back to the default (100).
+    ///
+    /// DEPRECATED — use `[[node.endpoints]]`.
+    /// TODO(remove-legacy-endpoints): delete once every node sends `endpoints`.
     #[serde(default)]
+    #[deprecated(
+        note = "use [[node.endpoints]]; remove once no node reports endpoints_legacy"
+    )]
     pub node_weights: BTreeMap<String, i32>,
     /// Optional per-language translations of `pool` (en/ru/uk/...); `ua` is
     /// accepted as an alias of `uk`.
@@ -217,11 +241,25 @@ pub struct NodeRequest {
 }
 
 impl NodeRequest {
-    /// Consistency rule for the entry-IP list: when present it must be
-    /// non-empty and start with the primary address, so old clients that
-    /// only read `address` stay correct.
+    /// Consistency rule for the entry points: whatever shape the node used,
+    /// the resulting list must be non-empty, unique and start with the primary
+    /// address, so old clients that only read `address` stay correct.
+    ///
+    /// A new node sends `endpoints[]` **and** the derived `node_ips` mirror (so
+    /// an old api build still works): here `endpoints` wins and the mirror is
+    /// validated but not used.
+    #[allow(deprecated)]
     pub fn validate(&self) -> Result<(), Error> {
-        if let Some(node_ips) = &self.node_ips {
+        if !self.endpoints.is_empty() {
+            validate_endpoint_list(&self.endpoints, self.address)?;
+            if let Some(node_ips) = &self.node_ips {
+                if node_ips.first() != Some(&self.address) {
+                    return Err(Error::Custom(
+                        "node_ips[0] must equal the node address".into(),
+                    ));
+                }
+            }
+        } else if let Some(node_ips) = &self.node_ips {
             match node_ips.first() {
                 None => {
                     return Err(Error::Custom(
@@ -248,6 +286,11 @@ impl NodeRequest {
         }
         Ok(())
     }
+    /// Builds the stored node. `endpoints[]` is the source of truth when the
+    /// node sends it; `node_ips`/`node_weights` are then only the legacy mirror
+    /// (an old api build reads them, this one keeps them for old clients).
+    /// Without `endpoints[]` the legacy pair is expanded into the same shape.
+    #[allow(deprecated)]
     pub fn as_node(&self) -> Node {
         let now = Utc::now();
 
@@ -256,6 +299,77 @@ impl NodeRequest {
         } else {
             NodeType::Core
         };
+
+        let legacy_weights: BTreeMap<String, i32> = self
+            .node_weights
+            .iter()
+            .filter(|(ip, w)| **w > 0 && ip.parse::<Ipv4Addr>().is_ok())
+            .map(|(ip, w)| (ip.trim().to_string(), *w))
+            .collect();
+
+        let endpoints: Vec<Endpoint> = if !self.endpoints.is_empty() {
+            self.endpoints
+                .iter()
+                .map(|endpoint| Endpoint {
+                    ip: endpoint.ip,
+                    port: endpoint.port,
+                    weight: if endpoint.weight > 0 {
+                        endpoint.weight
+                    } else {
+                        DEFAULT_NODE_WEIGHT
+                    },
+                    label: endpoint
+                        .label
+                        .clone()
+                        .map(|label| label.trim().to_string())
+                        .filter(|label| !label.is_empty()),
+                })
+                .collect()
+        } else {
+            let ips: Vec<Ipv4Addr> = self
+                .node_ips
+                .clone()
+                .filter(|ips| !ips.is_empty())
+                .unwrap_or_else(|| vec![self.address]);
+            ips.iter()
+                .map(|ip| Endpoint {
+                    ip: *ip,
+                    port: None,
+                    weight: legacy_weights
+                        .get(&ip.to_string())
+                        .copied()
+                        .unwrap_or(DEFAULT_NODE_WEIGHT),
+                    label: None,
+                })
+                .collect()
+        };
+
+        // What the node told us, else inferred: a payload with `node_ips` and no
+        // `endpoints` is a node on the legacy keys (or an old build).
+        let endpoints_legacy = self
+            .endpoints_legacy
+            .unwrap_or(self.endpoints.is_empty() && self.node_ips.is_some());
+
+        // Legacy mirror for a node that announced ONLY `endpoints[]` (a
+        // third-party tool following the new schema): old api builds and old
+        // clients read these two fields, and an empty one would silently hide
+        // the extra addresses. A node that sent the mirror explicitly keeps it
+        // verbatim.
+        let mirrored_ips: Option<Vec<Ipv4Addr>> = if endpoints.len() > 1 {
+            Some(endpoints.iter().map(|endpoint| endpoint.ip).collect())
+        } else {
+            None
+        };
+        let node_ips = self.node_ips.clone().or(mirrored_ips);
+        let mut node_weights = legacy_weights;
+        if node_weights.is_empty() {
+            node_weights = endpoints
+                .iter()
+                .filter(|endpoint| endpoint.weight != DEFAULT_NODE_WEIGHT)
+                .map(|endpoint| (endpoint.ip.to_string(), endpoint.weight))
+                .collect();
+        }
+
         Node {
             uuid: self.uuid,
             env: self.env.clone(),
@@ -272,7 +386,9 @@ impl NodeRequest {
             country: self.country.clone(),
             r#type: t,
             cluster: self.cluster.clone(),
-            node_ips: self.node_ips.clone(),
+            node_ips,
+            endpoints,
+            endpoints_legacy,
             pool: self
                 .pool
                 .clone()
@@ -281,12 +397,7 @@ impl NodeRequest {
             pool_translation: normalize_pool_translation(self.pool_translation.clone()),
             pool_country_code: normalize_pool_country(self.pool_country_code.clone()),
             pool_country_name: normalize_pool_country_name(self.pool_country_name.clone()),
-            node_weights: self
-                .node_weights
-                .iter()
-                .filter(|(ip, w)| **w > 0 && ip.parse::<Ipv4Addr>().is_ok())
-                .map(|(ip, w)| (ip.trim().to_string(), *w))
-                .collect(),
+            node_weights,
             // The node declares its bench (config.toml `[node] bench_url`).
             // Absent stays None here; the upsert COALESCEs it so a node without
             // the field never wipes a value stored another way.
@@ -668,6 +779,7 @@ impl ConnectionInfoRequest {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -837,6 +949,96 @@ mod tests {
         assert!(req.node_ips.is_none());
         assert!(req.validate().is_ok());
         assert!(req.as_node().node_ips.is_none());
+    }
+
+    // A node on the new `[[node.endpoints]]` section announces `endpoints[]`
+    // (plus the legacy mirror). The api takes the list verbatim: port, weight
+    // and label survive, and the node is not counted as legacy.
+    #[test]
+    fn node_request_endpoints_carry_port_and_weight() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{
+                "node_ips": ["78.17.28.66", "78.17.28.67"],
+                "endpoints": [
+                    {"ip": "78.17.28.66", "port": 8443, "weight": 200, "label": "ru-01"},
+                    {"ip": "78.17.28.67", "weight": 50}
+                ],
+                "endpoints_legacy": false
+            }"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_ok(), "endpoints + legacy mirror is valid");
+
+        let node = req.as_node();
+        assert_eq!(node.endpoints.len(), 2);
+        assert_eq!(node.endpoints[0].port, Some(8443));
+        assert_eq!(node.endpoints[0].weight, 200);
+        assert_eq!(node.endpoints[0].label.as_deref(), Some("ru-01"));
+        assert_eq!(node.endpoints[1].port, None);
+        assert_eq!(node.endpoints[1].weight, 50);
+        assert!(!node.endpoints_legacy);
+    }
+
+    // An old node build (no endpoints, only node_ips) is expanded into the
+    // same list and reported as legacy — no operator action swallowed.
+    #[test]
+    fn node_request_legacy_ips_expand_into_endpoints() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"node_ips": ["78.17.28.66", "78.17.28.67"], "node_weights": {"78.17.28.67": 25}}"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_ok());
+        let node = req.as_node();
+        assert!(node.endpoints_legacy, "legacy keys -> migration still pending");
+        assert_eq!(node.endpoints.len(), 2);
+        assert_eq!(node.endpoints[0].port, None);
+        assert_eq!(node.endpoints[0].weight, DEFAULT_NODE_WEIGHT);
+        assert_eq!(node.endpoints[1].weight, 25);
+        // The legacy fields keep their old value: old clients read them.
+        assert_eq!(node.node_ips.as_ref().map(Vec::len), Some(2));
+        assert_eq!(node.node_weights.get("78.17.28.67"), Some(&25));
+    }
+
+    // A payload with ONLY `endpoints[]` (a tool following the new schema) still
+    // produces the legacy mirror old api builds/clients read.
+    #[test]
+    fn node_request_endpoints_alone_fill_the_legacy_mirror() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"endpoints": [
+                {"ip": "78.17.28.66"},
+                {"ip": "78.17.28.67", "weight": 25}
+            ]}"#,
+        ))
+        .unwrap();
+        assert!(req.validate().is_ok());
+        let node = req.as_node();
+        assert!(node.endpoints_legacy == false);
+        assert_eq!(node.node_ips.as_ref().map(Vec::len), Some(2));
+        assert_eq!(node.node_weights.get("78.17.28.67"), Some(&25));
+        assert!(
+            !node.node_weights.contains_key("78.17.28.66"),
+            "a default weight is not written into the legacy map"
+        );
+    }
+
+    #[test]
+    fn node_request_rejects_duplicate_endpoint_ip() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"endpoints": [{"ip": "78.17.28.66"}, {"ip": "78.17.28.66"}]}"#,
+        ))
+        .unwrap();
+        let err = req.validate().expect_err("duplicate ip must be rejected");
+        assert!(format!("{err}").contains("duplicate endpoint ip"), "{err}");
+    }
+
+    #[test]
+    fn node_request_rejects_endpoints_with_foreign_primary() {
+        let req: NodeRequest = serde_json::from_value(node_request_json(
+            r#"{"endpoints": [{"ip": "78.17.28.67"}]}"#,
+        ))
+        .unwrap();
+        let err = req.validate().expect_err("primary must equal address");
+        assert!(format!("{err}").contains("must equal the node address"), "{err}");
     }
 
     // A node without the field (old build, no bench) parses and stays absent,

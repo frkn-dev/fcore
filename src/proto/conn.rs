@@ -214,26 +214,25 @@ pub fn h2(inbound: &Inbound, label: &str, token: &Option<uuid::Uuid>) -> Result<
     if let Some(inb) = &inbound.h2 {
         let hostname = inb.host.clone();
 
-        let _obfs_type = h2
-            .obfs
-            .as_ref()
-            .map(|o| o.r#type.clone())
-            .unwrap_or_default();
-        let _obfs_pass = h2
-            .obfs
-            .as_ref()
-            .map(|o| o.password.clone())
-            .unwrap_or_default();
-
         let _alpn = h2.alpn.as_ref().map(|v| v.join(",")).unwrap_or_default();
 
         if let Some(token) = token {
             let mut url = Url::parse(&format!("hysteria2://{token}@{hostname}:{port}"))?;
-            url.query_pairs_mut()
-                .append_pair("host", &h2.host)
-                .append_pair("insecure", &h2.insecure.to_string())
-                .append_pair("up-mbps", &h2.up_mbps.unwrap_or(0).to_string())
-                .append_pair("down-mbps", &h2.down_mbps.unwrap_or(0).to_string());
+            {
+                let mut q = url.query_pairs_mut();
+                q.append_pair("host", &h2.host)
+                    .append_pair("insecure", &h2.insecure.to_string())
+                    .append_pair("up-mbps", &h2.up_mbps.unwrap_or(0).to_string())
+                    .append_pair("down-mbps", &h2.down_mbps.unwrap_or(0).to_string());
+                // Salamander PSK has to travel with the link: a client that dials
+                // the node without it gets a silent QUIC timeout, not an auth error.
+                if let Some(obfs) = h2.obfs.as_ref().filter(|o| !o.r#type.is_empty()) {
+                    q.append_pair("obfs", &obfs.r#type);
+                    if !obfs.password.is_empty() {
+                        q.append_pair("obfs-password", &obfs.password);
+                    }
+                }
+            }
 
             let last = get_uuid_last_octet_simple(token);
             url.set_fragment(Some(&format!("{} | {} H2", label, last)));

@@ -1,0 +1,23 @@
+[Unit]
+Description=FRKN geo lists: resolve + TLS-verify the Chinese-AI IPv4 zone (api.frkn.org /router/geo/aicn4.zone)
+Documentation=https://github.com/frkn-dev/fcore/blob/main/docs/router-geo.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Same resolver as the `ai` group, different inputs: one domains file per
+# group. This zone is a DIRECT whitelist on the nodes (a destination in it is
+# never marked and leaves from the node's own IP), so the same TLS-verified
+# IP list is what keeps Chinese AI services off the AI/US exit.
+ExecStart=/usr/local/lib/frkn/geo/update-ai4-zone.py --group aicn4 --domains /etc/frkn/geo/domains/ai-cn.txt --zone-name aicn4.zone
+Environment=GEO_DIR=/var/lib/frkn/geo
+# Up to ~20 hosts x 2 resolvers + a few dozen TLS probes; the cap only bounds
+# a network that hangs.
+TimeoutStartSec=300
+# Writes its own directory only; /etc stays readable (the domain list).
+ProtectSystem=strict
+ReadWritePaths=/var/lib/frkn/geo
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true

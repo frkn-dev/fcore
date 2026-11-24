@@ -2,6 +2,7 @@ use super::{resolve_serving_access, serving_access, ServingAccess};
 use crate::sync::MemSync;
 use base64::Engine;
 use fcore::{
+    Endpoint,
     http::helpers as http, Connection, ConnectionApiOperations, ConnectionBaseOperations,
     ConnectionStorageApiOperations, InboundConnLink, MetricStorage, NodeStatus,
     NodeStorageOperations, SubscriptionOperations, SubscriptionStorageOperations, Tag,
@@ -164,6 +165,13 @@ pub struct GatewayConnection {
     /// may share the same weight.
     #[serde(rename = "node_weights", skip_serializing_if = "Option::is_none")]
     pub node_weights: Option<BTreeMap<String, i32>>,
+    /// Entry points in the ONE `[[node.endpoints]]` shape: `ip` + port +
+    /// weight (+ label). The same addresses as `node_ips`/`node_ports`/
+    /// `node_weights`, flattened into one record each. All four stay on the
+    /// wire: an old client keeps reading the legacy triple, a new one reads
+    /// only this list.
+    #[serde(rename = "endpoints", skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<Endpoint>,
     #[serde(rename = "config_rev", skip_serializing_if = "Option::is_none")]
     pub config_rev: Option<String>,
 }
@@ -321,6 +329,12 @@ pub struct GatewayConfigResponse {
     /// не видит веса пула вообще: адреса он берёт именно отсюда.
     #[serde(rename = "node_weights", skip_serializing_if = "Option::is_none")]
     pub node_weights: Option<BTreeMap<String, i32>>,
+    /// Entry points in the ONE `[[node.endpoints]]` shape — the same addresses
+    /// as `node_ips`/`node_ports`/`node_weights`, one record each, ports
+    /// resolved (`inbound.port` when the node declares none) and weights
+    /// defaulted to 100. Additive: the legacy fields above stay untouched.
+    #[serde(rename = "endpoints", skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<Endpoint>,
     #[serde(rename = "config_rev", skip_serializing_if = "Option::is_none")]
     pub config_rev: Option<String>,
 }
@@ -447,7 +461,7 @@ pub(crate) fn config_rev(node: &fcore::Node, tag: Tag, ips: &[String]) -> Option
     } else {
         node.connection_host()
     };
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "host": host,
         "address": node.address,
         "port": inbound.port,
@@ -455,6 +469,23 @@ pub(crate) fn config_rev(node: &fcore::Node, tag: Tag, ips: &[String]) -> Option
         "dns": ["1.1.1.1", "1.0.0.1"],
         "server": server_material(inbound),
     });
+    // A per-address port from `[[node.endpoints]]` moves the client's dial
+    // target, so it must bump the version like the inbound port does. Only
+    // addresses that actually override the port are added: a node without
+    // overrides hashes exactly as before (no fleet-wide cache invalidation).
+    let port_overrides: BTreeMap<String, u16> = node
+        .endpoints_with_port(inbound.port)
+        .into_iter()
+        .filter_map(|endpoint| {
+            endpoint
+                .port
+                .filter(|port| *port != inbound.port)
+                .map(|port| (endpoint.ip.to_string(), port))
+        })
+        .collect();
+    if !port_overrides.is_empty() {
+        body["endpoint_ports"] = serde_json::json!(port_overrides);
+    }
     let mut hasher = Sha256::new();
     hasher.update(body.to_string().as_bytes());
     Some(format!("{:x}", hasher.finalize()))
@@ -562,13 +593,13 @@ fn entry_ips(node: &fcore::Node) -> Vec<String> {
 /// `node_ips` are addresses of one interface, so they share the port. An empty
 /// list means the single `address`.
 fn node_ports_of_node(node: &fcore::Node, port: u16) -> Vec<(String, u16)> {
-    let ips: Vec<String> = node
-        .node_ips
-        .as_ref()
-        .map(|ips| ips.iter().map(|ip| ip.to_string()).collect())
-        .filter(|ips: &Vec<String>| !ips.is_empty())
-        .unwrap_or_else(|| vec![node.address.to_string()]);
-    ips.into_iter().map(|ip| (ip, port)).collect()
+    // `port` is the fallback: an address may override it in
+    // `[[node.endpoints]]` (a hoster that only allows 8443 on one IP). A node
+    // without overrides produces exactly the old list.
+    node.endpoints_with_port(port)
+        .into_iter()
+        .map(|endpoint| (endpoint.ip.to_string(), endpoint.port.unwrap_or(port)))
+        .collect()
 }
 
 /// Every entry of the pool: one record per IP of each online node.
@@ -585,6 +616,19 @@ pub(crate) fn pooled_node_ports<N: NodeStorageOperations>(
     node_ports_of_members(&members, tag)
 }
 
+/// A premium box and a user's own machine keep their card while they are down.
+///
+/// The card is the only place the subscriber sees that the machine exists (and,
+/// for self-hosted, that it is *his*): hiding it on a dead heartbeat looks like
+/// the server vanished from the account. Core nodes stay hidden while offline —
+/// an entry pointing at a dead core node is just a failed connect.
+pub(crate) fn keeps_card_while_offline(node: &fcore::Node) -> bool {
+    matches!(
+        node.r#type,
+        fcore::NodeType::SelfHosted | fcore::NodeType::PremiumNode
+    )
+}
+
 /// Online members of the pool, in a stable order (by uuid).
 ///
 /// A separate function keeps `node_ips`, `node_ports` and `node_weights` over
@@ -595,11 +639,11 @@ fn pool_members<'a, N: NodeStorageOperations>(
     env: &fcore::Env,
     pool: &str,
 ) -> Vec<&'a fcore::Node> {
-    let mut members: Vec<&fcore::Node> = nodes
+    let mut members: Vec<&'a fcore::Node> = nodes
         .iter_nodes()
         .map(|(_, n)| n)
         .filter(|n| {
-            n.status.is_serving()
+            (n.status.is_serving() || keeps_card_while_offline(n))
                 && &n.env == env
                 && normalized_pool(n.pool.clone()).as_deref() == Some(pool)
         })
@@ -643,6 +687,37 @@ fn node_weights_of_ips(
                 .map(|node| node.weight_for(ip))
                 .unwrap_or(DEFAULT_NODE_WEIGHT);
             (ip.clone(), weight)
+        })
+        .collect()
+}
+
+/// The ONE endpoint shape built from the legacy triple the response carries.
+///
+/// `node_ips`/`node_ports`/`node_weights` stay on the wire for old clients;
+/// this list is the same address set as one record each, with the port
+/// resolved (`default_port` when the map has no entry) and the weight
+/// defaulted to [`DEFAULT_NODE_WEIGHT`].
+fn endpoints_from_maps(
+    ips: &[String],
+    ports: Option<&BTreeMap<String, u16>>,
+    weights: Option<&BTreeMap<String, i32>>,
+    default_port: u16,
+) -> Vec<Endpoint> {
+    ips.iter()
+        .map(|ip| Endpoint {
+            // Keys of `ips` are node addresses: always a valid IPv4.
+            ip: ip.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED),
+            port: Some(
+                ports
+                    .and_then(|ports| ports.get(ip))
+                    .copied()
+                    .unwrap_or(default_port),
+            ),
+            weight: weights
+                .and_then(|weights| weights.get(ip))
+                .copied()
+                .unwrap_or(DEFAULT_NODE_WEIGHT),
+            label: None,
         })
         .collect()
 }
@@ -727,6 +802,7 @@ where
                             connection_label: format!("{pool_title} · {}", inbound_label(tag)),
                             node_ips: None,
                             node_ports: None,
+                            endpoints: Vec::new(),
                             speedtest_url: node.bench_url.clone(),
                             pool: Some(pool.clone()),
                             pool_translation: node.pool_translation.clone(),
@@ -747,6 +823,15 @@ where
                     conn_labels.get(conn_id).map(String::as_str),
                 );
                 let label = format!("{title} · {}", inbound_label(tag));
+                // ONE endpoint shape next to the legacy triple: the port is
+                // the inbound's own unless the node overrides it per address.
+                let endpoint_port = node
+                    .inbounds
+                    .values()
+                    .find(|inbound| inbound.tag == tag)
+                    .map(|inbound| inbound.port)
+                    .unwrap_or(0);
+                let endpoints = node.endpoints_with_port(endpoint_port);
                 let ips: Vec<String> = node
                     .node_ips
                     .as_ref()
@@ -774,6 +859,7 @@ where
                     pool_translation: node.pool_translation.clone(),
                     weight: node.max_weight(),
                     node_weights: gateway_node_weights(node),
+                    endpoints,
                     config_rev: config_rev(node, tag, &ips),
                 });
             }
@@ -801,6 +887,18 @@ where
                 .copied()
                 .max()
                 .unwrap_or(DEFAULT_NODE_WEIGHT);
+            // Same address set as the port/weight maps, now as one record per
+            // entry point: a client needs none of the three legacy maps.
+            result[*idx].endpoints = ports
+                .iter()
+                .map(|(ip, port)| Endpoint {
+                    // Keys of `ports` are node addresses: always a valid IPv4.
+                    ip: ip.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED),
+                    port: Some(*port),
+                    weight: weights.get(ip).copied().unwrap_or(DEFAULT_NODE_WEIGHT),
+                    label: None,
+                })
+                .collect();
             result[*idx].node_weights = Some(weights);
             result[*idx].config_rev = Some(config_rev_pool(&members, *tag, &ports));
         }
@@ -816,6 +914,7 @@ where
             connection_label: "All countries".to_string(),
             node_ips: None,
             node_ports: None,
+            endpoints: Vec::new(),
             speedtest_url: None,
             pool: None,
             pool_translation: None,
@@ -1745,11 +1844,12 @@ where
         None => return Err(http::not_found("Subscription not found").into_response()),
     };
 
-    // An account that owns nodes keeps its own nodes after the paid term or
-    // the traffic balance ends: only shared configs stay gated, and that
-    // decision is made per connection below.
+    // An account that owns a private plane keeps its own nodes after the paid
+    // term or the traffic balance ends: only shared configs stay gated, and
+    // that decision is made per connection below. The own-node quota is not
+    // enough — every new account has one.
     let base_access = serving_access(sub, traffic_mode_enabled);
-    let owns_nodes = sub.can_own_nodes() || sub.can_resell();
+    let owns_nodes = sub.keeps_own_plane();
     let shared_expired = base_access == ServingAccess::Expired;
     let access = resolve_serving_access(
         &memory.db,
@@ -1882,17 +1982,26 @@ where
     } else {
         normalized_pool(node.pool.clone())
     };
-    let service_name = if let Some(pool) = &pool {
-        pool.clone()
-    } else {
-        connection_title(
+    let service_name = match &pool {
+        // A private shard's pool (`own`) is an internal group of the account,
+        // never a user-facing label: its card is titled by the node itself.
+        Some(_) if node.env.is_personal() => connection_title(
+            &node.label,
+            &node.hostname,
+            &node.address.to_string(),
+            &node.country,
+            true,
+            mem.conn_labels.get(&conn_id).map(String::as_str),
+        ),
+        Some(pool) => pool.clone(),
+        None => connection_title(
             &node.label,
             &node.hostname,
             &node.address.to_string(),
             &node.country,
             node.env.is_personal(),
             mem.conn_labels.get(&conn_id).map(String::as_str),
-        )
+        ),
     };
     let conn_tag_for_ports = conn.get_proto().proto();
     // `node_ips` и `node_ports` — из одной карты: адреса и их порты.
@@ -1916,6 +2025,36 @@ where
         // Одиночная нода: порт один и он уже в конфиге — карта не нужна.
         (ips, None, gateway_node_weights(&node))
     };
+    // ONE endpoint shape on top of the legacy triple, so a new client reads a
+    // single list and an old one keeps the three fields it always read. The
+    // port is the inbound's unless the node overrides it per address.
+    let default_port = node
+        .inbounds
+        .get(&conn_tag_for_ports)
+        .map(|inbound| inbound.port)
+        .unwrap_or(0);
+    let endpoints: Vec<Endpoint> = match &node_ips {
+        // Pool or multi-address row: same address set as the legacy triple.
+        Some(ips) => endpoints_from_maps(
+            ips,
+            node_ports.as_ref(),
+            node_weights.as_ref(),
+            default_port,
+        ),
+        // Single-address row: `endpoints_with_port` resolves both an explicit
+        // `[[node.endpoints]]` list and the legacy pair.
+        None => node.endpoints_with_port(default_port),
+    };
+    // A single-address node that declares its own port: publish it in the
+    // legacy map too, so a client on the old path dials the same port.
+    let node_ports = node_ports.or_else(|| {
+        let ports: BTreeMap<String, u16> = endpoints
+            .iter()
+            .filter_map(|endpoint| endpoint.port.map(|port| (endpoint.ip.to_string(), port)))
+            .filter(|(_, port)| *port != default_port)
+            .collect();
+        (!ports.is_empty()).then_some(ports)
+    });
     let config_rev = config_rev(
         &node,
         conn.get_proto().proto(),
@@ -2045,6 +2184,7 @@ where
         node_ips,
         node_ports,
         node_weights,
+        endpoints,
         config_rev,
     })
 }
@@ -2423,6 +2563,7 @@ mod tests {
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: None,
         };
         let v = serde_json::to_value(&base).unwrap();
@@ -2457,6 +2598,7 @@ mod tests {
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: None,
         };
         // Single-address node without a pool: both optional fields are omitted
@@ -2523,6 +2665,8 @@ mod tests {
             } else {
                 Some(ips.iter().map(|ip| ip.parse().unwrap()).collect())
             },
+            endpoints: Vec::new(),
+            endpoints_legacy: false,
             pool: Some("Russia".into()),
             pool_translation: None,
             pool_country_code: None,
@@ -2585,6 +2729,7 @@ mod tests {
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
         };
         let json = serde_json::to_string_pretty(&card).unwrap();
@@ -2703,6 +2848,7 @@ mod tests {
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: Some(config_rev_pool(&members, Tag::Wireguard, &ports)),
         };
 
@@ -2722,6 +2868,7 @@ mod tests {
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: None,
         };
 
@@ -2822,6 +2969,36 @@ mod tests {
         assert_eq!(ips.len(), 3);
     }
 
+    /// A per-address port from `[[node.endpoints]]` reaches the pool maps:
+    /// `node_ports` describes the address the client actually dials, while a
+    /// node without overrides keeps the inbound port for every address.
+    #[test]
+    fn endpoint_port_overrides_the_inbound_port_in_the_pool_maps() {
+        let base = node_with_ips(1, "93.89.220.48", &["93.89.220.48", "93.89.220.49"], 443);
+        let plain = node_ports_of_members(&[&base], Tag::Wireguard);
+        assert_eq!(plain.get("93.89.220.48"), Some(&443));
+        assert_eq!(plain.get("93.89.220.49"), Some(&443));
+
+        let mut overridden = base.clone();
+        overridden.endpoints = vec![
+            fcore::Endpoint {
+                ip: "93.89.220.48".parse().unwrap(),
+                port: None,
+                weight: 100,
+                label: None,
+            },
+            fcore::Endpoint {
+                ip: "93.89.220.49".parse().unwrap(),
+                port: Some(8443),
+                weight: 100,
+                label: None,
+            },
+        ];
+        let ports = node_ports_of_members(&[&overridden], Tag::Wireguard);
+        assert_eq!(ports.get("93.89.220.48"), Some(&443), "no override -> inbound port");
+        assert_eq!(ports.get("93.89.220.49"), Some(&8443), "declared port wins");
+    }
+
     /// Нода без инбаунда этого протокола не попадает ни в карту, ни в node_ips:
     /// адрес, на котором никто не слушает, клиенту бесполезен.
     #[test]
@@ -2863,6 +3040,43 @@ mod tests {
         );
     }
 
+    /// A per-address port from `[[node.endpoints]]` changes the client's dial
+    /// target, so it must bump the config version — while an endpoint list that
+    /// only repeats the inbound port must hash exactly as before (no fleet-wide
+    /// cache invalidation when a node migrates its config).
+    #[test]
+    fn config_rev_tracks_endpoint_port_overrides() {
+        let base = node_with_ips(1, "93.89.220.48", &["93.89.220.48"], 443);
+        let ips = vec!["93.89.220.48".to_string()];
+        let without = config_rev(&base, Tag::Wireguard, &ips).expect("rev");
+
+        let mut same_port = base.clone();
+        same_port.endpoints = vec![fcore::Endpoint {
+            ip: "93.89.220.48".parse().unwrap(),
+            port: Some(443),
+            weight: 100,
+            label: None,
+        }];
+        assert_eq!(
+            config_rev(&same_port, Tag::Wireguard, &ips).expect("rev"),
+            without,
+            "an endpoint that repeats the inbound port must not change the rev"
+        );
+
+        let mut overridden = base.clone();
+        overridden.endpoints = vec![fcore::Endpoint {
+            ip: "93.89.220.48".parse().unwrap(),
+            port: Some(8443),
+            weight: 100,
+            label: None,
+        }];
+        assert_ne!(
+            config_rev(&overridden, Tag::Wireguard, &ips).expect("rev"),
+            without,
+            "a declared port must bump the rev, or clients keep the old address"
+        );
+    }
+
     /// Формат, который читает клиент: `node_ports` — объект «адрес → порт»
     /// (`servers_model.cpp::portForNodeIp`).
     #[test]
@@ -2885,6 +3099,7 @@ mod tests {
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: Some("abc".into()),
         };
         let v = serde_json::to_value(&conn).unwrap();
@@ -2899,6 +3114,80 @@ mod tests {
         );
         // и не видит ключа, которого не знает
         assert!(v.get("endpoints").is_none(), "лишних полей быть не должно");
+    }
+
+    /// The ONE endpoint shape next to the legacy triple: a new client reads
+    /// `endpoints[]` (ip/port/weight), an old one keeps node_ips/node_ports/
+    /// node_weights. Nothing is removed in this change.
+    #[test]
+    fn endpoints_serialize_next_to_the_legacy_triple() {
+        let conn = GatewayConnection {
+            connection_uuid: uuid::Uuid::nil(),
+            node_id: uuid::Uuid::nil(),
+            country_code: "NL".into(),
+            country_name: "NL".into(),
+            service_protocol: "awg".into(),
+            env: "0001".parse().expect("env"),
+            connection_label: "Netherlands · AmneziaWG".into(),
+            node_ips: Some(vec!["82.148.231.161".into(), "82.148.231.162".into()]),
+            node_ports: Some(BTreeMap::from([
+                ("82.148.231.161".to_string(), 443u16),
+                ("82.148.231.162".to_string(), 8443u16),
+            ])),
+            endpoints: vec![
+                Endpoint {
+                    ip: "82.148.231.161".parse().unwrap(),
+                    port: Some(443),
+                    weight: 200,
+                    label: Some("nl-01".into()),
+                },
+                Endpoint {
+                    ip: "82.148.231.162".parse().unwrap(),
+                    port: Some(8443),
+                    weight: 100,
+                    label: None,
+                },
+            ],
+            speedtest_url: None,
+            pool: None,
+            pool_translation: None,
+            weight: 200,
+            node_weights: None,
+            config_rev: None,
+        };
+        let v = serde_json::to_value(&conn).unwrap();
+        assert_eq!(v["endpoints"][0]["ip"], "82.148.231.161");
+        assert_eq!(v["endpoints"][0]["port"], 443);
+        assert_eq!(v["endpoints"][0]["weight"], 200);
+        assert_eq!(v["endpoints"][0]["label"], "nl-01");
+        assert_eq!(v["endpoints"][1]["port"], 8443);
+        // The legacy fields are untouched — bit-for-bit what old clients read.
+        assert_eq!(
+            v["node_ips"],
+            serde_json::json!(["82.148.231.161", "82.148.231.162"])
+        );
+        assert_eq!(v["node_ports"]["82.148.231.162"], 8443);
+    }
+
+    /// A per-address port declared in `[[node.endpoints]]` reaches the client
+    /// payload: `endpoints_from_maps` resolves it and the inbound port stays
+    /// the fallback for every address that declares none.
+    #[test]
+    fn endpoint_port_reaches_the_client_payload() {
+        let ips = vec!["82.148.231.161".to_string(), "82.148.231.162".to_string()];
+        let ports = BTreeMap::from([("82.148.231.161".to_string(), 8443u16)]);
+        let weights = BTreeMap::from([("82.148.231.161".to_string(), 200i32)]);
+        let endpoints = endpoints_from_maps(&ips, Some(&ports), Some(&weights), 443);
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].port, Some(8443), "declared port wins");
+        assert_eq!(endpoints[0].weight, 200);
+        // No port for this address -> the inbound port, never None.
+        assert_eq!(endpoints[1].port, Some(443));
+        assert_eq!(endpoints[1].weight, DEFAULT_NODE_WEIGHT);
+        // Serialized form: the client sees ip + port on every record.
+        let json = serde_json::to_value(&endpoints).unwrap();
+        assert_eq!(json[0]["port"], 8443);
+        assert_eq!(json[1]["port"], 443);
     }
 
     /// Одиночная нода: порт один и он уже в конфиге, карта была бы дублированием.
@@ -2919,6 +3208,7 @@ mod tests {
             pool_translation: None,
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: None,
         };
         let v = serde_json::to_value(&conn).unwrap();
@@ -2975,6 +3265,8 @@ mod tests {
             r#type: fcore::NodeType::Node,
             cluster: None,
             node_ips: None,
+            endpoints: Vec::new(),
+            endpoints_legacy: false,
             pool: None,
             pool_translation: None,
             pool_country_code: None,
@@ -3036,6 +3328,7 @@ mod tests {
             ),
             weight: DEFAULT_NODE_WEIGHT,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: None,
         };
         let v = serde_json::to_value(&base).unwrap();
@@ -3067,6 +3360,7 @@ mod tests {
             node_ports: Some(BTreeMap::from([("78.17.28.66".to_string(), 443u16)])),
             speedtest_url: None,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: Some("abc".to_string()),
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -3097,6 +3391,7 @@ mod tests {
             node_ports: None,
             speedtest_url: None,
             node_weights: None,
+            endpoints: Vec::new(),
             config_rev: None,
         };
         let v = serde_json::to_value(&owner).unwrap();
@@ -3249,6 +3544,8 @@ mod tests {
                 r#type: NodeType::Node,
                 cluster: None,
                 node_ips: Some(ips),
+                endpoints: Vec::new(),
+                endpoints_legacy: false,
                 pool: pool.map(|s| s.to_string()),
                 pool_translation: None,
                 pool_country_code: None,

@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly refresh of the FRKN EU pool AI IPv4 nft set
+
+[Timer]
+# The resolver on the api host publishes hourly and the list only changes when
+# a CDN rotates an IP. Polling hourly costs one conditional GET (a 304, no
+# body) when nothing changed; the jitter keeps both nodes off the same second.
+OnCalendar=hourly
+RandomizedDelaySec=7m
+Persistent=true
+Unit=frkn-geo-ai4.service
+
+[Install]
+WantedBy=timers.target

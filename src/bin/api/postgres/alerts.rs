@@ -193,6 +193,39 @@ impl PgAlerts {
             .collect())
     }
 
+    /// Последнее exit-событие по паре (группа, нода). Нужно, чтобы рестарт
+    /// api посреди аварии не начал дедупликацию с нуля и не написал то же
+    /// письмо второй раз.
+    pub async fn latest_exit(
+        &self,
+        group: &str,
+        node: &str,
+    ) -> Result<Option<(String, DateTime<Utc>)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let row = client
+            .query_opt(
+                r#"
+                SELECT rule, created_at FROM alert_events
+                WHERE rule IN ('exit_dead', 'exit_degraded', 'exit_recovered')
+                  AND details->>'group' = $1
+                  AND hostname = $2
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+                &[&group, &node],
+            )
+            .await?;
+
+        Ok(row.map(|r| {
+            (
+                r.get::<_, String>("rule"),
+                r.get::<_, DateTime<Utc>>("created_at"),
+            )
+        }))
+    }
+
     /// Последние срабатывания — для отладки и будущей админки.
     pub async fn recent(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
         let mut manager = self.manager.lock().await;

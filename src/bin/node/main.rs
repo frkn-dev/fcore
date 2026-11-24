@@ -3,6 +3,7 @@ mod http;
 mod metrics;
 mod metrics_http;
 mod node;
+mod peer_plane;
 mod snapshot;
 mod snapshot_sync;
 #[cfg(feature = "xray")]
@@ -22,6 +23,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let reset_snapshot = args.iter().any(|a| a == "--reset-snapshot");
+    // Ignore the local snapshot for this start and rebuild the peer set from
+    // the api (the authoritative `peers-init`). Same idea as SIGHUP.
+    let peers_resync = args.iter().any(|a| a == "--peers-resync");
     let config_path = args
         .iter()
         .find(|a| !a.starts_with("--"))
@@ -78,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .unwrap();
 
-    runtime.block_on(node::run(settings))?;
+    runtime.block_on(node::run(settings, peers_resync))?;
 
     Ok(())
 }

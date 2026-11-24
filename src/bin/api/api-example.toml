@@ -17,11 +17,6 @@ base_url = "https://frkn.org"
 # Public base URL of this api instance — used for machine-facing links
 # (share feed /sub/<token>). Defaults to base_url when unset.
 api_url = "https://api.frkn.org"
-# Public geo lists for the OpenWrt router image: /router/geo/ru.zone and
-# /router/geo/ru.zone.sha256 are served from this directory. The daily
-# frkn-geo-update timer (deploy/geo/) writes ru.zone here atomically.
-# Default: /var/lib/frkn/geo. See docs/router-geo.md.
-# geo_dir = "/var/lib/frkn/geo"
 admin_enabled = true
 admin_token = "change-me-in-production"
 agw_private_key_path = "/etc/fcore/api/agw_private.pem"
@@ -68,6 +63,15 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # enters the roster and fnode exits instead of retrying. With false the node
 # registers as `degraded` and only a warning is logged (deliberate rollouts).
 # pool_strict_inbounds = true
+
+# Own nodes. Hosting one node is a capability of any account, not a plan:
+# every NEW top-level subscription is created with `own_nodes_limit` equal to
+# this value, and that quota is the only gate of POST /private/install-token
+# (a user of an own-node account is still refused). Existing rows are never
+# backfilled — set the column per account to change one. 0 disables the
+# default for newly created accounts.
+# [service.private]
+# default_own_nodes_limit = 3
 
 # Peers: the client owns the key pair, the api hands out the address.
 # `subnets` is the address space of one shard (env); overlapping blocks are
@@ -165,6 +169,11 @@ traffic_persist_interval_sec = 3600
 # Peers: how often installations with no live tunnel get reaped (default 3600).
 # The threshold itself is `[service.peers] stale_device_days`.
 # stale_device_interval_sec = 3600
+# Peers: revoke live tunnels whose traffic was not booked for this many days
+# (default 30; 0 switches the age rule off, the subscription/grant checks still
+# run), and how often that sweep runs (default 3600).
+# peer_idle_days = 30
+# peer_reap_interval_sec = 3600
 connection_expire_interval = 600
 monitor_nodes_interval = 60
 heartbeat_node_offline_threshold_sec = 120
@@ -200,6 +209,11 @@ telegram_enabled = true
 # A owner who bound a chat (see subscription_alert_chats) still gets their
 # own node alerts: quiet only silences the global channel.
 quiet_env_prefixes = ["personal", "custompersonal"]
+
+# Reminder for a group of exits that is still broken (GET/POST exit health from
+# the node watchdogs, `POST /v1/admin/alerts/exit`). A transition is mailed at
+# once; the same state repeated by the 10 s watchdog tick at most this often.
+# exit_reminder_sec = 1800
 
 # Email delivery. Independent of Telegram: both fire when both are set.
 # [alerts.email]

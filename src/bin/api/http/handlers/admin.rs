@@ -1,9 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::error;
 use warp::http::StatusCode;
+use warp::Reply;
 
 use fcore::{
     Connection, ConnectionApiOperations, ConnectionBaseOperations, Env, MetricStorage, Node,
@@ -1044,6 +1046,235 @@ where
     Ok(Box::new(warp::reply::json(
         &serde_json::json!({"id": subscription_id, "deleted": true}),
     )))
+}
+
+/// `POST /v1/admin/peers/revoke` { env, pool?, reason? } — retire every live
+/// peer of an env (optionally one pool).
+///
+/// Needed when the address plan changes (a shard split into per-pool /20s):
+/// old peers sit outside the new blocks and must be recreated on the client's
+/// next connect. Revoking through the api keeps memory, the nodes and the
+/// `peers` table in agreement — a SQL update only touches the table.
+#[derive(Debug, serde::Deserialize)]
+pub struct PeersRevokeRequest {
+    pub env: String,
+    pub pool: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub async fn post_admin_peers_revoke_handler<N, C, S>(
+    req: PeersRevokeRequest,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let env = Env::from_str(&req.env).unwrap_or_else(|_| Env::Custom(req.env.clone()));
+    let reason = req.reason.unwrap_or_else(|| "admin_revoke".to_string());
+
+    let doomed: Vec<crate::postgres::peers::PeerRow> = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .peers
+            .live()
+            .into_iter()
+            .filter(|peer| peer.env == env)
+            .filter(|peer| match &req.pool {
+                Some(pool) => peer.pool.as_deref() == Some(pool.as_str()),
+                None => true,
+            })
+            .collect()
+    };
+
+    let db = memory.db.peers();
+    let mut revoked = 0usize;
+    for peer in &doomed {
+        if db.revoke_peer(peer.id, &reason).await.unwrap_or(false) {
+            memory
+                .memory
+                .write()
+                .await
+                .peers_state
+                .peers
+                .remove_live(peer.id);
+            crate::http::handlers::peers::publish_peer(&memory, fcore::Action::Delete, peer).await;
+            revoked += 1;
+        }
+    }
+
+    Ok(Box::new(warp::reply::json(&serde_json::json!({
+        "status": 200,
+        "message": "peers revoked",
+        "response": { "env": req.env, "pool": req.pool, "revoked": revoked, "reason": reason }
+    }))) as Box<dyn warp::Reply + Send>)
+}
+
+/// `POST /v1/admin/networks` { env, pool?, subnet } — declare an address block.
+///
+/// The shard/pool split is configuration, not code: an operator adds or moves a
+/// pool's /20 here and the allocator picks it up without a deploy.
+#[derive(Debug, serde::Deserialize)]
+pub struct NetworkUpsertRequest {
+    pub env: String,
+    pub pool: Option<String>,
+    pub subnet: String,
+}
+
+pub async fn post_admin_network_handler<N, C, S>(
+    req: NetworkUpsertRequest,
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let env = Env::from_str(&req.env).unwrap_or_else(|_| Env::Custom(req.env.clone()));
+    let Ok(block) = fcore::IpAddrMask::from_str(&req.subnet) else {
+        return Ok(Box::new(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "status": 400,
+                "message": "subnet must be a CIDR like 10.88.16.0/20"
+            })),
+            StatusCode::BAD_REQUEST,
+        )) as Box<dyn warp::Reply + Send>);
+    };
+    let pool = req.pool.clone().filter(|p| !p.is_empty());
+
+    match memory
+        .db
+        .peers()
+        .upsert_network(&env, pool.as_deref(), &block)
+        .await
+    {
+        Ok(crate::postgres::peers::Inserted::Done)
+        | Ok(crate::postgres::peers::Inserted::Conflict) => {}
+        Err(e) => {
+            return Ok(Box::new(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({
+                    "status": 500,
+                    "message": format!("network upsert failed: {e}")
+                })),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )) as Box<dyn warp::Reply + Send>);
+        }
+    }
+
+    {
+        let mut mem = memory.memory.write().await;
+        match pool {
+            Some(pool) => mem
+                .peers_state
+                .pool_networks
+                .entry((env.clone(), pool))
+                .or_default()
+                .push(block.to_string()),
+            None => mem
+                .peers_state
+                .env_networks
+                .entry(env.clone())
+                .or_default()
+                .push(block.to_string()),
+        }
+    }
+
+    Ok(Box::new(warp::reply::json(&serde_json::json!({
+        "status": 200,
+        "message": "network stored",
+        "response": { "env": req.env, "pool": req.pool, "subnet": block.to_string() }
+    }))) as Box<dyn warp::Reply + Send>)
+}
+
+/// `GET /v1/admin/networks` — what the allocator will use, per shard and pool.
+pub async fn get_admin_networks_handler<N, C, S>(
+    memory: MemSync<N, C, S>,
+    admin_enabled: bool,
+    admin_token: String,
+    auth_header: Option<String>,
+) -> Result<Box<dyn warp::Reply + Send>, warp::Rejection>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    Connection: From<C>,
+    S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
+{
+    if !admin_enabled {
+        return Ok(not_found());
+    }
+    if !check_token(auth_header, &admin_token) {
+        return Ok(unauthorized());
+    }
+
+    let (env_blocks, pool_blocks) = {
+        let mem = memory.memory.read().await;
+        (
+            mem.peers_state.env_networks.clone(),
+            mem.peers_state.pool_networks.clone(),
+        )
+    };
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for (env, blocks) in env_blocks {
+        for block in blocks {
+            rows.push(serde_json::json!({ "env": env.to_string(), "pool": null, "subnet": block }));
+        }
+    }
+    for ((env, pool), blocks) in pool_blocks {
+        for block in blocks {
+            rows.push(serde_json::json!({ "env": env.to_string(), "pool": pool, "subnet": block }));
+        }
+    }
+
+    Ok(Box::new(warp::reply::json(&serde_json::json!({
+        "status": 200,
+        "message": "ok",
+        "response": rows
+    }))) as Box<dyn warp::Reply + Send>)
 }
 
 pub async fn admin_api_delete_connection_handler<N, C, S>(

@@ -1,0 +1,23 @@
+[Unit]
+Description=FRKN geo lists: resolve + TLS-verify the adult-platform IPv4 zone (api.frkn.org /router/geo/adult4.zone)
+Documentation=https://github.com/frkn-dev/fcore/blob/main/docs/router-geo.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Same resolver as the `ai` / `ai-cn` / `exch` groups, different inputs. This
+# zone is a DIRECT WHITELIST on the nodes (`ip daddr @adult4 return` above every
+# group mark), because adult sites must always leave from the NL entry node and
+# never from the RU, US or KZ exit.
+ExecStart=/usr/local/lib/frkn/geo/update-ai4-zone.py --group adult4 --domains /etc/frkn/geo/domains/adult.txt --zone-name adult4.zone
+Environment=GEO_DIR=/var/lib/frkn/geo
+# ~36 hosts x 2 resolvers + a couple hundred TLS probes; the cap only bounds a
+# network that hangs.
+TimeoutStartSec=300
+# Writes its own directory only; /etc stays readable (the domain list).
+ProtectSystem=strict
+ReadWritePaths=/var/lib/frkn/geo
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true

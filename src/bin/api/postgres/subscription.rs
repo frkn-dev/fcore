@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -58,6 +58,32 @@ impl PgSubscription {
         Ok(row.map(Subscription::from))
     }
 
+    /// Migration marker of a subscription (`0030`): `(plane, v2_since)`.
+    ///
+    /// Read on its own instead of on the memory model: the marker is written
+    /// by the peer insert (`PgPeers::insert_peer`), so a cached `Subscription`
+    /// would keep answering `v1` after the first peer until the next reload.
+    /// `None` when the row does not exist.
+    pub async fn plane(&self, id: &uuid::Uuid) -> Result<Option<(String, Option<DateTime<Utc>>)>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let row = match client
+            .query_opt("SELECT plane, v2_since FROM subscriptions WHERE id = $1", &[id])
+            .await
+        {
+            Ok(row) => row,
+            // An older schema without 0030 has no marker to read: the caller
+            // falls back to v1 instead of failing or logging on every request.
+            Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::UNDEFINED_COLUMN) => {
+                return Ok(None)
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        Ok(row.map(|row| (row.get("plane"), row.get("v2_since"))))
+    }
+
     /// One `INSERT INTO subscriptions` for a freshly built row, shared by
     /// `create` and the limit-aware child insert so both always write the
     /// same set of columns. Generic over the client so it works both on a
@@ -71,12 +97,16 @@ impl PgSubscription {
         let product = new_sub.product.to_string();
         let server_limit = new_sub.server_limit as i32;
         let user_limit = new_sub.user_limit as i32;
+        // The column is `integer`; an i64 here fails at serialization
+        // ("error serializing parameter 12") and kills every insert.
+        let own_nodes_limit = new_sub.own_nodes_limit as i32;
         let row = client
             .query_one(
                 r#"
             INSERT INTO subscriptions
-            (id, expires_at, refer_code, parent_id, scope_env, premium_token, plan_kind, limit_bytes, server_limit, user_limit, product)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            (id, expires_at, refer_code, parent_id, scope_env, premium_token, plan_kind, limit_bytes,
+             server_limit, user_limit, product, shared_access, own_nodes_limit, resell_enabled)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *
             "#,
                 &[
@@ -91,6 +121,12 @@ impl PgSubscription {
                     &server_limit,
                     &user_limit,
                     &product,
+                    // Written explicitly: the columns default to shared_access=true,
+                    // so a child or a selfhosted account created after migration 0019
+                    // was born with access to the shared subscriptions.
+                    &new_sub.shared_access,
+                    &own_nodes_limit,
+                    &new_sub.resell_enabled,
                 ],
             )
             .await?;

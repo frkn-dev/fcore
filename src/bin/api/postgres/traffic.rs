@@ -71,11 +71,18 @@ impl PgTraffic {
             .query_one(
                 r#"
                 SELECT
-                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
-                FROM connection_traffic
-                WHERE subscription_id = $1 AND period = 'day'
-                  AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
+                    COALESCE(SUM(uplink)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink)::BIGINT, 0) AS downlink
+                FROM (
+                    SELECT uplink_bytes AS uplink, downlink_bytes AS downlink
+                    FROM connection_traffic
+                    WHERE subscription_id = $1 AND period = 'day'
+                      AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
+                    UNION ALL
+                    SELECT uplink_bytes, downlink_bytes
+                    FROM peer_traffic
+                    WHERE subscription_id = $1 AND period = 'day'
+                ) both_planes
                 "#,
                 &[&subscription_id],
             )
@@ -133,11 +140,18 @@ impl PgTraffic {
                 r#"
                 SELECT
                     env,
-                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
-                FROM connection_traffic
-                WHERE subscription_id = $1 AND period = 'day'
-                  AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
+                    COALESCE(SUM(uplink)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink)::BIGINT, 0) AS downlink
+                FROM (
+                    SELECT env, uplink_bytes AS uplink, downlink_bytes AS downlink
+                    FROM connection_traffic
+                    WHERE subscription_id = $1 AND period = 'day'
+                      AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
+                    UNION ALL
+                    SELECT env, uplink_bytes, downlink_bytes
+                    FROM peer_traffic
+                    WHERE subscription_id = $1 AND period = 'day'
+                ) both_planes
                 GROUP BY env
                 "#,
                 &[&subscription_id],
@@ -169,12 +183,18 @@ impl PgTraffic {
                 SELECT
                     bucket,
                     env,
-                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
-                FROM connection_traffic
-                WHERE subscription_id = $1
-                  AND period = $2
-                  AND ($3::timestamptz IS NULL OR bucket >= $3)
+                    COALESCE(SUM(uplink)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink)::BIGINT, 0) AS downlink
+                FROM (
+                    SELECT bucket, env, uplink_bytes AS uplink, downlink_bytes AS downlink
+                    FROM connection_traffic
+                    WHERE subscription_id = $1 AND period = $2
+                    UNION ALL
+                    SELECT bucket, env, uplink_bytes, downlink_bytes
+                    FROM peer_traffic
+                    WHERE subscription_id = $1 AND period = $2
+                ) both_planes
+                WHERE ($3::timestamptz IS NULL OR bucket >= $3)
                   AND ($4::timestamptz IS NULL OR bucket <= $4)
                 GROUP BY bucket, env
                 ORDER BY bucket, env
@@ -212,11 +232,18 @@ impl PgTraffic {
                 r#"
                 SELECT
                     env,
-                    COALESCE(SUM(uplink_bytes)::BIGINT, 0) AS uplink,
-                    COALESCE(SUM(downlink_bytes)::BIGINT, 0) AS downlink
-                FROM connection_traffic
-                WHERE subscription_id = $1 AND period = $2 AND bucket = $3
-                  AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
+                    COALESCE(SUM(uplink)::BIGINT, 0) AS uplink,
+                    COALESCE(SUM(downlink)::BIGINT, 0) AS downlink
+                FROM (
+                    SELECT env, uplink_bytes AS uplink, downlink_bytes AS downlink
+                    FROM connection_traffic
+                    WHERE subscription_id = $1 AND period = $2 AND bucket = $3
+                      AND connection_id IN (SELECT id FROM connections WHERE NOT is_deleted)
+                    UNION ALL
+                    SELECT env, uplink_bytes, downlink_bytes
+                    FROM peer_traffic
+                    WHERE subscription_id = $1 AND period = $2 AND bucket = $3
+                ) both_planes
                 GROUP BY env
                 "#,
                 &[&subscription_id, &period, &bucket],

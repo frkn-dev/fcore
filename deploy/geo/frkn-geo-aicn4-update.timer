@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly refresh of the FRKN Chinese-AI IPv4 zone (direct whitelist: verified IPs of deepseek/qwen/kimi/glm/minimax/volces/doubao)
+
+[Timer]
+# Same cadence as the `ai` zone: an hour-old answer is still good, and the
+# jitter keeps the two resolvers from running at the same second.
+OnCalendar=hourly
+RandomizedDelaySec=5m
+# A host that was down at the top of the hour catches up on the next boot.
+Persistent=true
+Unit=frkn-geo-aicn4-update.service
+
+[Install]
+WantedBy=timers.target

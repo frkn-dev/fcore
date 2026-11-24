@@ -27,8 +27,11 @@ pub struct PeerStore {
     by_id: HashMap<Uuid, PeerRow>,
     /// env → address → peer. One lookup answers "is this address free".
     by_env_addr: HashMap<Env, HashMap<Ipv4Addr, Uuid>>,
-    /// (env, public key) → peer: idempotent creates and key collisions.
-    by_env_key: HashMap<(Env, String), Uuid>,
+    /// (env, pool, public key) → peer: idempotent creates and key collisions.
+    /// The pool is part of the identity: one key may hold a tunnel in every
+    /// pool of a shard (`POST /v1/peers/prepare`), while the same key twice in
+    /// one pool is still a retry of the same tunnel.
+    by_env_key: HashMap<(Env, Option<String>, String), Uuid>,
     by_sub: HashMap<Uuid, HashSet<Uuid>>,
     by_device: HashMap<Uuid, HashSet<Uuid>>,
 }
@@ -58,8 +61,10 @@ impl PeerStore {
                 .or_default()
                 .insert(address, row.id);
         }
-        self.by_env_key
-            .insert((row.env.clone(), row.public_key.clone()), row.id);
+        self.by_env_key.insert(
+            (row.env.clone(), row.pool.clone(), row.public_key.clone()),
+            row.id,
+        );
         self.by_sub
             .entry(row.subscription_id)
             .or_default()
@@ -90,7 +95,7 @@ impl PeerStore {
             }
         }
         self.by_env_key
-            .remove(&(row.env.clone(), row.public_key.clone()));
+            .remove(&(row.env.clone(), row.pool.clone(), row.public_key.clone()));
         if let Some(set) = self.by_sub.get_mut(&row.subscription_id) {
             set.remove(&id);
         }
@@ -100,6 +105,12 @@ impl PeerStore {
         Some(row)
     }
 
+    /// Every live peer, cloned. Used by admin maintenance ("retire the whole
+    /// shard") where iterating the indexes would borrow the store mutably.
+    pub fn live(&self) -> Vec<PeerRow> {
+        self.by_id.values().cloned().collect()
+    }
+
     pub fn used_in(&self, env: &Env) -> HashSet<Ipv4Addr> {
         self.by_env_addr
             .get(env)
@@ -107,14 +118,53 @@ impl PeerStore {
             .unwrap_or_default()
     }
 
+    /// Live tunnel of `(env, pool, public key)`.
+    ///
+    /// This is the idempotency lookup of every create, so `pool` is part of the
+    /// key: a device holds one tunnel per pool, and returning the tunnel of
+    /// another pool would name a config the caller did not ask for. `None` is
+    /// the manual form (`env` + `proto`) — it prefers an unpooled row and falls
+    /// back to any pool of the env, which is how it behaved before pools
+    /// became part of the identity.
+    pub fn live_by_key_in(
+        &self,
+        env: &Env,
+        pool: Option<&str>,
+        public_key: &str,
+    ) -> Option<&PeerRow> {
+        if let Some(pool) = pool {
+            return self
+                .by_env_key
+                .get(&(env.clone(), Some(pool.to_string()), public_key.to_string()))
+                .and_then(|id| self.by_id.get(id));
+        }
+        self.live_by_key(env, public_key)
+    }
+
+    /// Any live tunnel with this key in the env: the unpooled row when there is
+    /// one, otherwise any pool (the manual form's historical reading).
     pub fn live_by_key(&self, env: &Env, public_key: &str) -> Option<&PeerRow> {
         self.by_env_key
-            .get(&(env.clone(), public_key.to_string()))
+            .get(&(env.clone(), None, public_key.to_string()))
+            .or_else(|| {
+                self.by_env_key
+                    .iter()
+                    .find(|((row_env, _pool, key), _)| row_env == env && key == public_key)
+                    .map(|(_, id)| id)
+            })
             .and_then(|id| self.by_id.get(id))
     }
 
     pub fn get(&self, id: &Uuid) -> Option<&PeerRow> {
         self.by_id.get(id)
+    }
+
+    /// Ids of the live tunnels opened by one device row.
+    pub fn ids_of_device(&self, device_id: &Uuid) -> Vec<Uuid> {
+        self.by_device
+            .get(device_id)
+            .map(|ids| ids.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// `(tunnels of the device, tunnels of the subscription)`.
@@ -331,6 +381,9 @@ pub struct PeersState {
     pub access: AccessStore,
     /// env → subnet blocks, as stored in `env_networks` ("10.88.0.0/24").
     pub env_networks: HashMap<Env, Vec<String>>,
+    /// env + pool → subnet blocks (`env_networks.pool` not null). Allocation
+    /// prefers these over the env-wide block: an address then names its pool.
+    pub pool_networks: HashMap<(Env, String), Vec<String>>,
     /// env → what the api declared about this shard.
     pub env_capacity: HashMap<Env, ShardCapacity>,
     /// Per-subscription overrides of `subscription_limits`:
@@ -368,6 +421,43 @@ impl PeersState {
     /// the table is seeded from the config, so a bad row is a config bug the
     /// startup log already names.
     pub fn block_masks(&self, env: &Env) -> Vec<fcore::IpAddrMask> {
+        // The shard's own blocks plus every pool block of it: callers ask "is
+        // this env served at all" (registration, capacity budget) and must see
+        // the pool ranges too — after the /20 split the env-wide row is gone.
+        let mut masks: Vec<fcore::IpAddrMask> = self
+            .blocks_for(env)
+            .into_iter()
+            .filter_map(|block| block.parse().ok())
+            .collect();
+        let mut pool_masks: Vec<fcore::IpAddrMask> = Vec::new();
+        for ((block_env, _pool), blocks) in &self.pool_networks {
+            if block_env == env {
+                pool_masks.extend(blocks.iter().filter_map(|block| block.parse().ok()));
+            }
+        }
+        // Deterministic order: this list is also a fallback allocation pool, and
+        // HashMap iteration order would hand out addresses from a random block.
+        pool_masks.sort_by_key(|mask| mask.to_string());
+        masks.extend(pool_masks);
+        masks
+    }
+
+    /// Blocks the allocator uses for a peer of `(env, pool)`.
+    ///
+    /// A pool with its own block gets exactly that block; otherwise the env-wide
+    /// blocks stay in play (every shard that has not been split yet). Addresses
+    /// already issued from the env block remain valid — this only decides where
+    /// NEW addresses come from.
+    pub fn block_masks_for(&self, env: &Env, pool: Option<&str>) -> Vec<fcore::IpAddrMask> {
+        if let Some(pool) = pool {
+            if let Some(blocks) = self.pool_networks.get(&(env.clone(), pool.to_string())) {
+                if !blocks.is_empty() {
+                    return blocks.iter().filter_map(|block| block.parse().ok()).collect();
+                }
+            }
+        }
+        // Fallback is the shard-wide row only: a pool without its own block must
+        // not start drawing addresses out of ANOTHER pool's /20.
         self.blocks_for(env)
             .into_iter()
             .filter_map(|block| block.parse().ok())
@@ -401,6 +491,28 @@ impl PeersState {
             .iter()
             .map(|id| self.peers.count_of_device(id) as i64)
             .sum()
+    }
+
+    /// Live tunnels of the physical device inside **one pool of one env**.
+    ///
+    /// This is the cap the client actually hits: three tunnels per pool, so a
+    /// router can keep two channels up in the same pool for failover. Counting
+    /// them across every pool (as `peers_of_device_key` does) made the third
+    /// pool's tunnel refuse with `peers_limit` even though each pool had a free
+    /// slot. Rows written before `peers.pool` existed have no pool: they are
+    /// counted for any pool of their env, which is the stricter reading.
+    pub fn peers_of_device_key_in(&self, device_key: &str, env: &Env, pool: &str) -> i64 {
+        self.devices
+            .ids_by_public_key(device_key)
+            .iter()
+            .flat_map(|id| self.peers.ids_of_device(id))
+            .filter_map(|peer_id| self.peers.get(&peer_id))
+            .filter(|row| &row.env == env)
+            .filter(|row| match row.pool.as_deref() {
+                Some(row_pool) => row_pool == pool,
+                None => true,
+            })
+            .count() as i64
     }
 }
 
@@ -552,6 +664,32 @@ mod tests {
         assert_eq!(masks.len(), 1);
         assert_eq!(masks[0].to_string(), "10.88.0.0/24");
         assert!(state.block_masks(&Env::Wl).is_empty());
+
+        // A pool with its own block is numbered inside that block; a pool
+        // without one keeps the env-wide block, so nothing breaks on a shard
+        // that has not been split yet.
+        state.pool_networks.insert(
+            (Env::Ru, "us".to_string()),
+            vec!["10.92.0.0/16".to_string()],
+        );
+        let pool = state.block_masks_for(&Env::Ru, Some("us"));
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].to_string(), "10.92.0.0/16");
+        let fallback = state.block_masks_for(&Env::Ru, Some("eu"));
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].to_string(), "10.88.0.0/24");
+        // No pool named: the shard-wide row only (a pool-less caller must not
+        // pick up another pool's block).
+        let envwide = state.block_masks_for(&Env::Ru, None);
+        assert_eq!(envwide.len(), 1);
+        assert_eq!(envwide[0].to_string(), "10.88.0.0/24");
+
+        // `block_masks(env)` is the "is this shard served" view: it must list
+        // the env-wide block AND every pool block of the shard, otherwise a
+        // shard that has been split into /20s looks empty to those callers.
+        let served = state.block_masks(&Env::Ru);
+        assert_eq!(served.len(), 2);
+        assert!(served.iter().any(|m| m.to_string() == "10.92.0.0/16"));
     }
 
     #[test]
@@ -793,5 +931,109 @@ mod tests {
         state.peers.remove_live(first.id);
         assert_eq!(state.peers_of_device_key("DEVKEY"), 1);
         assert!(state.peers.live_by_key(&Env::Ru, "K1").is_none());
+    }
+}
+
+#[cfg(test)]
+mod per_pool_cap_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn peer_in_pool(pool: &str, addr: &str) -> PeerRow {
+        PeerRow {
+            id: Uuid::new_v4(),
+            device_id: Uuid::nil(),
+            subscription_id: Uuid::nil(),
+            env: Env::Ru,
+            proto: fcore::Tag::AmneziaPeer,
+            public_key: "DEVKEY".to_string(),
+            address: addr.to_string(),
+            pool: Some(pool.to_string()),
+            label: None,
+            created_at: Utc::now(),
+            revoked_at: None,
+            revoke_reason: None,
+        }
+    }
+
+    fn state_with(peers: Vec<PeerRow>) -> PeersState {
+        let mut state = PeersState::default();
+        state.devices.insert(DeviceRow {
+            id: Uuid::nil(),
+            subscription_id: Uuid::nil(),
+            device_uid: Uuid::nil(),
+            device_name: None,
+            public_key: "DEVKEY".to_string(),
+            platform: None,
+            support_tag: "tag".to_string(),
+            created_at: Utc::now(),
+            rotated_at: None,
+        });
+        for row in peers {
+            state.peers.insert(row);
+        }
+        state
+    }
+
+    /// Three tunnels in `eu` fill only the `eu` cap: the same device still has
+    /// its own three in `ru` and in `prem`. Counting across pools was the bug —
+    /// the fourth pool refused with `peers_limit` while every pool had a free
+    /// slot.
+    #[test]
+    fn the_cap_is_per_pool_not_per_device() {
+        let state = state_with(vec![
+            peer_in_pool("eu", "10.88.0.2"),
+            peer_in_pool("eu", "10.88.0.3"),
+            peer_in_pool("eu", "10.88.0.4"),
+            peer_in_pool("ru", "10.88.0.5"),
+            peer_in_pool("prem", "10.88.0.6"),
+        ]);
+
+        assert_eq!(state.peers_of_device_key_in("DEVKEY", &Env::Ru, "eu"), 3);
+        assert_eq!(state.peers_of_device_key_in("DEVKEY", &Env::Ru, "ru"), 1);
+        assert_eq!(state.peers_of_device_key_in("DEVKEY", &Env::Ru, "prem"), 1);
+        assert_eq!(state.peers_of_device_key_in("DEVKEY", &Env::Ru, "us"), 0);
+        // The old, pool-blind counter still sees all five.
+        assert_eq!(state.peers_of_device_key("DEVKEY"), 5);
+    }
+
+    /// A row written before `peers.pool` existed cannot be attributed: it is
+    /// counted for any pool of its env, which is the stricter reading.
+    #[test]
+    fn a_legacy_row_counts_for_every_pool_of_its_env() {
+        let mut legacy = peer_in_pool("eu", "10.88.0.9");
+        legacy.pool = None;
+        let state = state_with(vec![legacy, peer_in_pool("ru", "10.88.0.10")]);
+
+        assert_eq!(state.peers_of_device_key_in("DEVKEY", &Env::Ru, "eu"), 1);
+        assert_eq!(state.peers_of_device_key_in("DEVKEY", &Env::Ru, "ru"), 2);
+        assert_eq!(state.peers_of_device_key_in("DEVKEY", &Env::Dev, "ru"), 0);
+    }
+
+    /// One key per pool is the batch shape: the same device key lives in `eu`
+    /// and in `ru` at once, and the idempotent lookup tells them apart.
+    #[test]
+    fn one_key_can_hold_a_tunnel_in_every_pool() {
+        let state = state_with(vec![
+            peer_in_pool("eu", "10.88.0.2"),
+            peer_in_pool("ru", "10.88.0.3"),
+        ]);
+
+        let eu = state.peers.live_by_key_in(&Env::Ru, Some("eu"), "DEVKEY");
+        let ru = state.peers.live_by_key_in(&Env::Ru, Some("ru"), "DEVKEY");
+        assert_eq!(eu.map(|p| p.address.as_str()), Some("10.88.0.2"));
+        assert_eq!(ru.map(|p| p.address.as_str()), Some("10.88.0.3"));
+        assert_ne!(eu.map(|p| p.id), ru.map(|p| p.id));
+
+        // Another pool of the same env is still empty, and another env too.
+        assert!(state.peers.live_by_key_in(&Env::Ru, Some("us"), "DEVKEY").is_none());
+        assert!(state.peers.live_by_key_in(&Env::Dev, Some("eu"), "DEVKEY").is_none());
+
+        // Revoking one pool leaves the other, and frees the key for that pool.
+        let eu_id = eu.unwrap().id;
+        let mut state = state;
+        state.peers.remove_live(eu_id);
+        assert!(state.peers.live_by_key_in(&Env::Ru, Some("eu"), "DEVKEY").is_none());
+        assert!(state.peers.live_by_key_in(&Env::Ru, Some("ru"), "DEVKEY").is_some());
     }
 }

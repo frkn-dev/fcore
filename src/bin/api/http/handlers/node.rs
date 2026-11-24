@@ -20,7 +20,7 @@ use super::super::{
 
 /// Addresses of the peer-plane interfaces a node announces (`awg_peers`,
 /// `wg_peers`), as the config spells them.
-fn peer_interface_addresses(node: &fcore::Node) -> Vec<(Tag, String)> {
+pub(crate) fn peer_interface_addresses(node: &fcore::Node) -> Vec<(Tag, String)> {
     let mut out = Vec::new();
     for (tag, inbound) in &node.inbounds {
         if !tag.is_peer() {
@@ -39,7 +39,7 @@ fn peer_interface_addresses(node: &fcore::Node) -> Vec<(Tag, String)> {
 /// The block a node brings for its own shard: the subnet of its peer interface
 /// (`10.222.5.1/24` -> `10.222.5.0/24`). `None` when the node announces no peer
 /// interface at all.
-fn adopted_peer_block(node: &fcore::Node) -> Option<fcore::IpAddrMask> {
+pub(crate) fn adopted_peer_block(node: &fcore::Node) -> Option<fcore::IpAddrMask> {
     for (_, raw) in peer_interface_addresses(node) {
         if let Ok(mask) = raw.parse::<fcore::IpAddrMask>() {
             return Some(mask);
@@ -51,7 +51,7 @@ fn adopted_peer_block(node: &fcore::Node) -> Option<fcore::IpAddrMask> {
 /// Whether `address` (as `10.88.0.1/16`) falls inside one of the shard blocks.
 /// Unparseable input is a refusal too: a node that cannot be checked must not
 /// be trusted with the shard's addresses.
-fn address_in_blocks(address: &str, blocks: &[fcore::IpAddrMask]) -> bool {
+pub(crate) fn address_in_blocks(address: &str, blocks: &[fcore::IpAddrMask]) -> bool {
     let Ok(mask) = address.parse::<fcore::IpAddrMask>() else {
         return false;
     };
@@ -333,7 +333,11 @@ where
                 }
 
                 crate::http::handlers::peers::publish_peers_init(
-                    &memory, node_id, &node.env, &peer_tags,
+                    &memory,
+                    node_id,
+                    &node.env,
+                    node.pool.as_deref(),
+                    &peer_tags,
                 )
                 .await;
             }
@@ -479,12 +483,27 @@ pub struct NodeStatusPublic {
     /// `nodes.bench_url`; `null` when the node has no bench (premium slots).
     /// Consumers postfix `/speedtest/{1mb.test,10mb.test,ping.txt}` themselves.
     pub speedtest_url: Option<String>,
+    /// Entry points in the ONE `[[node.endpoints]]` shape. `port: null` there
+    /// means "the inbound's own port"; weights default to 100.
+    pub endpoints: Vec<fcore::Endpoint>,
+    /// Migration counter: `true` while this node's config still declares the
+    /// DEPRECATED `node_ips`/`node_weights` keys. `sum(endpoints_legacy)` is
+    /// the number of machines left to convert.
+    pub endpoints_legacy: bool,
 }
 
 /// Is this node listed on the public status page? Personal (self-hosted)
 /// nodes are never published: they belong to their owner, not to FRKN.
 fn status_listed(node: &fcore::Node) -> bool {
-    !node.env.is_personal()
+    // Public /status is a marketing-facing list: shard members and the legacy
+    // fleet only. Premium slots are sold per account and self-hosted nodes
+    // belong to one subscriber — neither may be enumerable by anyone.
+    let env = node.env.to_string().to_lowercase();
+    node.r#type.to_string() != "PremiumNode"
+        && !node.env.is_personal()
+        && !env.starts_with("custompersonal")
+        && !env.starts_with("custompremium")
+        && !env.starts_with("premium")
 }
 
 /// Map a node into its public status row (ports deduplicated, pool verbatim).
@@ -505,6 +524,8 @@ fn node_status_public(node: &fcore::Node) -> NodeStatusPublic {
         pool: node.pool.clone(),
         pool_translation: node.pool_translation.clone(),
         speedtest_url: node.bench_url.clone(),
+        endpoints: node.endpoints.clone(),
+        endpoints_legacy: node.endpoints_legacy,
     }
 }
 
@@ -735,6 +756,8 @@ mod tests {
             r#type: NodeType::Node,
             cluster: None,
             node_ips: None,
+            endpoints: Vec::new(),
+            endpoints_legacy: false,
             pool: pool.map(str::to_string),
             pool_translation: translation,
             pool_country_code: None,
@@ -804,6 +827,26 @@ mod tests {
         let url = json["speedtest_url"].as_str().unwrap();
         assert!(!url.ends_with('/'));
         assert!(!url.contains("/speedtest"));
+    }
+
+    // /status is the migration dashboard: the node's own report and its
+    // endpoint list travel verbatim, so `sum(endpoints_legacy)` counts who is
+    // left on the DEPRECATED keys.
+    #[test]
+    fn status_row_carries_endpoints_and_legacy_flag() {
+        let mut n = node(Env::Dev, None, None);
+        n.endpoints = vec![fcore::Endpoint {
+            ip: "185.156.108.232".parse().unwrap(),
+            port: Some(8443),
+            weight: 200,
+            label: Some("eu-01".to_string()),
+        }];
+        n.endpoints_legacy = true;
+        let json = serde_json::to_value(node_status_public(&n)).unwrap();
+        assert_eq!(json["endpoints"][0]["ip"], "185.156.108.232");
+        assert_eq!(json["endpoints"][0]["port"], 8443);
+        assert_eq!(json["endpoints"][0]["weight"], 200);
+        assert_eq!(json["endpoints_legacy"], true);
     }
 
     // A node without a bench (premium slots) reports null, never a missing key.

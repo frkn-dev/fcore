@@ -142,13 +142,6 @@ fn default_log_level() -> String {
     "debug".to_string()
 }
 
-/// Directory of the public geo lists served at `/router/geo/*`. The daily
-/// `frkn-geo-update` timer writes `ru.zone` (and `ru.zone.sha256`) here
-/// atomically; see `docs/router-geo.md`.
-fn default_geo_dir() -> String {
-    "/var/lib/frkn/geo".to_string()
-}
-
 /// Protocols with per-connection traffic accounting; the only ones allowed
 /// while a subscription runs on its traffic balance (traffic mode).
 fn default_metered_conns() -> Vec<String> {
@@ -184,8 +177,9 @@ pub struct PeersConfig {
     /// Default cap of live devices (installations) per subscription.
     #[serde(default = "default_peers_max_devices_per_subscription")]
     pub max_devices_per_subscription: i64,
-    /// Default cap of live tunnels per subscription (the guard that keeps one
-    /// account from occupying a whole /20).
+    /// Default cap of live tunnels per subscription. `0` (or no key) means no
+    /// cap: the per-(device, pool) limit and the shard's address block are the
+    /// real bounds. Raise it only if one account must be throttled.
     #[serde(default = "default_peers_max_per_subscription")]
     pub max_per_subscription: i64,
     /// env → subnet blocks, seeded into `env_networks` at startup (the table
@@ -242,8 +236,11 @@ fn default_peers_per_device() -> i64 {
 }
 
 fn default_peers_max_per_subscription() -> i64 {
-    // 15 devices x 3 tunnels: the peer cap must not bind before the device cap.
-    45
+    // No subscription-wide cap: one address per pool is the normal shape, so a
+    // fixed number either blocks a legal account (45 was hit by three devices
+    // on fifteen pools) or means nothing. `0` disables the check; the shard's
+    // address block bounds it instead.
+    0
 }
 
 fn default_peers_max_devices_per_subscription() -> i64 {
@@ -337,11 +334,6 @@ pub struct ServiceConfig {
     /// City-база: даёт город клиента («Владивосток»). Опциональна.
     #[serde(default)]
     pub geoip_city_path: Option<String>,
-    /// Directory of the public geo lists served at `/router/geo/*`
-    /// (`ru.zone`, `ru.zone.sha256`). Written atomically by the daily
-    /// `frkn-geo-update` timer (`deploy/geo/`), see `docs/router-geo.md`.
-    #[serde(default = "default_geo_dir")]
-    pub geo_dir: String,
     #[serde(default)]
     pub enabled_conns: Option<HashMap<Env, Vec<Tag>>>,
     /// Connections created for lite (traffic-only) key activations, same
@@ -412,6 +404,35 @@ pub struct ServiceConfig {
     /// enabled section behaves exactly like before this feature.
     #[serde(default)]
     pub peers: PeersConfig,
+    /// Own-node capability of any account (see [`PrivateConfig`]).
+    #[serde(default)]
+    pub private: PrivateConfig,
+}
+
+/// Own-node capability of a normal account.
+///
+/// Hosting one node is a capability, not a plan: a top-level subscription is
+/// born with `own_nodes_limit = default_own_nodes_limit`, which is what
+/// `POST /private/install-token` and the cabinet block key off. The quota is
+/// only granted at creation — existing rows are never backfilled — so the
+/// value can be lowered per account without a migration. `0` disables the
+/// default for newly created accounts.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PrivateConfig {
+    #[serde(default = "default_own_nodes_limit")]
+    pub default_own_nodes_limit: i64,
+}
+
+fn default_own_nodes_limit() -> i64 {
+    fcore::DEFAULT_OWN_NODES_LIMIT
+}
+
+impl Default for PrivateConfig {
+    fn default() -> Self {
+        Self {
+            default_own_nodes_limit: default_own_nodes_limit(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -461,6 +482,16 @@ pub struct TasksConfig {
     /// itself is counted in days, so an hourly tick is plenty.
     #[serde(default = "default_stale_device_interval_sec")]
     pub stale_device_interval_sec: u64,
+    /// Revoke live peers whose traffic was not booked for this many days
+    /// (`reap_idle_peers`). A peer with no traffic rows at all counts from its
+    /// `created_at`. `0` switches the age rule off — the subscription and
+    /// grant checks still run.
+    #[serde(default = "default_peer_idle_days")]
+    pub peer_idle_days: u64,
+    /// How often `reap_idle_peers` runs. The threshold is counted in days, so
+    /// an hourly tick is plenty.
+    #[serde(default = "default_peer_reap_interval_sec")]
+    pub peer_reap_interval_sec: u64,
 }
 
 impl TasksConfig {
@@ -570,6 +601,17 @@ fn default_tombstone_republish_interval_sec() -> u64 {
 }
 
 fn default_stale_device_interval_sec() -> u64 {
+    3600
+}
+
+/// Peer cleanup: a tunnel with no booked traffic for this many days loses its
+/// shard address. 30 days is long enough that a laptop that is off for a
+/// month comes back to a working device (its peers are recreated on demand).
+fn default_peer_idle_days() -> u64 {
+    30
+}
+
+fn default_peer_reap_interval_sec() -> u64 {
     3600
 }
 
