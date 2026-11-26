@@ -638,9 +638,28 @@ where
             // payer's rights are stored, the product catalogue stops deciding
             // what to create. A subscription without grants keeps the old
             // behaviour unchanged.
+            //
+            // The v1 plane, however, is still the classic set: a peer shard
+            // announces no v1 inbound, so a connection minted in the shard's env
+            // is a config no node answers (a client older than the card UI would
+            // be left with nothing). The grant decides the cards, the catalogue
+            // keeps v1 alive — `ensure_enabled_connections` then drops whatever
+            // no serving node announces.
             let conns_map =
                 match crate::access::conns_map_for(&memory.db, sub_id, catalog_map.clone()).await {
-                    Ok((map, _source)) => map,
+                    Ok((map, source)) => {
+                        if flow == ActivationFlow::Peers
+                            && source == crate::access::Source::Grants
+                        {
+                            let mut merged = catalog_map.clone().unwrap_or_default();
+                            for (env, tags) in map.unwrap_or_default() {
+                                merged.entry(env).or_default().extend(tags);
+                            }
+                            Some(merged)
+                        } else {
+                            map
+                        }
+                    }
                     Err(e) => {
                         error!(
                             "Cannot read grants for {}: {} — using the catalogue",

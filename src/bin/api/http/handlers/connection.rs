@@ -673,9 +673,35 @@ pub async fn ensure_enabled_connections<N, C, S>(
         existing_default_pairs(&conns, &mem.conn_labels, &mem.share_conns)
     };
 
+    // What the park actually serves, per env and protocol. A v1 connection in an
+    // env that announces nothing for it is a config no node answers — that is
+    // what a grant on a peer-only shard produces when it is read as a
+    // connection right. Skipped only when the mesh is loaded: an empty snapshot
+    // right after a restart must not silently create no connections at all.
+    let announced: std::collections::HashSet<(fcore::Env, Tag)> = {
+        let mem = memory.memory.read().await;
+        mem.nodes
+            .iter_nodes()
+            .filter(|(_, node)| node.status.is_serving())
+            .flat_map(|(_, node)| {
+                let env = node.env.clone();
+                node.inbounds.keys().map(move |tag| (env.clone(), *tag))
+            })
+            .collect()
+    };
+
     for (env, tags) in conns_map {
         for tag in tags {
             if existing.contains(&(env.clone(), *tag)) {
+                continue;
+            }
+            if !announced.is_empty() && !announced.contains(&(env.clone(), *tag)) {
+                tracing::debug!(
+                    "ensure: env {:?} announces no {} inbound — no connection for {}",
+                    env,
+                    tag,
+                    subscription_id
+                );
                 continue;
             }
 
