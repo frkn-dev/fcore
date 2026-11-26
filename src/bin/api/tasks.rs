@@ -58,6 +58,9 @@ pub trait Tasks {
     /// subscription/grant no longer backs them.
     async fn reap_idle_peers(&self, interval_sec: u64);
     async fn republish_conn_deletes(&self, interval_sec: u64);
+    /// Hard-delete the connections of subscriptions that expired longer than
+    /// `connection_purge_after_days` ago, with their traffic rows.
+    async fn purge_expired_connections(&self, interval_sec: u64);
 }
 
 #[async_trait::async_trait]
@@ -383,6 +386,75 @@ where
         }
     }
 
+    /// Hard-delete the connections of subscriptions that expired longer than
+    /// `connection_purge_after_days` ago, with their traffic rows.
+    ///
+    /// `cleanup_expired_subscriptions` only soft-deletes: the tombstone stays
+    /// forever, and `connections`/`connection_traffic` are the largest tables
+    /// the api owns. Past that age the subscription has no live device and no
+    /// right to a connection, so the rows are history nobody reads.
+    ///
+    /// The ids come back from SQL so memory can drop them at once: the traffic
+    /// persister walks the memory cache, and a connection still there would
+    /// re-insert the `connection_traffic` rows this task just deleted. The next
+    /// full reload would agree with the DB anyway, this only closes the window.
+    async fn purge_expired_connections(&self, interval_sec: u64) {
+        let days = self.settings.tasks.connection_purge_after_days;
+
+        if days == 0 {
+            info!("purge_expired_connections: disabled (connection_purge_after_days = 0)");
+            return;
+        }
+
+        let per_tick = self.settings.tasks.connection_purge_max_per_tick.max(1) as i64;
+        let interval = Duration::from_secs(interval_sec.max(60));
+
+        loop {
+            debug!("Run purge expired connections task");
+
+            let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+            let mut total = 0usize;
+
+            // A first run on a long-lived deployment has thousands of rows to
+            // go: keep pulling full batches instead of one batch per interval.
+            loop {
+                match self.sync.db.conn().purge_expired_before(cutoff, per_tick).await {
+                    Ok(ids) if ids.is_empty() => break,
+                    Ok(ids) => {
+                        let batch = ids.len();
+                        total += batch;
+
+                        let mut mem = self.sync.memory.write().await;
+                        for id in &ids {
+                            let _ = mem.connections.remove(id);
+                            mem.conn_labels.remove(id);
+                            mem.conn_nodes.remove(id);
+                            mem.share_conns.remove(id);
+                            mem.main_feed_excluded_conns.remove(id);
+                        }
+
+                        if batch < per_tick as usize {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("purge_expired_connections: cannot purge: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            if total > 0 {
+                info!(
+                    "purge_expired_connections: hard-deleted {} connection(s) of subscriptions expired before {} ({} days)",
+                    total, cutoff, days
+                );
+            }
+
+            tokio::time::sleep(interval).await;
+        }
+    }
+
     async fn reconcile_enabled_connections(&self, interval_sec: u64) {
         // The memory cache is still empty at boot (get_state_from_db runs
         // concurrently). tokio::time::interval fires the first tick
@@ -686,7 +758,7 @@ where
 
         // Per tick cap: a first run on a long-lived deployment must not lock
         // `devices` for one big DELETE.
-        const PER_TICK: i64 = 200;
+        let per_tick = self.settings.tasks.stale_device_batch();
 
         let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
 
@@ -694,7 +766,7 @@ where
             interval.tick().await;
             debug!("Run reap stale devices task");
 
-            match self.sync.db.peers().reap_stale_devices(days, PER_TICK).await {
+            match self.sync.db.peers().reap_stale_devices(days, per_tick).await {
                 Ok(rows) if rows.is_empty() => {}
                 Ok(rows) => {
                     {
@@ -734,8 +806,9 @@ where
         // in the log. A full batch means there is a backlog, so the next pass
         // follows after a short pause instead of a whole interval — tens of
         // thousands of stale peers must not take a week to drain.
-        const PER_TICK: i64 = 200;
-        const BACKLOG_PAUSE: Duration = Duration::from_secs(5);
+        let per_tick = self.settings.tasks.peer_reap_batch();
+        let backlog_pause =
+            Duration::from_secs(self.settings.tasks.peer_reap_backlog_pause());
 
         let interval = Duration::from_secs(interval_sec.max(60));
 
@@ -748,7 +821,7 @@ where
                 .sync
                 .db
                 .peers()
-                .peers_for_cleanup(cutoff, now, PER_TICK)
+                .peers_for_cleanup(cutoff, now, per_tick)
                 .await
             {
                 Ok(rows) => rows,
@@ -764,7 +837,7 @@ where
                 continue;
             }
 
-            let full_batch = rows.len() as i64 >= PER_TICK;
+            let full_batch = rows.len() as i64 >= per_tick;
 
             let traffic_mode_enabled = self.settings.service.traffic_mode_enabled;
             let (mut idle, mut ended, mut ungranted) = (0usize, 0usize, 0usize);
@@ -871,7 +944,7 @@ where
                 revoked, idle, idle_days, ended, ungranted
             );
 
-            tokio::time::sleep(if full_batch { BACKLOG_PAUSE } else { interval }).await;
+            tokio::time::sleep(if full_batch { backlog_pause } else { interval }).await;
         }
     }
 

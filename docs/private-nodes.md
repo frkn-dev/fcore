@@ -61,6 +61,23 @@ install-token flow below.
    `DELETE /private/nodes/{uuid}?subscription_id=…`,
    `GET /private/state?subscription_id=…` (used/limit/remaining, see «Limits»).
 
+## Pools of an own shard
+
+A shard may hold **several** pools. The pool is the account's own grouping — a
+country, a pair of machines — and it is what the app shows as a card: nodes with
+the same `[node] pool` share one card, a node without a pool keeps a card of its
+own, and `/v1/config` of a pool carries the addresses of that pool only.
+
+- The api never invents a pool name for a private node: it stores what the node
+  declared (`[node] pool = "norway"`), trimmed; names over 64 chars and names
+  with control characters are refused with `400`.
+- A refresh that declares no pool keeps the stored one — editing `config.toml`
+  must not silently move the machine to another card.
+- 0.7.47 forced the single name `own` on every node of a shard, which collapsed
+  the whole account into one card and put every address of the shard into every
+  node's `/v1/config`; `0034_personal_shards_keep_pools.sql` clears that stamp
+  (`pool = 'own'` on `custompersonal%` rows) once.
+
 ## Peer isolation of an own shard
 
 An own shard is one account, and the bus is treated as public: topic strings are

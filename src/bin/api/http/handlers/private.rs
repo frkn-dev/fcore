@@ -30,12 +30,32 @@ pub struct InstallTokenRequest {
     pub subscription_id: Uuid,
 }
 
-/// The only pool of an account's own shard. One shard per account
-/// (`custompersonal<sub-uuid>`) and one pool inside it: the clients get a
-/// single card with every node of the account, and no pool picker. Shared
-/// shard pools never use this name — it is written only by the private
-/// registration paths.
-pub(crate) const PRIVATE_POOL: &str = "own";
+/// Pool of a private node — the pool the account itself declared
+/// (`[node] pool` on the machine).
+///
+/// A shard holds **several** pools: the pool is the account's own grouping (a
+/// country, a pair of machines) and every pool is one card in the app, while a
+/// node without a pool keeps a card of its own. It is not an api-chosen
+/// singleton — stamping one name on every node of the shard collapsed the whole
+/// account into a single card.
+///
+/// `stored` is what the shard already keeps for this node: a refresh that does
+/// not declare a pool must not wipe it (the DB upsert is `COALESCE`, the
+/// in-memory row is not).
+fn private_pool(raw: Option<String>, stored: Option<String>) -> Result<Option<String>, String> {
+    match crate::http::request::normalized_pool(raw) {
+        None => Ok(stored),
+        Some(pool) => {
+            if pool.chars().count() > 64 {
+                return Err("pool name is too long (max 64)".to_string());
+            }
+            if pool.chars().any(char::is_control) {
+                return Err("pool name contains control characters".to_string());
+            }
+            Ok(Some(pool))
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct InstallTokenResponse {
@@ -1158,10 +1178,15 @@ where
     node_req.env = expected.clone();
     node_req.r#type = Some(NodeType::SelfHosted);
     node_req.cluster = None;
-    // One shard per account holds exactly one pool (`own`): the clients get a
-    // single card with every node of the account, and no pool is offered to
-    // pick. Pools of the shared shards never appear here.
-    node_req.pool = Some(PRIVATE_POOL.to_string());
+    // A shard may hold several pools: the pool is the account's own grouping
+    // (a country, a pair of machines) and each pool is one card. A node that
+    // declares none keeps a card of its own, and nothing here invents a name —
+    // stamping one pool on every node of the shard collapsed the account into a
+    // single card.
+    node_req.pool = match private_pool(node_req.pool.clone(), None) {
+        Ok(pool) => pool,
+        Err(msg) => return Ok(http::bad_request(&msg).into_response()),
+    };
 
     let node = node_req.clone().as_node();
     let node_is_personal = {
@@ -2342,9 +2367,12 @@ where
         return Ok(forbidden("node uuid does not match token").into_response());
     }
 
-    let existing_env = {
+    let (existing_env, existing_pool) = {
         let mem = memory.memory.read().await;
-        mem.nodes.get_by_id(&known).map(|node| node.env)
+        match mem.nodes.get_by_id(&known) {
+            Some(node) => (Some(node.env.clone()), node.pool.clone()),
+            None => (None, None),
+        }
     };
     if existing_env.is_none() && !node_req.env.is_personal() {
         return Ok(http::bad_request("personal env required").into_response());
@@ -2363,9 +2391,13 @@ where
     node_req.uuid = known;
     node_req.r#type = Some(NodeType::SelfHosted);
     node_req.cluster = None;
-    // A refresh keeps the account's single private pool; the pool is an
-    // internal group of the shard, never a user-chosen label.
-    node_req.pool = Some(PRIVATE_POOL.to_string());
+    // The pool stays the account's own grouping: a node that declares one keeps
+    // it, a node that declares none keeps whatever the shard already stores (a
+    // refresh must not wipe a pool because the config was edited).
+    node_req.pool = match private_pool(node_req.pool.clone(), existing_pool) {
+        Ok(pool) => pool,
+        Err(msg) => return Ok(http::bad_request(&msg).into_response()),
+    };
 
     let node = node_req.as_node();
 
@@ -2442,6 +2474,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shard holds several pools: the declared name is kept, an absent one
+    /// keeps what the shard already stores, junk is refused.
+    #[test]
+    fn private_pool_keeps_what_the_account_declared() {
+        // Declared pool wins, trimmed.
+        assert_eq!(
+            private_pool(Some("  norway  ".into()), None),
+            Ok(Some("norway".into()))
+        );
+        // A different declaration replaces the stored one.
+        assert_eq!(
+            private_pool(Some("germany".into()), Some("norway".into())),
+            Ok(Some("germany".into()))
+        );
+        // Nothing declared on a fresh node: no pool, the node keeps its own card.
+        assert_eq!(private_pool(None, None), Ok(None));
+        // A refresh that does not declare a pool must not wipe the stored one.
+        assert_eq!(
+            private_pool(None, Some("norway".into())),
+            Ok(Some("norway".into()))
+        );
+        // Blank is "no pool", not a pool named " ".
+        assert_eq!(private_pool(Some("   ".into()), None), Ok(None));
+        assert!(private_pool(Some("x".repeat(65)), None).is_err());
+        assert!(private_pool(Some("bad\u{7}name".into()), None).is_err());
+    }
 
     #[test]
     fn personal_env_is_isolated_from_shared() {

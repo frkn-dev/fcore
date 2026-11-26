@@ -202,6 +202,10 @@ pub struct AccessRevokeRequest {
 pub struct BuyPlanRequest {
     /// `standard` or `lite` (`super-duper` is accepted too).
     pub plan: String,
+    /// Traffic package for a lite purchase, in GiB: the gateway prices the
+    /// plan by it, exactly like the lite keys of `/pay`.
+    #[serde(default)]
+    pub traffic_gib: Option<u32>,
 }
 
 /// `POST /subscription/{id}/plan` — payment-gw fulfilment of a cabinet
@@ -667,6 +671,122 @@ where
         .collect()
 }
 
+/// Credentials a card cannot be built without.
+///
+/// `hysteria2` and `vless_xhttp_cdn` cards carry the token of a *connection*:
+/// the node terminates those proxies itself, so there is no peer address to
+/// allocate. The v1 flow created that connection when a client asked for
+/// locations; a v2 client only calls the peers endpoints, so a shard that starts
+/// announcing hysteria2 had no credential to hand out and its card was dropped
+/// in `pool_cards`. Minting it here keeps the v2 flow self-contained:
+/// `create_connection_inner` still checks the grant, so a subscription without
+/// the protocol gets nothing.
+async fn ensure_granted_creds<N, C, S>(
+    memory: &MemSync<N, C, S>,
+    subscription_id: &Uuid,
+    grants: &[AccessRow],
+) where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + From<Subscription> + 'static,
+    MemSync<N, C, S>: SyncOp<N, C, S>,
+    S: From<Subscription>,
+{
+    let missing: Vec<(fcore::Env, fcore::Tag)> = {
+        let mem = memory.memory.read().await;
+        let have = card_creds(&mem.connections, subscription_id);
+
+        let mut missing = Vec::new();
+
+        for grant in grants {
+            for tag in [fcore::Tag::Hysteria2, fcore::Tag::VlessXhttpCdn] {
+                if !grant.protos.contains(&tag) || have.contains_key(&(grant.env.clone(), tag)) {
+                    continue;
+                }
+
+                // A protocol nobody serves is not worth a connection row.
+                let served = mem.nodes.iter_nodes().any(|(_, node)| {
+                    node.env == grant.env
+                        && node.status.is_serving()
+                        && node.inbounds.contains_key(&tag)
+                });
+
+                if served {
+                    missing.push((grant.env.clone(), tag));
+                }
+            }
+        }
+
+        missing
+    };
+
+    for (env, tag) in missing {
+        let proto = match tag {
+            fcore::Tag::Hysteria2 => fcore::Proto::Hysteria2 {
+                token: Uuid::new_v4(),
+            },
+            other => fcore::Proto::Xray(other),
+        };
+
+        let conn: Connection = Connection::new(&env, Some(*subscription_id), proto, None);
+        let conn_id = Uuid::new_v4();
+        // Same shape the v1 path publishes: a `Vec<Message>`. The auth service
+        // deserializes exactly that, and a bare slice fails its `CheckBytes`
+        // with an `OutOfBounds` root — the token then never reaches auth memory
+        // and every hysteria2 dial answers 403.
+        let messages = vec![conn.as_create_message(&conn_id)];
+
+        let bytes = match rkyv::to_bytes::<_, 1024>(&messages) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(subscription = %subscription_id, proto = ?tag, error = %e, "peers: cannot serialize a minted credential");
+                continue;
+            }
+        };
+
+        match SyncOp::add_conn(
+            memory,
+            &conn_id,
+            conn,
+            None,
+            None,
+            Some("peers".to_string()),
+            false,
+        )
+        .await
+        {
+            Ok(_) => {
+                // Token connections are broadcast on the auth topic: nodes read
+                // their credentials from there, not from the env stream.
+                let _ = memory
+                    .publisher
+                    .send_binary(&fcore::Topic::Auth, bytes.as_ref())
+                    .await;
+
+                tracing::info!(
+                    subscription = %subscription_id,
+                    proto = ?tag,
+                    connection = %conn_id,
+                    "peers: minted the credential of a granted protocol"
+                );
+            }
+            Err(e) => tracing::warn!(
+                subscription = %subscription_id,
+                proto = ?tag,
+                error = %e,
+                "peers: cannot mint a credential"
+            ),
+        }
+    }
+}
+
 /// Client parameters of a `vless_xhttp_cdn` card, built only from what the
 /// node announces: an inbound without the xHTTP path and the CDN host it
 /// terminates TLS for cannot produce a config, so it produces no card.
@@ -832,21 +952,31 @@ fn pool_cards<N: NodeStorageOperations>(
                 let Some(auth) = cred else {
                     continue;
                 };
-                // What the client dials: the host the inbound declares (its
-                // `host`/ACME domain, or the external `server`), else the
-                // node's primary entry IP.
-                let server = if h2.host.trim().is_empty() {
-                    node.entry_ips()
-                        .into_iter()
-                        .next()
-                        .unwrap_or_else(|| node.pool.clone().unwrap_or_default())
-                } else {
-                    h2.host.clone()
-                };
+                // What the client dials: the node's entry IP, never the TLS
+                // domain. The client keeps its own dial out of the tunnel by
+                // excluding `hostName` as a /32 route (Xray.kt), and a domain
+                // there excludes nothing: the QUIC handshake to the node then
+                // loops back through the tunnel it is trying to build, which
+                // shows up on the node as a stream to its own address refused.
+                // The domain still travels in `sni`, which is what the
+                // certificate is validated against.
+                let server = node
+                    .entry_ips()
+                    .into_iter()
+                    .next()
+                    .or_else(|| {
+                        (!h2.host.trim().is_empty()).then(|| h2.host.clone())
+                    })
+                    .unwrap_or_else(|| node.pool.clone().unwrap_or_default());
+                let sni = h2
+                    .sni
+                    .clone()
+                    .filter(|sni| !sni.trim().is_empty())
+                    .unwrap_or_else(|| h2.host.clone());
                 let payload = serde_json::json!({
                     "server": server,
                     "port": inbound.port,
-                    "sni": h2.sni.clone().unwrap_or_else(|| h2.host.clone()),
+                    "sni": sni,
                     "auth": auth.to_string(),
                     "insecure": h2.insecure,
                     "obfs": h2
@@ -1684,6 +1814,8 @@ where
         + From<Connection>
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+    MemSync<N, C, S>: SyncOp<N, C, S>,
+    S: From<Subscription>,
 {
     if !peers::is_valid_public_key(&req.public_key) {
         return refusal_reply(Refusal::BadPublicKey);
@@ -1717,20 +1849,27 @@ where
     // Grants of this subscription, their peer cards and the effective limits:
     // the same sources the single create reads, so a pool cannot be allowed
     // here and refused there.
-    let (grants, cards, limits) = {
+    let grants: Vec<AccessRow> = {
         let mem = memory.memory.read().await;
-        let grants: Vec<AccessRow> = mem
-            .peers_state
+        mem.peers_state
             .access
             .of_sub(&req.subscription_id)
             .into_iter()
             .cloned()
-            .collect();
+            .collect()
+    };
+
+    // `hysteria2`/`vless` cards are built from a connection token that a v2
+    // client never creates itself: mint what the grant allows before reading
+    // the credentials, otherwise those cards are dropped in `pool_cards`.
+    ensure_granted_creds(&memory, &req.subscription_id, &grants).await;
+
+    let (cards, limits) = {
+        let mem = memory.memory.read().await;
         let creds = card_creds(&mem.connections, &req.subscription_id);
         let cards = cards_for_grants(&mem.nodes, &grants, &creds);
         let (per_device, per_subscription) = mem.peers_state.limits_for(&req.subscription_id);
         (
-            grants,
             cards,
             Limits::resolve(default_limits, per_device, per_subscription),
         )
@@ -2243,6 +2382,8 @@ where
         + From<Connection>
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+    MemSync<N, C, S>: SyncOp<N, C, S>,
+    S: From<Subscription>,
 {
     let subscription_id = req.subscription_id;
     let db = memory.db.peers();
@@ -2264,6 +2405,10 @@ where
             .unwrap_or(0);
         access.push(access_view(grant, used));
     }
+
+    // Same reason as `post_peers_prepare_handler`: a `hysteria2` card is built
+    // from a connection token, and a v2 client never creates one itself.
+    ensure_granted_creds(&memory, &subscription_id, &grants).await;
 
     let cards = {
         let mem = memory.memory.read().await;
@@ -2717,11 +2862,17 @@ where
         + From<Connection>
         + PartialEq,
     S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+    MemSync<N, C, S>: SyncOp<N, C, S>,
+    S: From<Subscription>,
 {
     let grants = match memory.db.peers().grants(subscription_id).await {
         Ok(rows) => rows,
         Err(e) => return db_error("cabinet_grants", e),
     };
+
+    // Same reason as `post_peers_prepare_handler`: a `hysteria2` card is built
+    // from a connection token, and a v2 client never creates one itself.
+    ensure_granted_creds(&memory, &subscription_id, &grants).await;
 
     let (cards, connections, devices) = {
         let mem = memory.memory.read().await;
@@ -3023,8 +3174,13 @@ where
                     "planta": "/payment/planta/subscription/create",
                 },
                 // Exactly what the cabinet posts to the gateway: the plan is
-                // what makes it a plan purchase instead of a plain renewal.
-                "body": { "subscription_id": subscription_id, "plan": plan },
+                // what makes it a plan purchase instead of a plain renewal,
+                // and the traffic package is what the lite price is keyed by.
+                "body": {
+                    "subscription_id": subscription_id,
+                    "plan": plan,
+                    "traffic_gib": req.traffic_gib,
+                },
             },
         }),
     )
@@ -3867,7 +4023,10 @@ mod tests {
                     "keepalive": null,
                     "obfuscation": null,
                     "payload": {
-                        "server": H2_HOST,
+                        // What the client dials is the node's entry IP; the TLS
+                        // name travels in `sni`. A domain in `server` would put
+                        // the QUIC handshake back through the tunnel it builds.
+                        "server": "203.0.113.10",
                         "port": 8443,
                         "sni": H2_HOST,
                         "auth": SUB_TOKEN,

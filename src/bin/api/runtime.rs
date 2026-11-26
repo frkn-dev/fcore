@@ -172,6 +172,16 @@ where
             }
         });
 
+        // Long-expired subscriptions: their connections are history, and the
+        // tombstone `cleanup_expired_subscriptions` leaves is never read again.
+        spawn_task("purge_expired_connections", {
+            let interval = self.settings.tasks.connection_purge_interval_sec;
+            let service = Arc::clone(&self);
+            async move {
+                service.purge_expired_connections(interval).await;
+            }
+        });
+
         spawn_task("restore_subscriptions", {
             let interval = self.settings.tasks.subscription_restore_interval;
             let service = Arc::clone(&self);

@@ -492,7 +492,42 @@ pub struct TasksConfig {
     /// an hourly tick is plenty.
     #[serde(default = "default_peer_reap_interval_sec")]
     pub peer_reap_interval_sec: u64,
+    /// How many live peers one `reap_idle_peers` pass may look at. A first run
+    /// on a long-lived deployment drains a backlog in batches instead of one
+    /// huge transaction; a full batch means more work is waiting. `0` means the
+    /// built-in default.
+    #[serde(default = "default_peer_reap_max_per_tick")]
+    pub peer_reap_max_per_tick: u64,
+    /// Pause between `reap_idle_peers` passes while a full batch keeps coming
+    /// back, so a backlog does not take a whole interval per 200 peers. `0`
+    /// means the built-in default.
+    #[serde(default = "default_peer_reap_backlog_pause_sec")]
+    pub peer_reap_backlog_pause_sec: u64,
+    /// How many stale devices one `reap_stale_devices` pass may delete in one
+    /// `DELETE`. `0` means the built-in default.
+    #[serde(default = "default_stale_device_max_per_tick")]
+    pub stale_device_max_per_tick: u64,
+    /// Hard-delete connections of subscriptions that expired longer than this
+    /// many days ago, together with their traffic rows. Soft deletion keeps a
+    /// tombstone forever; past this age the row is history nobody reads, and
+    /// `connections`/`connection_traffic` are the biggest tables the api owns.
+    /// `0` switches the purge off.
+    #[serde(default = "default_connection_purge_after_days")]
+    pub connection_purge_after_days: u64,
+    /// How often the purge of long-expired connections runs.
+    #[serde(default = "default_connection_purge_interval_sec")]
+    pub connection_purge_interval_sec: u64,
+    /// How many connections one purge pass deletes in one statement. A first
+    /// run on a long-lived deployment drains the backlog in batches instead of
+    /// one huge transaction. `0` means the built-in default.
+    #[serde(default = "default_connection_purge_max_per_tick")]
+    pub connection_purge_max_per_tick: u64,
 }
+
+/// Built-in batch sizes of the cleanup tasks. Kept as constants so a config
+/// that leaves the keys out (or writes `0`) still runs a sane batch.
+pub const DEFAULT_REAP_PER_TICK: u64 = 200;
+pub const DEFAULT_REAP_BACKLOG_PAUSE_SEC: u64 = 5;
 
 impl TasksConfig {
     /// Cadence of the peer traffic persister: the explicit
@@ -502,6 +537,27 @@ impl TasksConfig {
         match self.peer_traffic_persist_interval_sec {
             Some(secs) if secs > 0 => secs.max(5),
             _ => self.traffic_persist_interval_sec.max(5),
+        }
+    }
+
+    pub fn peer_reap_batch(&self) -> i64 {
+        match self.peer_reap_max_per_tick {
+            0 => DEFAULT_REAP_PER_TICK as i64,
+            n => n as i64,
+        }
+    }
+
+    pub fn peer_reap_backlog_pause(&self) -> u64 {
+        match self.peer_reap_backlog_pause_sec {
+            0 => DEFAULT_REAP_BACKLOG_PAUSE_SEC,
+            n => n,
+        }
+    }
+
+    pub fn stale_device_batch(&self) -> i64 {
+        match self.stale_device_max_per_tick {
+            0 => DEFAULT_REAP_PER_TICK as i64,
+            n => n as i64,
         }
     }
 }
@@ -605,14 +661,41 @@ fn default_stale_device_interval_sec() -> u64 {
 }
 
 /// Peer cleanup: a tunnel with no booked traffic for this many days loses its
-/// shard address. 30 days is long enough that a laptop that is off for a
-/// month comes back to a working device (its peers are recreated on demand).
+/// shard address. 90 days is long enough that a laptop or router that is off
+/// for a season comes back to a working device (its peers are recreated on
+/// demand anyway), while a phone wiped for good still frees its address.
 fn default_peer_idle_days() -> u64 {
-    30
+    90
 }
 
 fn default_peer_reap_interval_sec() -> u64 {
     3600
+}
+
+/// Expired-subscription purge: connections of a subscription that ended this
+/// many days ago are hard-deleted (with their traffic rows).
+fn default_connection_purge_after_days() -> u64 {
+    90
+}
+
+fn default_connection_purge_interval_sec() -> u64 {
+    3600
+}
+
+fn default_connection_purge_max_per_tick() -> u64 {
+    2000
+}
+
+fn default_peer_reap_max_per_tick() -> u64 {
+    DEFAULT_REAP_PER_TICK
+}
+
+fn default_peer_reap_backlog_pause_sec() -> u64 {
+    DEFAULT_REAP_BACKLOG_PAUSE_SEC
+}
+
+fn default_stale_device_max_per_tick() -> u64 {
+    DEFAULT_REAP_PER_TICK
 }
 
 #[cfg(test)]
@@ -732,5 +815,37 @@ mod tests {
             "{TASKS_REQUIRED}\ntraffic_persist_interval_sec = 600\npeer_traffic_persist_interval_sec = 0\n"
         ));
         assert_eq!(inherit.peer_traffic_interval_sec(), 600);
+    }
+
+    /// Cleanup defaults: a tunnel with no booked traffic lives 90 days, and the
+    /// batch sizes are the ones the tasks used to hard-code.
+    #[test]
+    fn cleanup_defaults_are_ninety_days_and_200_per_tick() {
+        let cfg = tasks_from(TASKS_REQUIRED);
+        assert_eq!(cfg.peer_idle_days, 90);
+        assert_eq!(cfg.peer_reap_interval_sec, 3600);
+        assert_eq!(cfg.peer_reap_batch(), 200);
+        assert_eq!(cfg.peer_reap_backlog_pause(), 5);
+        assert_eq!(cfg.stale_device_batch(), 200);
+    }
+
+    /// Every cleanup knob is a config key; a zero falls back to the default
+    /// instead of asking the node for a batch of zero peers.
+    #[test]
+    fn cleanup_knobs_are_configurable_and_zero_means_default() {
+        let tuned = tasks_from(&format!(
+            "{TASKS_REQUIRED}peer_idle_days = 120\npeer_reap_max_per_tick = 50\npeer_reap_backlog_pause_sec = 2\nstale_device_max_per_tick = 10\n"
+        ));
+        assert_eq!(tuned.peer_idle_days, 120);
+        assert_eq!(tuned.peer_reap_batch(), 50);
+        assert_eq!(tuned.peer_reap_backlog_pause(), 2);
+        assert_eq!(tuned.stale_device_batch(), 10);
+
+        let zeroed = tasks_from(&format!(
+            "{TASKS_REQUIRED}peer_reap_max_per_tick = 0\npeer_reap_backlog_pause_sec = 0\nstale_device_max_per_tick = 0\n"
+        ));
+        assert_eq!(zeroed.peer_reap_batch(), 200);
+        assert_eq!(zeroed.peer_reap_backlog_pause(), 5);
+        assert_eq!(zeroed.stale_device_batch(), 200);
     }
 }

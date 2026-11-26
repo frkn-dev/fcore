@@ -169,11 +169,27 @@ traffic_persist_interval_sec = 3600
 # Peers: how often installations with no live tunnel get reaped (default 3600).
 # The threshold itself is `[service.peers] stale_device_days`.
 # stale_device_interval_sec = 3600
+# How many stale devices one pass deletes (default 200; 0 = default).
+# stale_device_max_per_tick = 200
 # Peers: revoke live tunnels whose traffic was not booked for this many days
-# (default 30; 0 switches the age rule off, the subscription/grant checks still
+# (default 90; 0 switches the age rule off, the subscription/grant checks still
 # run), and how often that sweep runs (default 3600).
-# peer_idle_days = 30
+# peer_idle_days = 90
 # peer_reap_interval_sec = 3600
+# How many live peers one sweep looks at (default 200; 0 = default), and how
+# long to wait before the next pass while a full batch keeps coming back —
+# a backlog drains in one afternoon instead of a week (default 5 s).
+# peer_reap_max_per_tick = 200
+# peer_reap_backlog_pause_sec = 5
+# Hard-delete the connections of subscriptions that expired longer than this
+# many days ago, with their traffic rows: `cleanup_expired_subscriptions` only
+# soft-deletes, and those tombstones are never read again (default 90; 0 keeps
+# them forever). How often that purge runs (default 3600), and how many rows
+# one statement deletes (default 2000) — a first run drains the backlog in
+# batches instead of one huge transaction.
+# connection_purge_after_days = 90
+# connection_purge_interval_sec = 3600
+# connection_purge_max_per_tick = 2000
 connection_expire_interval = 600
 monitor_nodes_interval = 60
 heartbeat_node_offline_threshold_sec = 120

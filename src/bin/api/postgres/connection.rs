@@ -272,6 +272,50 @@ impl PgConn {
         Ok(())
     }
 
+    /// Hard-delete connections of subscriptions that expired before `cutoff`,
+    /// together with their traffic rows, in batches.
+    ///
+    /// Soft deletion (`delete`) keeps a tombstone forever. A subscription that
+    /// expired long ago has no live device and no right to a connection, so its
+    /// rows are history nobody reads — while `connections` and
+    /// `connection_traffic` are the biggest things the api owns. One statement,
+    /// so the batch is atomic; `connection_traffic` has no FK to `connections`,
+    /// hence the explicit delete (traffic first, then the connection itself).
+    ///
+    /// Returns the ids removed so the caller can drop them from memory before
+    /// the traffic persister resurrects the rows it just deleted.
+    pub async fn purge_expired_before(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<uuid::Uuid>> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let rows = client
+            .query(
+                "WITH doomed AS (
+                     SELECT c.id
+                       FROM connections c
+                       JOIN subscriptions s ON s.id = c.subscription_id
+                      WHERE s.expires_at IS NOT NULL
+                        AND s.expires_at < $1
+                      ORDER BY c.id
+                      LIMIT $2
+                 ), traffic AS (
+                     DELETE FROM connection_traffic
+                      WHERE connection_id IN (SELECT id FROM doomed)
+                 )
+                 DELETE FROM connections
+                  WHERE id IN (SELECT id FROM doomed)
+                 RETURNING id",
+                &[&cutoff, &limit],
+            )
+            .await?;
+
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
     pub async fn restore(&self, conn_id: &uuid::Uuid) -> Result<()> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;

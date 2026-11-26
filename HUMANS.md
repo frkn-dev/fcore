@@ -1,6 +1,43 @@
 # HUMANS.md
 
 ## Current
+- **26.11.2026 — 0.7.48 (всё дерево, коммит из этой сессии):** четыре независимых куска,
+  собранные в один релиз по решению владельца.
+  **Чистка БД:** таск `purge_expired_connections` (`[tasks] connection_purge_after_days`,
+  по умолчанию 90, `0` выключает) жёстко удаляет коннекты подписок, истёкших раньше порога,
+  вместе со строками `connection_traffic`, батчами по `connection_purge_max_per_tick` (2000),
+  `pg.conn().purge_expired_before()` — один атомарный CTE-statement; id возвращаются, чтобы
+  память успела их выкинуть раньше, чем персистер трафика вернёт строки. На проде под нож
+  попадает 20 089 коннектов у 3 725 подписок (все уже soft-deleted) + их трафик (48 МБ).
+  **Персональные шарды:** `PRIVATE_POOL = "own"` больше не штампуется — api хранит пул, который
+  нода объявила (`[node] pool`, тримит, `400` на >64 символов и control-символы), нода без пула
+  держит свою карточку, рефреш без пула не стирает сохранённый; `0034` одноразово чистит
+  `pool='own'` у `custompersonal%` (0.7.47 схлопывала весь шард в одну карточку).
+  **v2-карточки прокси:** `ensure_granted_creds` минтит коннект для `hysteria2`/`vless_xhttp_cdn`
+  карточек (v2-клиент сам v1-коннекты не создаёт, поэтому карточки молча выпадали из
+  `pool_cards`), публикует в auth-топик как `Vec<Message>` (с одиночным слайсом auth падает на
+  `CheckBytes` и dial'ы получают 403). Плюс `traffic_gib` в покупке плана и миграция `0033`
+  (`transaction_type = 'PLAN_PURCHASE'`, база платёжного шлюза).
+  **Чистка пиров:** `reap_idle_peers`/`reap_stale_devices` больше не держат `PER_TICK = 200`
+  в константе — размеры в конфиге, полная пачка означает бэклог и следующий проход идёт через
+  `peer_reap_backlog_pause_sec` (5 с); `peer_idle_days` в доке 30 → 90.
+  **Починено в этом же релизе:** тест `hysteria2_card_matches_the_contract` ждал `server` = TLS-домен,
+  а код с 0.7.48 отдаёт в `server` входной IP ноды и домен только в `sni` (иначе QUIC-хендшейк
+  уходит в туннель, который сам же и строится) — тест приведён к коду.
+  **Проверка:** `cargo test --lib` 131 ok, `cargo test --bin api --no-default-features` 350 ok.
+- **24.11.2026 — промежуточный коммит `c9a3a1d` (НЕ запушен):** всё дерево 0.7.47 — v2 peers plane
+  (`POST /v1/peers/prepare`, идентичность `(env, pool, public_key)`), `/20` на пул (0029–0032),
+  dual plans (`plans.rs`, `POST /subscription/{id}/plan`), вложенный `report{}`, union трафика,
+  plane v2, `own_nodes_limit`, `[[node.endpoints]]`, `recursion_limit 512`, карточки premium/selfhosted
+  при `Offline`. Прод api — бинарь от 23.11.
+- **Сборка/деплой:** только на **build01 45.9.13.213** (`/root/build/ffcore`,
+  `cargo build --release --bin api --no-default-features`), проверка `file` → `ELF … x86-64`,
+  затем scp в `/opt/api/api.new`, бэкап `api.prev-<ts>`, restart, healthcheck. Готовый бинарь
+  0.7.47 (sha256 `2ce03da9…`) собран и проверен, **ждёт «ок» пользователя на выкатку**.
+  Правило записано в `AGENTS.md`: не собирать на маке и не собирать на api-хосте.
+- **Платежи:** `POST /subscription/{id}/plan` пока никем не вызывается — в платёжном шлюзе нет поля
+  `plan`, нет `[[app.plans]] kind="lite"` в живом конфиге, вебхук зовёт `PUT /subscription` (дни).
+  ЛК держит `PLAN_GATEWAY_READY=false`.
 - **Repo:** ffcore
 - **Branch:** `feature/peers` (запушено, теги `v0.7.7`–`v0.7.10`; HEAD `be5efbd`)
 - **Task:** PEERS — новый слой пиров: ключ на устройстве, адрес от api, права по шардам

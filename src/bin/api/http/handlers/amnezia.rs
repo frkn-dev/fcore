@@ -3501,6 +3501,140 @@ mod tests {
     }
 
     #[test]
+    fn personal_shard_holds_one_card_per_pool() {
+        use fcore::{Connection, NodeStatus, NodeType, Proto};
+        use std::collections::HashMap;
+
+        fn inbound() -> fcore::Inbound {
+            fcore::Inbound {
+                tag: Tag::VlessTcpReality,
+                port: 443,
+                stream_settings: None,
+                wg: None,
+                awg: None,
+                h2: None,
+                mtproto_secret: None,
+            }
+        }
+        fn node(
+            id: &str,
+            env: &Env,
+            addr: &str,
+            extra: Option<&str>,
+            pool: Option<&str>,
+        ) -> fcore::Node {
+            let mut ips = vec![addr.parse().unwrap()];
+            if let Some(extra) = extra {
+                ips.push(extra.parse().unwrap());
+            }
+            fcore::Node {
+                uuid: uuid::Uuid::parse_str(id).unwrap(),
+                env: env.clone(),
+                hostname: addr.into(),
+                address: addr.parse().unwrap(),
+                status: NodeStatus::Online,
+                label: addr.into(),
+                interface: "eth0".into(),
+                created_at: chrono::Utc::now(),
+                modified_at: chrono::Utc::now(),
+                inbounds: [(Tag::VlessTcpReality, inbound())].into_iter().collect(),
+                cores: 1,
+                max_bandwidth_bps: 1,
+                country: "NO".into(),
+                r#type: NodeType::SelfHosted,
+                cluster: None,
+                node_ips: Some(ips),
+                endpoints: Vec::new(),
+                endpoints_legacy: false,
+                pool: pool.map(|s| s.to_string()),
+                pool_translation: None,
+                pool_country_code: None,
+                pool_country_name: None,
+                node_weights: BTreeMap::new(),
+                bench_url: None,
+            }
+        }
+
+        let env = Env::personal_for(uuid::Uuid::nil());
+        let mut nodes: HashMap<Env, Vec<fcore::Node>> = HashMap::new();
+        nodes.insert(
+            env.clone(),
+            vec![
+                node(
+                    "11111111-1111-1111-1111-111111111111",
+                    &env,
+                    "1.1.1.1",
+                    Some("1.1.1.2"),
+                    Some("norway"),
+                ),
+                node(
+                    "22222222-2222-2222-2222-222222222222",
+                    &env,
+                    "2.2.2.1",
+                    Some("2.2.2.2"),
+                    Some("singapore"),
+                ),
+                node(
+                    "33333333-3333-3333-3333-333333333333",
+                    &env,
+                    "3.3.3.1",
+                    Some("3.3.3.2"),
+                    Some("usa"),
+                ),
+            ],
+        );
+        let conn_id = uuid::Uuid::new_v4();
+        let conn = Connection::new(&env, None, Proto::new_xray(&Tag::VlessTcpReality), None);
+        let conns = [(conn_id, conn)];
+        let labels = HashMap::<uuid::Uuid, String>::new();
+        let pins = HashMap::<uuid::Uuid, uuid::Uuid>::new();
+        let cards = |nodes: &HashMap<Env, Vec<fcore::Node>>| {
+            connections_for_protocol(nodes, &pins, &labels, "vless", Some(&conns), true)
+                .into_iter()
+                .filter(|c| c.connection_uuid != uuid::Uuid::nil())
+                .collect::<Vec<_>>()
+        };
+
+        // One card per pool: three pools -> three cards, each with its own IPs.
+        let out = cards(&nodes);
+        assert_eq!(out.len(), 3);
+        assert_eq!(
+            out[0].node_ips.as_deref(),
+            Some(["1.1.1.1", "1.1.1.2"].map(str::to_string).as_slice())
+        );
+        assert_eq!(out[0].pool.as_deref(), Some("norway"));
+        assert_eq!(out[2].pool.as_deref(), Some("usa"));
+
+        // Two machines of the same pool share one card, the third keeps its own.
+        nodes.get_mut(&env).unwrap()[1].pool = Some("norway".into());
+        let out = cards(&nodes);
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].node_ips.as_deref(),
+            Some(
+                ["1.1.1.1", "1.1.1.2", "2.2.2.1", "2.2.2.2"]
+                    .map(str::to_string)
+                    .as_slice()
+            )
+        );
+
+        // The 0.7.47 stamp: one name on every node collapsed the whole shard
+        // into one card carrying every address of the account.
+        for n in nodes.get_mut(&env).unwrap() {
+            n.pool = Some("own".into());
+        }
+        let out = cards(&nodes);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_ips.as_ref().map(Vec::len), Some(6));
+
+        // No pool at all: a card per node, as before pools existed.
+        for n in nodes.get_mut(&env).unwrap() {
+            n.pool = None;
+        }
+        assert_eq!(cards(&nodes).len(), 3);
+    }
+
+    #[test]
     fn pool_collapses_to_one_card_and_drops_offline_ips() {
         use fcore::{Connection, NodeStatus, NodeType, Proto};
         use std::collections::HashMap;
