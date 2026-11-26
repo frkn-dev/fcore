@@ -25,6 +25,20 @@
   а код с 0.7.48 отдаёт в `server` входной IP ноды и домен только в `sni` (иначе QUIC-хендшейк
   уходит в туннель, который сам же и строится) — тест приведён к коду.
   **Проверка:** `cargo test --lib` 131 ok, `cargo test --bin api --no-default-features` 350 ok.
+  **Выкачено на прод 26.11 20:15 MSK:** бинарь `sha256 42fe8483…48a22` (21 030 608 байт,
+  `ELF x86-64`, собран на build01 за 31 мин), бэкап `/opt/api/api.prev-20261126-201504`,
+  `/healthcheck` = `Ok (v0.7.48)`, `/status` 20 нод. Миграция `0034` применена — 4 ноды
+  `custompersonal` с `pool='own'` обнулены (у `dbe10c74…` теперь 3 карточки вместо 1),
+  бэкап `/root/bk_own_nodes_20261126-201504.csv`. **Чистка отработала на первом же тике:**
+  `purge_expired_connections: hard-deleted 20109 connection(s) of subscriptions expired before
+  2026-08-28 (90 days)` — `connections` 46 250 → 26 153, `connection_traffic` 185 734 → 178 067,
+  `VACUUM (ANALYZE)` сделан. Активные не задеты: 885 подписок / 10 328 коннектов на месте,
+  подписок с `expires_at > now()`, потерявших коннекты — 0.
+  **Грабля миграций:** `deploy/migrate.sh` гоняет **все** файлы на каждом деплое с
+  `ON_ERROR_STOP=1`, а `0033` бьёт `ALTER TYPE transaction_type`, который живёт только в базе
+  `payment`. На базе `api` это уронило бы весь прогон до `0034`, поэтому `0033` обёрнута в
+  `DO $$ … IF EXISTS (pg_type) $$` — вне платёжной базы это no-op. Сам enum в `payment` уже
+  содержал `PLAN_PURCHASE`, платёжную базу не трогали.
 - **24.11.2026 — промежуточный коммит `c9a3a1d` (НЕ запушен):** всё дерево 0.7.47 — v2 peers plane
   (`POST /v1/peers/prepare`, идентичность `(env, pool, public_key)`), `/20` на пул (0029–0032),
   dual plans (`plans.rs`, `POST /subscription/{id}/plan`), вложенный `report{}`, union трафика,
