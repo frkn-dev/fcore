@@ -6,6 +6,7 @@
 //! inserted" instead of an error: the caller decides whether that means
 //! "take the next address" or "this key is already live".
 
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -428,6 +429,7 @@ impl PgPeers {
         expires_at: Option<DateTime<Utc>>,
         traffic_limit: Option<i64>,
         shards: &[(String, i64)],
+        announced: &HashMap<String, HashSet<Tag>>,
     ) -> Result<Option<(AccessRow, i64, i64, bool)>> {
         if shards.is_empty() {
             return Ok(None);
@@ -447,6 +449,10 @@ impl PgPeers {
         let Some(env) = pick_shard(&tx, subscription_id, plan, shards).await? else {
             return Ok(None);
         };
+
+        // A shard serves exactly what its nodes announce; the grant must not
+        // name anything else (see `filter_protos_for_env`).
+        let protos: Vec<Tag> = filter_protos_for_env(protos, &env.to_string(), announced);
 
         let row = tx
             .query_one(
@@ -532,6 +538,7 @@ impl PgPeers {
         days: i64,
         add_traffic_bytes: i64,
         shards: &[(String, i64)],
+        announced: &HashMap<String, HashSet<Tag>>,
     ) -> Result<PlanFulfilment> {
         let mut manager = self.manager.lock().await;
         let client = manager.get_client().await?;
@@ -585,6 +592,10 @@ impl PgPeers {
                 overflow: false,
             });
         };
+
+        // Same filter as `assign_grant`: the grant names only what the chosen
+        // shard actually serves.
+        let protos: Vec<Tag> = filter_protos_for_env(protos, &env.to_string(), announced);
 
         // The row this purchase extends, locked: the term and the quota are
         // computed from it below.
@@ -2202,6 +2213,39 @@ async fn pick_shard(
         .or_else(|| overflow_pick.map(|(env, _)| env)))
 }
 
+/// Narrow a requested protocol list to what the picked shard actually serves.
+///
+/// A shard declares its protocols through the inbounds its serving nodes
+/// announce — nothing in the config lists them. A tag the env does not serve
+/// would otherwise sit in the grant forever (the upsert only unions), promising
+/// cards no node can build and letting the v1 plane mint configs nobody answers.
+///
+/// Fails open twice on purpose: an env missing from `announced`, or one that
+/// announces nothing, means the mesh is not loaded (or every machine is down).
+/// Stripping the grant then would take a paying user's rights away for a
+/// transient condition, so the request is kept as-is.
+pub(crate) fn filter_protos_for_env(
+    protos: &[Tag],
+    env: &str,
+    announced: &HashMap<String, HashSet<Tag>>,
+) -> Vec<Tag> {
+    match announced.get(env) {
+        Some(tags) if !tags.is_empty() => {
+            let kept: Vec<Tag> = protos
+                .iter()
+                .copied()
+                .filter(|tag| tags.contains(tag))
+                .collect();
+            if kept.is_empty() {
+                protos.to_vec()
+            } else {
+                kept
+            }
+        }
+        _ => protos.to_vec(),
+    }
+}
+
 fn access_from_row(row: &tokio_postgres::Row) -> AccessRow {
     let env: String = row.get("env");
     AccessRow {
@@ -2256,5 +2300,83 @@ fn peer_watermark_from_row(row: &tokio_postgres::Row) -> PeerWatermark {
         uplink: row.get("uplink"),
         downlink: row.get("downlink"),
         last_persist_at: row.get("last_persist_at"),
+    }
+}
+
+#[cfg(test)]
+mod grant_filter_tests {
+    use super::filter_protos_for_env;
+    use fcore::Tag;
+    use std::collections::{HashMap, HashSet};
+
+    fn announced(pairs: &[(&str, &[Tag])]) -> HashMap<String, HashSet<Tag>> {
+        pairs
+            .iter()
+            .map(|(env, tags)| (env.to_string(), tags.iter().copied().collect()))
+            .collect()
+    }
+
+    /// The junk that started this: a key activation carries every protocol the
+    /// catalogue names, while the shard only serves peer tunnels. The grant must
+    /// come out with the peer tags alone, never with vless/h2 nobody answers.
+    #[test]
+    fn a_peer_only_shard_drops_the_v1_protocols() {
+        let asked = [
+            Tag::AmneziaPeer,
+            Tag::WireguardPeer,
+            Tag::Hysteria2,
+            Tag::VlessTcpReality,
+            Tag::VlessGrpcReality,
+            Tag::VlessXhttpCdn,
+            Tag::Wireguard,
+            Tag::AmneziaWg,
+        ];
+        let mesh = announced(&[("0001", &[Tag::AmneziaPeer, Tag::WireguardPeer])]);
+
+        let kept = filter_protos_for_env(&asked, "0001", &mesh);
+
+        assert_eq!(kept, vec![Tag::AmneziaPeer, Tag::WireguardPeer]);
+    }
+
+    /// A shard that starts announcing a proxy protocol keeps it without any
+    /// config edit: this is what makes a new pool self-declaring.
+    #[test]
+    fn a_newly_announced_protocol_survives_the_filter() {
+        let asked = [Tag::AmneziaPeer, Tag::Hysteria2];
+        let mesh = announced(&[("0001", &[Tag::AmneziaPeer, Tag::Hysteria2])]);
+
+        let kept = filter_protos_for_env(&asked, "0001", &mesh);
+
+        assert_eq!(kept, vec![Tag::AmneziaPeer, Tag::Hysteria2]);
+    }
+
+    /// Cold start: the mesh snapshot has not loaded, so `announced` is empty.
+    /// Stripping the grant then would take rights away from a payer for a
+    /// transient condition, so the request must pass through untouched.
+    #[test]
+    fn an_empty_mesh_never_strips_a_grant() {
+        let asked = [Tag::AmneziaPeer, Tag::Hysteria2];
+        let kept = filter_protos_for_env(&asked, "0001", &HashMap::new());
+        assert_eq!(kept, asked.to_vec());
+    }
+
+    /// Every node of the env is down: same reasoning as the cold start.
+    #[test]
+    fn an_env_that_announces_nothing_keeps_the_request() {
+        let asked = [Tag::AmneziaPeer, Tag::Hysteria2];
+        let mesh = announced(&[("0001", &[])]);
+        let kept = filter_protos_for_env(&asked, "0001", &mesh);
+        assert_eq!(kept, asked.to_vec());
+    }
+
+    /// Nothing requested is served (a shard picked for the wrong plan): keep the
+    /// request rather than write an empty `protos`, which would leave the
+    /// subscription with no rights at all.
+    #[test]
+    fn a_total_mismatch_keeps_the_request() {
+        let asked = [Tag::Hysteria2];
+        let mesh = announced(&[("0001", &[Tag::AmneziaPeer])]);
+        let kept = filter_protos_for_env(&asked, "0001", &mesh);
+        assert_eq!(kept, asked.to_vec());
     }
 }

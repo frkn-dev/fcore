@@ -523,6 +523,10 @@ where
             };
 
             let shards = crate::http::handlers::peers::live_shards(&memory, &plan).await;
+            // What the shards announce right now: the grant is filtered to the
+            // protocols the chosen env actually serves, so it never promises a
+            // card no node can build.
+            let announced = crate::http::handlers::peers::announced_inbounds(&memory).await;
             match memory
                 .db
                 .peers()
@@ -534,6 +538,7 @@ where
                     expires_at,
                     traffic_limit,
                     &shards,
+                    &announced,
                 )
                 .await
             {

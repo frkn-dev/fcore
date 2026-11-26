@@ -706,8 +706,15 @@ async fn ensure_granted_creds<N, C, S>(
         let mut missing = Vec::new();
 
         for grant in grants {
-            for tag in [fcore::Tag::Hysteria2, fcore::Tag::VlessXhttpCdn] {
-                if !grant.protos.contains(&tag) || have.contains_key(&(grant.env.clone(), tag)) {
+            // Every client_config card this grant allows, not a hard-coded
+            // pair: a shard that starts announcing a new proxy protocol gets
+            // its credentials minted without touching this function.
+            // `CardProto` stays the single place that decides which tags
+            // become cards, so the loop cannot drift from `/v1/locations`.
+            for tag in grant.protos.iter().copied().filter(|tag| {
+                matches!(CardProto::from_tag(*tag), Some(card) if card.kind() == CardKind::ClientConfig)
+            }) {
+                if have.contains_key(&(grant.env.clone(), tag)) {
                     continue;
                 }
 
@@ -1139,6 +1146,44 @@ pub fn plan_of_env(env: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// What each env's **serving** nodes announce, as `env -> tags`.
+///
+/// This is a shard's own protocol list: nothing in the config has to name it.
+/// A shard that starts a pool with a new proxy protocol shows up here the
+/// moment its node registers, and every consumer (grant filtering, credential
+/// minting, card building) follows without a code change.
+///
+/// An empty map means the mesh has not loaded yet — callers must treat that as
+/// "unknown", never as "nothing is served", or a restart would strip grants.
+pub(crate) async fn announced_inbounds<N, C, S>(
+    memory: &MemSync<N, C, S>,
+) -> HashMap<String, HashSet<fcore::Tag>>
+where
+    N: NodeStorageOperations + Sync + Send + Clone + 'static,
+    C: ConnectionApiOperations
+        + ConnectionBaseOperations
+        + Sync
+        + Send
+        + Clone
+        + 'static
+        + From<Connection>
+        + PartialEq,
+    S: SubscriptionOperations + Send + Sync + Clone + PartialEq + 'static,
+{
+    let mem = memory.memory.read().await;
+    let mut out: HashMap<String, HashSet<fcore::Tag>> = HashMap::new();
+    for (_, node) in mem.nodes.iter_nodes() {
+        if !node.status.is_serving() {
+            continue;
+        }
+        let entry = out.entry(node.env.to_string()).or_default();
+        for tag in node.inbounds.keys() {
+            entry.insert(*tag);
+        }
+    }
+    out
 }
 
 /// Shards of a plan that can take a subscription right now.
@@ -2357,7 +2402,23 @@ where
                 }
             }
             match db.delete_device(device_id).await {
-                Ok(_) => json_reply(200, "device deleted", serde_json::json!({ "status": "ok" })),
+                Ok(_) => {
+                    // Postgres is the source of truth, but `POST /v1/peers`
+                    // counts a subscription's devices from the in-memory
+                    // registry (`devices.of_sub`). Leaving the row there keeps
+                    // the user at their device cap after deleting one: the
+                    // replacement install answers `devices_limit` until the api
+                    // restarts. `reap_stale_devices` already drops its own
+                    // rows; the explicit delete must do the same.
+                    memory
+                        .memory
+                        .write()
+                        .await
+                        .peers_state
+                        .devices
+                        .remove(&device_id);
+                    json_reply(200, "device deleted", serde_json::json!({ "status": "ok" }))
+                }
                 Err(e) => db_error("delete_device", e),
             }
         }
@@ -2524,6 +2585,9 @@ where
             );
         };
         let shards = live_shards(&memory, &plan).await;
+        // Same reason as `key.rs`: filter the requested protocols down to what
+        // the chosen shard actually announces.
+        let announced = announced_inbounds(&memory).await;
         return match db
             .assign_grant(
                 req.subscription_id,
@@ -2533,6 +2597,7 @@ where
                 req.expires_at,
                 req.traffic_limit,
                 &shards,
+                &announced,
             )
             .await
         {
@@ -3345,6 +3410,8 @@ where
         .unwrap_or("payment");
     let marker = crate::plans::payment_marker(payment_ref);
 
+    // The grant names only what the chosen shard serves.
+    let announced = announced_inbounds(&memory).await;
     let fulfilled = match memory
         .db
         .peers()
@@ -3357,6 +3424,7 @@ where
             req.days,
             traffic_bytes.unwrap_or(0),
             &shards,
+            &announced,
         )
         .await
     {
