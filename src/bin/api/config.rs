@@ -229,6 +229,13 @@ pub struct PeersConfig {
     /// logged.
     #[serde(default = "default_peers_prune_max_per_tick")]
     pub prune_max_per_tick: usize,
+    /// Origins whose `/key/activate` calls get the peer plane. Absent = every
+    /// activation (the final state); a list = only those callers, so the new
+    /// flow can be opened on beta while production and the app stay on the
+    /// legacy path. Matched against the request's `Origin` header, which only a
+    /// browser sends: an app activation never matches and stays legacy.
+    #[serde(default)]
+    pub activation_peers_origins: Option<Vec<String>>,
 }
 
 fn default_peers_per_device() -> i64 {
@@ -283,6 +290,7 @@ impl Default for PeersConfig {
             prune_legacy_conns: false,
             prune_dry_run: true,
             prune_max_per_tick: default_peers_prune_max_per_tick(),
+            activation_peers_origins: None,
         }
     }
 }

@@ -235,6 +235,26 @@ where
     // outage for a product we are still selling. Re-enable the lite mapping only
     // together with live Super Duper nodes, and only with the owner's approval.
     let plan = key.product.to_string();
+    // A product is not a plan: `standard-gaming`/`full` bundle the classic env
+    // set on top of their extra envs, and only `standard` has shards in
+    // `env_capacity`. Using the product name as the assignment plan answered
+    // `503 plan_not_configured` for every such key — a payer blocked by a naming
+    // mismatch. Products that include the classic set are served from the
+    // `standard` shards; single-env products keep their own name.
+    let plan = if key.product.includes_standard() {
+        "standard".to_string()
+    } else {
+        plan
+    };
+    // The peer plane is for products a shard actually serves. A single-env
+    // product (`gaming`, `bs-prem`) has no shard row, so the peers flow would
+    // quarantine it with 503 while we still sell it; those keep the legacy flow
+    // until their own shard exists.
+    let flow = if flow == ActivationFlow::Peers && !key.product.includes_standard() {
+        ActivationFlow::Legacy
+    } else {
+        flow
+    };
     let catalog_map = match resolver.resolve(key_plan_kind, key.product) {
         Ok(map) => map,
         Err(err) => {
@@ -483,8 +503,13 @@ where
                 // live grant follows it (see `renew_grant_access` below).
                 KeyKind::Standard => (sub_expiry, key.traffic_bytes),
                 KeyKind::Lite => {
+                    // `LITE`, not the assignment plan: `purchase_terms` only
+                    // applies a quota when it is told the plan is the volume
+                    // one, and a lite key's product is `standard`. Passing the
+                    // assignment plan here gave the quota buyer a grant with no
+                    // limit at all.
                     let terms = crate::plans::purchase_terms(
-                        &plan,
+                        crate::plans::LITE,
                         0,
                         key.traffic_bytes,
                         existing_terms,
@@ -772,6 +797,11 @@ where
                     // «создана подписка».
                     "merged": merged,
                     "key": serde_json::to_value(&key).unwrap_or(serde_json::Value::Null),
+                    // The pre-shard envelope, kept so a client that only knows
+                    // `response.instance.Key` still finds its `subscription_id`
+                    // and does not show «Connection failed» on a successful
+                    // activation.
+                    "instance": { "Key": serde_json::to_value(&key).unwrap_or(serde_json::Value::Null) },
                 });
                 if let Some((env, used, limit, overflow)) = granted {
                     response["env"] = serde_json::json!(env);

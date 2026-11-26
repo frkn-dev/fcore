@@ -1127,8 +1127,49 @@ where
             }))
             .and(warp::any().map(move || activate_conn_resolver.clone()))
             .and(warp::any().map(move || mrkting_config.clone()))
-            .and(warp::any().map(|| crate::http::handlers::key::ActivationFlow::Legacy))
-            .and_then(post_activate_key_handler);
+            // The peer plane for new activations: the payer gets a grant on a
+            // shard, and v1 connections are still created from that grant, so a
+            // client without card support keeps working. `activation_peers_origins`
+            // narrows it to a list of callers (beta first), and products a shard
+            // does not serve fall back to the legacy flow inside the handler.
+            .and(warp::header::optional::<String>("origin"))
+            .and(warp::any().map({
+                let origins = peers_cfg.activation_peers_origins.clone();
+                move || origins.clone()
+            }))
+            .and_then(
+                |req,
+                 trace_id: Option<String>,
+                 sync: MemSync<N, C, S>,
+                 wg: fcore::IpAddrMask,
+                 awg: fcore::IpAddrMask,
+                 awg_mobile: Option<fcore::IpAddrMask>,
+                 resolver: crate::entitlements::ConnResolver,
+                 mrkting: Option<crate::config::MrktingConfig>,
+                 origin: Option<String>,
+                 origins: Option<Vec<String>>| async move {
+                    use crate::http::handlers::key::ActivationFlow;
+                    let flow = match origins {
+                        None => ActivationFlow::Peers,
+                        Some(list) => {
+                            let matched = origin.as_deref().is_some_and(|o| {
+                                let o = o.trim_end_matches('/');
+                                list.iter()
+                                    .any(|allowed| allowed.trim_end_matches('/').eq_ignore_ascii_case(o))
+                            });
+                            if matched {
+                                ActivationFlow::Peers
+                            } else {
+                                ActivationFlow::Legacy
+                            }
+                        }
+                    };
+                    post_activate_key_handler(
+                        req, trace_id, sync, wg, awg, awg_mobile, resolver, mrkting, flow,
+                    )
+                    .await
+                },
+            );
 
         // New flow: same body as /v1/key/activate, but access is granted from
         // shards and grants. The site points here when testing is over; there
