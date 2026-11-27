@@ -151,11 +151,13 @@ pub struct PeerCleanupRow {
 
 pub struct PgPeers {
     pub manager: Arc<Mutex<PgClientManager>>,
+    /// How a plan spreads new subscriptions over its shards; see `peers::Balance`.
+    pub balance: crate::peers::Balance,
 }
 
 impl PgPeers {
-    pub fn new(manager: Arc<Mutex<PgClientManager>>) -> Self {
-        Self { manager }
+    pub fn new(manager: Arc<Mutex<PgClientManager>>, balance: crate::peers::Balance) -> Self {
+        Self { manager, balance }
     }
 
     /// Load the whole peers layer in one pass: what the api keeps in memory
@@ -447,7 +449,7 @@ impl PgPeers {
         .await?;
 
         // Sticky first: an existing grant of this plan pins the shard.
-        let Some(env) = pick_shard(&tx, subscription_id, plan, shards).await? else {
+        let Some(env) = pick_shard(&tx, subscription_id, plan, shards, self.balance).await? else {
             return Ok(None);
         };
 
@@ -581,7 +583,7 @@ impl PgPeers {
             });
         }
 
-        let Some(env) = pick_shard(&tx, subscription_id, plan, shards).await? else {
+        let Some(env) = pick_shard(&tx, subscription_id, plan, shards, self.balance).await? else {
             // No shard can take this plan: the caller answers 503 and the money
             // is not turned into rights nobody serves.
             tx.rollback().await.ok();
@@ -2161,6 +2163,7 @@ async fn pick_shard(
     subscription_id: Uuid,
     plan: &str,
     shards: &[(String, i64)],
+    balance: crate::peers::Balance,
 ) -> Result<Option<String>> {
     // Sticky first: an existing grant of this plan pins the shard.
     let existing = tx
@@ -2179,61 +2182,182 @@ async fn pick_shard(
         return Ok(Some(row.get::<_, String>("env")));
     }
 
-    // Shards with room first, then the least loaded of them by fill ratio — a
-    // shard whose users were revoked is filled again at once, because only live
-    // grants are counted. A shard at its own `max_subscriptions` is a soft cap:
-    // it is skipped while any other shard has room, and only an all-full plan
-    // lands here.
-    let mut best: Option<(String, f64)> = None;
-    let mut overflow_pick: Option<(String, i64)> = None;
+    // Every candidate's live load in one round trip: the share arithmetic below
+    // needs all of them, and the old per-shard query made this O(shards).
+    let envs: Vec<String> = shards.iter().map(|(env, _)| env.clone()).collect();
+    let load_rows = tx
+        .query(
+            r#"
+            SELECT c.env, count(sa.id) AS used
+            FROM unnest($1::text[]) AS c(env)
+            LEFT JOIN subscription_access sa
+                   ON sa.env = c.env AND sa.plan = $2 AND sa.revoked_at IS NULL
+            GROUP BY c.env
+            "#,
+            &[&envs, &plan],
+        )
+        .await?;
+    let mut used_of: HashMap<String, i64> = load_rows
+        .iter()
+        .map(|row| (row.get::<_, String>("env"), row.get::<_, i64>("used")))
+        .collect();
+
+    // Signup flow of the last hour, per shard. `Growth` caps a shard at its
+    // share of this flow, so a shard added today ramps up alongside the others
+    // instead of swallowing the entire funnel while they sit idle.
+    let mut recent_of: HashMap<String, i64> = HashMap::new();
+    if balance == crate::peers::Balance::Growth {
+        let rows = tx
+            .query(
+                r#"
+                SELECT env, count(*) AS added
+                FROM subscription_access
+                WHERE plan = $1
+                  AND revoked_at IS NULL
+                  AND created_at > now() - interval '1 hour'
+                GROUP BY env
+                "#,
+                &[&plan],
+            )
+            .await?;
+        recent_of = rows
+            .iter()
+            .map(|row| (row.get::<_, String>("env"), row.get::<_, i64>("added")))
+            .collect();
+    }
+
+    Ok(choose_shard(shards, &used_of, &recent_of, balance))
+}
+
+/// The allocation rule, split out of `pick_shard` so it is testable without a
+/// database.
+///
+/// `used` is the live grant count per shard and `recent` the signups of the last
+/// hour per shard (empty under `Equalize`). `None` means no shard can take the
+/// user at all, which the caller turns into a 503 — that only happens when the
+/// caller passed an empty shard list, since an all-full plan still overflows.
+fn choose_shard(
+    shards: &[(String, i64)],
+    used_of: &HashMap<String, i64>,
+    recent_of: &HashMap<String, i64>,
+    balance: crate::peers::Balance,
+) -> Option<String> {
+    if shards.is_empty() {
+        return None;
+    }
+
+    // Capacity weight of a shard: its share of the plan's declared caps. With an
+    // uncapped shard in the set the weights are unknown, so every shard gets an
+    // equal share rather than an invented denominator.
+    let total_limit: i64 = shards.iter().map(|(_, limit)| *limit).filter(|l| *l > 0).sum();
+    let capped_count = shards.iter().filter(|(_, limit)| *limit > 0).count();
+    let weighted = capped_count == shards.len() && total_limit > 0;
+    let share_of = |limit: i64| -> f64 {
+        if weighted {
+            limit as f64 / total_limit as f64
+        } else {
+            1.0 / shards.len() as f64
+        }
+    };
+    let total_recent: i64 = shards
+        .iter()
+        .map(|(env, _)| recent_of.get(env).copied().unwrap_or(0))
+        .sum();
+
+    // `best` honours the growth share; `best_any` ignores it and is the fallback
+    // that keeps the soft cap soft — a user is never refused while any shard has
+    // room, even when every shard is over its share for the hour.
+    let mut best: Option<(&str, f64)> = None;
+    let mut best_any: Option<(&str, f64)> = None;
+    let mut overflow_pick: Option<(&str, f64)> = None;
 
     for (candidate, limit) in shards {
-        let used: i64 = tx
-            .query_one(
-                r#"
-                SELECT count(*) AS used
-                FROM subscription_access
-                WHERE env = $1 AND plan = $2 AND revoked_at IS NULL
-                "#,
-                &[candidate, &plan],
-            )
-            .await?
-            .get("used");
+        let used = used_of.get(candidate).copied().unwrap_or(0);
+        // A shard with no cap is ordered by absolute count, which is the same
+        // ordering with an unknown denominator.
+        let ratio = if *limit > 0 {
+            used as f64 / *limit as f64
+        } else {
+            used as f64
+        };
 
         if *limit > 0 && used >= *limit {
+            // Soft cap: skipped while any other shard has room, and only an
+            // all-full plan lands here. Compare by ratio, so the smallest shard
+            // is not the one that takes the overflow.
             let better = match &overflow_pick {
                 None => true,
-                Some((env, used_best)) => {
-                    used < *used_best || (used == *used_best && candidate < env)
+                Some((env, best_ratio)) => {
+                    ratio < *best_ratio || (ratio == *best_ratio && candidate.as_str() < *env)
                 }
             };
             if better {
-                overflow_pick = Some((candidate.clone(), used));
+                overflow_pick = Some((candidate.as_str(), ratio));
             }
             continue;
         }
 
-        let ratio = if *limit > 0 {
-            used as f64 / *limit as f64
-        } else {
-            // No cap on this shard: compare absolute counts, which is the same
-            // ordering with an unknown denominator.
-            used as f64
+        let better_any = match &best_any {
+            None => true,
+            Some((env, best_ratio)) => {
+                ratio < *best_ratio || (ratio == *best_ratio && candidate.as_str() < *env)
+            }
         };
+        if better_any {
+            best_any = Some((candidate.as_str(), ratio));
+        }
+
+        if balance == crate::peers::Balance::Growth && shards.len() > 1 {
+            let recent = recent_of.get(candidate).copied().unwrap_or(0);
+            // `+1` counts the user being placed right now, so with two equal
+            // shards and an empty hour the first signup may land anywhere and
+            // the second one is pushed to the other.
+            let allowed = (share_of(*limit) * (total_recent + 1) as f64).ceil() as i64;
+            if recent >= allowed.max(1) {
+                tracing::debug!(
+                    env = %candidate,
+                    recent,
+                    allowed,
+                    "shard is at its growth share, skipped for this signup"
+                );
+                continue;
+            }
+        }
+
         let better = match &best {
             None => true,
             Some((env, best_ratio)) => {
-                ratio < *best_ratio || (ratio == *best_ratio && candidate < env)
+                ratio < *best_ratio || (ratio == *best_ratio && candidate.as_str() < *env)
             }
         };
         if better {
-            best = Some((candidate.clone(), ratio));
+            best = Some((candidate.as_str(), ratio));
         }
     }
 
-    Ok(best
-        .map(|(env, _)| env)
-        .or_else(|| overflow_pick.map(|(env, _)| env)))
+    let chosen = match best {
+        Some(pick) => Some(pick),
+        None => match best_any {
+            Some(pick) => {
+                tracing::warn!(
+                    "every shard is at its growth share for this hour; placing the signup on the least filled one"
+                );
+                Some(pick)
+            }
+            None => overflow_pick,
+        },
+    };
+
+    if let Some((env, ratio)) = &chosen {
+        tracing::debug!(
+            env = %env,
+            fill = ratio,
+            mode = balance.as_str(),
+            "shard picked"
+        );
+    }
+
+    chosen.map(|(env, _)| env.to_string())
 }
 
 /// Narrow a requested protocol list to what the picked shard actually serves.
@@ -2323,6 +2447,140 @@ fn peer_watermark_from_row(row: &tokio_postgres::Row) -> PeerWatermark {
         uplink: row.get("uplink"),
         downlink: row.get("downlink"),
         last_persist_at: row.get("last_persist_at"),
+    }
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::choose_shard;
+    use crate::peers::Balance;
+    use std::collections::HashMap;
+
+    fn shards(pairs: &[(&str, i64)]) -> Vec<(String, i64)> {
+        pairs.iter().map(|(env, limit)| (env.to_string(), *limit)).collect()
+    }
+
+    fn counts(pairs: &[(&str, i64)]) -> HashMap<String, i64> {
+        pairs.iter().map(|(env, n)| (env.to_string(), *n)).collect()
+    }
+
+    /// The production shape: `0001` at 324/500 and a brand-new `0002`.
+    /// `Equalize` pours every signup into `0002` until it catches up; `Growth`
+    /// splits them, so the free slots of `0001` keep being used.
+    #[test]
+    fn growth_splits_signups_instead_of_dumping_them_into_the_new_shard() {
+        let shards = shards(&[("0001", 500), ("0002", 500)]);
+        let used = counts(&[("0001", 324)]);
+
+        // Equalize: the least filled shard takes everything.
+        let equalize = choose_shard(&shards, &used, &HashMap::new(), Balance::Equalize);
+        assert_eq!(equalize.as_deref(), Some("0002"));
+
+        // Growth: 0002 already took its half of the flow, so the next signup
+        // must go to 0001 — even though 0002 is emptier.
+        let mut recent = counts(&[("0002", 1)]);
+        let pick = choose_shard(&shards, &used, &recent, Balance::Growth);
+        assert_eq!(pick.as_deref(), Some("0001"));
+
+        // ...and with the flow balanced, the emptier shard wins again.
+        recent = counts(&[("0001", 1), ("0002", 1)]);
+        let pick = choose_shard(&shards, &used, &recent, Balance::Growth);
+        assert_eq!(pick.as_deref(), Some("0002"));
+    }
+
+    /// A single shard is never throttled by the growth share: there is nowhere
+    /// else to put the user.
+    #[test]
+    fn a_lone_shard_takes_every_signup() {
+        let shards = shards(&[("0001", 500)]);
+        let used = counts(&[("0001", 10)]);
+        let recent = counts(&[("0001", 99)]);
+        assert_eq!(
+            choose_shard(&shards, &used, &recent, Balance::Growth).as_deref(),
+            Some("0001")
+        );
+    }
+
+    /// The cap is soft: with every shard over its share for the hour the user
+    /// still lands somewhere, on the least filled shard.
+    #[test]
+    fn every_shard_over_its_share_still_accepts() {
+        let shards = shards(&[("0001", 500), ("0002", 500)]);
+        let used = counts(&[("0001", 100), ("0002", 200)]);
+        let recent = counts(&[("0001", 50), ("0002", 50)]);
+        assert_eq!(
+            choose_shard(&shards, &used, &recent, Balance::Growth).as_deref(),
+            Some("0001")
+        );
+    }
+
+    /// `max_subscriptions` is a soft cap too: a full shard is skipped while any
+    /// other has room, and only an all-full plan overflows — onto the shard with
+    /// the lowest ratio, not the lowest absolute count.
+    #[test]
+    fn a_full_shard_is_skipped_and_the_overflow_goes_to_the_least_filled() {
+        let shards = shards(&[("big", 1000), ("small", 10)]);
+
+        // `small` is full, `big` is not: the signup goes to `big`.
+        let used = counts(&[("big", 10), ("small", 10)]);
+        assert_eq!(
+            choose_shard(&shards, &used, &HashMap::new(), Balance::Growth).as_deref(),
+            Some("big")
+        );
+
+        // Both full: overflow lands on `big` (1% fill), not on `small` (100%),
+        // even though `small` has fewer absolute grants.
+        let used = counts(&[("big", 1000), ("small", 10)]);
+        assert_eq!(
+            choose_shard(&shards, &used, &HashMap::new(), Balance::Growth).as_deref(),
+            Some("big")
+        );
+    }
+
+    /// Capacity weight is the declared cap, not an equal share: a shard that
+    /// holds twice the users may take twice the flow.
+    #[test]
+    fn share_follows_the_declared_capacity() {
+        let shards = shards(&[("big", 1000), ("small", 500)]);
+        let used = counts(&[("big", 100), ("small", 100)]);
+
+        // 3 of 4 recent signups went to `big` — over its 2/3 share by eye, but
+        // the `+1` headroom for the user being placed still admits it, and it is
+        // the emptier shard.
+        let recent = counts(&[("big", 3), ("small", 1)]);
+        assert_eq!(
+            choose_shard(&shards, &used, &recent, Balance::Growth).as_deref(),
+            Some("big")
+        );
+
+        // 4 of 5 is past the headroom: the next signup must go to `small`,
+        // even though `big` is the emptier shard.
+        let recent = counts(&[("big", 4), ("small", 1)]);
+        assert_eq!(
+            choose_shard(&shards, &used, &recent, Balance::Growth).as_deref(),
+            Some("small")
+        );
+    }
+
+    /// An uncapped shard makes the weights unknown, so the flow is split evenly
+    /// instead of dividing by a denominator that does not exist.
+    #[test]
+    fn an_uncapped_shard_falls_back_to_equal_shares() {
+        let shards = shards(&[("a", 0), ("b", 500)]);
+        let used = counts(&[("a", 0), ("b", 0)]);
+        let recent = counts(&[("a", 1)]);
+        assert_eq!(
+            choose_shard(&shards, &used, &recent, Balance::Growth).as_deref(),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn no_shards_means_no_pick() {
+        assert_eq!(
+            choose_shard(&[], &HashMap::new(), &HashMap::new(), Balance::Growth),
+            None
+        );
     }
 }
 

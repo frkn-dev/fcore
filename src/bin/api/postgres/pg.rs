@@ -89,14 +89,21 @@ impl PgClientManager {
 #[derive(Clone)]
 pub struct PgContext {
     pub manager: Arc<Mutex<PgClientManager>>,
+    /// How a plan spreads new subscriptions over its shards. Passed down from
+    /// `[service.peers] balancing`; see `peers::Balance`.
+    pub balance: crate::peers::Balance,
 }
 
 impl PgContext {
-    pub async fn init(config: &PostgresConfig) -> Result<Self> {
+    pub async fn init(
+        config: &PostgresConfig,
+        balance: crate::peers::Balance,
+    ) -> Result<Self> {
         let manager = PgClientManager::new(config.clone()).await?;
 
         Ok(Self {
             manager: Arc::new(Mutex::new(manager)),
+            balance,
         })
     }
 
@@ -105,7 +112,7 @@ impl PgContext {
     }
 
     pub fn peers(&self) -> crate::postgres::peers::PgPeers {
-        crate::postgres::peers::PgPeers::new(self.manager.clone())
+        crate::postgres::peers::PgPeers::new(self.manager.clone(), self.balance)
     }
 
     pub fn conn(&self) -> PgConn {

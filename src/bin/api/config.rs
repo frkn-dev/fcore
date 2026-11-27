@@ -196,6 +196,16 @@ pub struct PeersConfig {
     /// machine of one customer).
     #[serde(default = "default_auto_subnet_prefix")]
     pub auto_subnet_prefix: u8,
+    /// How a plan spreads new subscriptions over its shards.
+    ///
+    /// `growth` (default): a shard takes at most its share of the recent signup
+    /// flow, so a freshly added shard ramps up instead of swallowing the whole
+    /// funnel while its siblings sit idle.
+    /// `equalize`: every new user goes to the least-filled shard by ratio; a new
+    /// shard takes 100% of signups until it catches up, but all shards end at
+    /// the same fill.
+    #[serde(default)]
+    pub balancing: crate::peers::Balance,
     /// Shards declared here are applied at startup: plan, title, kind and caps
     /// are written to `env_capacity`, so provisioning is a config edit instead
     /// of hand-written SQL. The admin endpoint writes the same row for changes
@@ -284,6 +294,7 @@ impl Default for PeersConfig {
             subnets: HashMap::new(),
             auto_subnet_pool: None,
             auto_subnet_prefix: default_auto_subnet_prefix(),
+            balancing: crate::peers::Balance::default(),
             shards: HashMap::new(),
             remember_days: default_peers_remember_days(),
             stale_device_days: default_peers_stale_device_days(),

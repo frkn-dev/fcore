@@ -45,6 +45,64 @@ impl Default for ShardKind {
     }
 }
 
+/// How a plan spreads new subscriptions over its shards.
+///
+/// `Equalize` (the old behaviour) sends every new user to the least-filled
+/// shard by ratio, so a fresh shard absorbs 100% of signups until it catches
+/// up with the rest — its siblings sit idle meanwhile, but all shards end up at
+/// the same fill.
+///
+/// `Growth` caps how much of the recent signup flow one shard may take: at most
+/// its share of the plan's capacity. A new shard then ramps up gradually
+/// instead of swallowing the whole funnel, and the older shards keep filling
+/// their free slots. The price is that fill ratios never equalise: the older
+/// shard reaches its cap first and the new one takes over from there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Balance {
+    Equalize,
+    Growth,
+}
+
+impl Default for Balance {
+    fn default() -> Self {
+        // A new shard usually starts with fewer nodes than the one it joins:
+        // letting it swallow the entire funnel is the failure we are avoiding.
+        Self::Growth
+    }
+}
+
+impl Balance {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "equalize" | "equalise" | "ratio" => Some(Self::Equalize),
+            "growth" | "flow" => Some(Self::Growth),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Equalize => "equalize",
+            Self::Growth => "growth",
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Balance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Balance::parse(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown balancing mode `{}`: expected `growth` or `equalize`",
+                raw
+            ))
+        })
+    }
+}
+
 impl ShardKind {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
