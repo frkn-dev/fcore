@@ -206,6 +206,13 @@ pub struct PeersConfig {
     /// the same fill.
     #[serde(default)]
     pub balancing: crate::peers::Balance,
+    /// Fill percent at which a shard stops taking new signups while another
+    /// shard of the plan is still below it (`85` = 85%). This is what makes a
+    /// nearly full shard hand its flow to an emptier sibling instead of both
+    /// filling up in lockstep. `0` disables the threshold; a shard at its cap is
+    /// still skipped, and a user is never refused while any shard has room.
+    #[serde(default)]
+    pub soft_pct: Option<u8>,
     /// Shards declared here are applied at startup: plan, title, kind and caps
     /// are written to `env_capacity`, so provisioning is a config edit instead
     /// of hand-written SQL. The admin endpoint writes the same row for changes
@@ -295,6 +302,7 @@ impl Default for PeersConfig {
             auto_subnet_pool: None,
             auto_subnet_prefix: default_auto_subnet_prefix(),
             balancing: crate::peers::Balance::default(),
+            soft_pct: None,
             shards: HashMap::new(),
             remember_days: default_peers_remember_days(),
             stale_device_days: default_peers_stale_device_days(),

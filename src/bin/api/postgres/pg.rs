@@ -90,20 +90,20 @@ impl PgClientManager {
 pub struct PgContext {
     pub manager: Arc<Mutex<PgClientManager>>,
     /// How a plan spreads new subscriptions over its shards. Passed down from
-    /// `[service.peers] balancing`; see `peers::Balance`.
-    pub balance: crate::peers::Balance,
+    /// `[service.peers] balancing` and `soft_pct`; see `peers::Spreading`.
+    pub spreading: crate::peers::Spreading,
 }
 
 impl PgContext {
     pub async fn init(
         config: &PostgresConfig,
-        balance: crate::peers::Balance,
+        spreading: crate::peers::Spreading,
     ) -> Result<Self> {
         let manager = PgClientManager::new(config.clone()).await?;
 
         Ok(Self {
             manager: Arc::new(Mutex::new(manager)),
-            balance,
+            spreading,
         })
     }
 
@@ -112,7 +112,7 @@ impl PgContext {
     }
 
     pub fn peers(&self) -> crate::postgres::peers::PgPeers {
-        crate::postgres::peers::PgPeers::new(self.manager.clone(), self.balance)
+        crate::postgres::peers::PgPeers::new(self.manager.clone(), self.spreading)
     }
 
     pub fn conn(&self) -> PgConn {

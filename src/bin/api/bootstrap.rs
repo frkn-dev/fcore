@@ -50,7 +50,13 @@ where
     Vec<(uuid::Uuid, Connection)>: FromIterator<(uuid::Uuid, C)>,
 {
     pub async fn bootstrap(settings: ServiceSettings) -> Result<Arc<Service<N, C, S>>> {
-        let db = PgContext::init(&settings.pg, settings.service.peers.balancing).await?;
+        let db = PgContext::init(
+            &settings.pg,
+            crate::peers::Spreading::with_percent(
+                settings.service.peers.balancing,
+                settings.service.peers.soft_pct,
+            ),
+        ).await?;
 
         // The IAP binding table is created lazily at startup when Apple IAP is configured.
         if settings.service.apple.is_some() {

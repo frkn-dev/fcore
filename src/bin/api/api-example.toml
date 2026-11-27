@@ -104,6 +104,13 @@ agw_private_key_path = "/etc/fcore/api/agw_private.pem"
 # # `equalize`: every signup goes to the least-filled shard; a new shard takes
 # # 100% until it catches up, but all shards end at the same fill.
 # balancing = "growth"
+# # Fill percent at which a shard stops taking NEW signups while another shard of
+# # the same plan is still below it. This is what makes a nearly full shard hand
+# # its flow to an emptier sibling: at 90% vs 30% the full one gets nothing until
+# # the empty one reaches 85%. `0` disables the threshold. A shard at its
+# # `max_subscriptions` is skipped regardless, and a user is never refused while
+# # any shard has room.
+# soft_pct = 85
 # # Remove v1 connections whose (env, proto) the subscription no longer holds a
 # # grant for: a migration to a shard, a revoked grant, a downgrade. Off until
 # # the client can build peers — a pruned connection otherwise leaves the user

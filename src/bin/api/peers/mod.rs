@@ -103,6 +103,64 @@ impl<'de> serde::Deserialize<'de> for Balance {
     }
 }
 
+/// Where a shard stops taking new users, and how it is spread over the shards.
+///
+/// `soft_pct` is the fill above which a shard stops accepting signups **while
+/// another shard is still below it**. That is what makes a shard that filled up
+/// hand its flow to an emptier sibling instead of topping both up in lockstep:
+/// at 90% vs 30% the full one is skipped entirely until the empty one reaches
+/// the threshold. Below the threshold the flow split in `Balance::Growth`
+/// applies; once the threshold kicks in, the remaining shards take everything,
+/// because there is nowhere else to put the user.
+///
+/// `hysteresis` is the band below `soft_pct` a shard must reach before the
+/// full shard is allowed back. Without it a shard parked exactly on the
+/// threshold would flap in and out of the rotation on every signup.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spreading {
+    pub balance: Balance,
+    /// `0.85` = a shard at 85% of its cap stops taking new users while a
+    /// sibling is below it. `0.0` disables the threshold.
+    pub soft_pct: f64,
+    pub hysteresis: f64,
+}
+
+impl Default for Spreading {
+    fn default() -> Self {
+        Self {
+            balance: Balance::default(),
+            soft_pct: 0.85,
+            hysteresis: 0.05,
+        }
+    }
+}
+
+impl Spreading {
+    /// The threshold as an operator writes it: `soft_pct = 85` in the config.
+    /// Out-of-range values are clamped rather than refused — a typo in a
+    /// capacity knob must not stop the api from booting.
+    pub fn with_percent(balance: Balance, soft_pct: Option<u8>) -> Self {
+        let default = Self::default();
+        Self {
+            balance,
+            soft_pct: soft_pct
+                .map(|pct| (pct.min(100) as f64) / 100.0)
+                .unwrap_or(default.soft_pct),
+            hysteresis: default.hysteresis,
+        }
+    }
+
+    /// A shard this full stops taking signups while a sibling has room.
+    pub fn is_hot(&self, fill: f64) -> bool {
+        self.soft_pct > 0.0 && fill >= self.soft_pct
+    }
+
+    /// The fill a sibling must fall to before a hot shard takes users again.
+    pub fn cool_below(&self) -> f64 {
+        (self.soft_pct - self.hysteresis).max(0.0)
+    }
+}
+
 impl ShardKind {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
