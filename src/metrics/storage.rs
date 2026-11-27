@@ -10,6 +10,19 @@ use crate::zmq::{publisher::Publisher, topic::Topic};
 /// connection. Three metric intervals: one missed push must not look offline.
 pub const ONLINE_PEER_FRESH_MS: i64 = 180_000;
 
+/// Identity of the tunnel a traffic series belongs to.
+///
+/// A node publishes the same peer once per interface it sits on, so the series
+/// tags are not unique per tunnel: `peer_id` is stable across protocols and
+/// `conn_id` names a legacy connection. Anything with neither tag cannot be
+/// attributed to a tunnel and is skipped.
+fn tunnel_identity(tags: &BTreeMap<String, String>) -> Option<String> {
+    if let Some(peer_id) = tags.get("peer_id") {
+        return Some(format!("peer:{peer_id}"));
+    }
+    tags.get("conn_id").map(|conn_id| format!("conn:{conn_id}"))
+}
+
 pub trait HasMetrics {
     fn metrics(&self) -> &MetricBuffer;
     fn node_settings(&self) -> &Node;
@@ -649,16 +662,18 @@ impl MetricStorage {
 
     /// Tunnels a node reports right now, and how many of them are moving traffic.
     ///
-    /// Both peer families publish `user.traffic.downlink` once per tunnel — with
-    /// a `peer_id` tag for shard peers and a `conn_id` tag for the older
-    /// connections — so counting that series counts tunnels without knowing
-    /// which protocol they belong to. `uplink` is its sibling and would double
-    /// every tunnel.
+    /// Every tunnel publishes `user.traffic.downlink` once per interface it sits
+    /// on — `peer_id` for shard peers, `conn_id` for the older connections —
+    /// and a node that runs both AmneziaWG and WireGuard publishes the same peer
+    /// twice (once per `proto`). Counting series therefore overstates the park
+    /// roughly 2×; the count is deduplicated by tunnel identity instead:
+    /// `peer_id` when present, `conn_id` otherwise. `uplink` is the sibling
+    /// series and would double everything again, so only `downlink` is read.
     ///
     /// A series outlives its tunnel: the metric store keeps the last point
-    /// until retention drops it. Hence `total` counts only series sampled within
-    /// `fresh_ms`, and `active` only those whose counter actually grew inside
-    /// `active_window_ms` — a tunnel that is up but idle is not traffic.
+    /// until retention drops it. Hence only series sampled within `fresh_ms`
+    /// count, and a tunnel is `active` only if one of its series actually grew
+    /// inside `active_window_ms` — a tunnel that is up but idle is not traffic.
     ///
     /// `None` means the node has no traffic series at all (fresh boot, or a
     /// build that does not publish them) — the caller must not read it as zero.
@@ -674,16 +689,21 @@ impl MetricStorage {
         let node_map = self.inner.get(node_id)?;
 
         let mut seen = 0usize;
-        let mut counts = NodeTunnelCounts::default();
+        // identity -> is this tunnel moving traffic
+        let mut tunnels: HashMap<String, bool> = HashMap::new();
         for entry in node_map.iter() {
             let hash = *entry.key();
             let Some(meta) = self.metadata.get(&hash) else {
                 continue;
             };
-            if meta.value().0 != "user.traffic.downlink" {
+            let (name, tags) = meta.value();
+            if name != "user.traffic.downlink" {
                 continue;
             }
             seen += 1;
+            let Some(identity) = tunnel_identity(tags) else {
+                continue;
+            };
             let points = entry.value();
             let Some(last) = points.back() else {
                 continue;
@@ -691,7 +711,6 @@ impl MetricStorage {
             if last.timestamp < fresh_since {
                 continue;
             }
-            counts.total += 1;
             // The last sample at or before the window start is the baseline;
             // a series younger than the window has none and counts as active
             // only if it already carried bytes.
@@ -701,14 +720,18 @@ impl MetricStorage {
                 .and_then(|idx| points.get(idx))
                 .map(|p| p.value)
                 .unwrap_or(0.0);
-            if last.value > baseline {
-                counts.active += 1;
-            }
+            let grew = last.value > baseline;
+            let slot = tunnels.entry(identity).or_insert(false);
+            *slot = *slot || grew;
         }
 
         if seen == 0 {
             return None;
         }
+        let counts = NodeTunnelCounts {
+            total: tunnels.len(),
+            active: tunnels.values().filter(|active| **active).count(),
+        };
         Some(counts)
     }
 
@@ -980,5 +1003,69 @@ mod tests {
         assert!(output.contains("node_id=\"ab514c21-aaaa-bbbb-cccc-32f8cb1ada40\""));
         assert!(output.contains("hostname=\"test-node\""));
         assert!(output.contains("1024"));
+    }
+
+    /// A node running both AmneziaWG and WireGuard publishes every peer twice,
+    /// once per protocol, with the same `peer_id`. Counting series would report
+    /// double the park; the count must follow the tunnel, not the interface.
+    #[test]
+    fn node_tunnels_counts_a_tunnel_once_across_protocols() {
+        let storage = MetricStorage::new(1000, 3600);
+        let node_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let mut base = BTreeMap::new();
+        base.insert("env".to_string(), "0001".to_string());
+
+        for (peer, proto, bytes) in [
+            ("p1", "amneziawg", 100.0),
+            ("p1", "wireguard", 0.0),
+            ("p2", "amneziawg", 0.0),
+            ("p2", "wireguard", 0.0),
+        ] {
+            let mut tags = base.clone();
+            tags.insert("peer_id".to_string(), peer.to_string());
+            tags.insert("proto".to_string(), proto.to_string());
+            storage.insert_envelope(MetricEnvelope {
+                node_id,
+                name: "user.traffic.downlink".to_string(),
+                value: bytes,
+                timestamp: now,
+                tags,
+            });
+        }
+
+        let counts = storage
+            .node_tunnels(&node_id, 180_000, 300_000)
+            .expect("tunnels reported");
+        assert_eq!(counts.total, 2, "two tunnels, not four series");
+        assert_eq!(counts.active, 1, "only p1 moved bytes");
+    }
+
+    /// A series with neither identity tag cannot be attributed to a tunnel, and
+    /// a node with no traffic series at all must read as unknown, not zero.
+    #[test]
+    fn node_tunnels_ignores_unattributable_series() {
+        let storage = MetricStorage::new(1000, 3600);
+        let node_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let mut tags = BTreeMap::new();
+        tags.insert("proto".to_string(), "amneziawg".to_string());
+        storage.insert_envelope(MetricEnvelope {
+            node_id,
+            name: "user.traffic.downlink".to_string(),
+            value: 10.0,
+            timestamp: now,
+            tags,
+        });
+
+        let counts = storage
+            .node_tunnels(&node_id, 180_000, 300_000)
+            .expect("series exist");
+        assert_eq!(counts.total, 0);
+        assert!(storage
+            .node_tunnels(&uuid::Uuid::new_v4(), 180_000, 300_000)
+            .is_none());
     }
 }
