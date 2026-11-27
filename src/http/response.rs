@@ -145,6 +145,9 @@ impl ScopeKind {
     pub fn from_env(env: &Env) -> Self {
         match env {
             Env::Custom(name) if name.starts_with("personal") => ScopeKind::Personal,
+            // Self-hosted shards are numbered `sf0001`, `sf0002`, … — also
+            // personal, and what new own-node accounts get.
+            Env::Named(name) if name.starts_with("sf") => ScopeKind::Personal,
             _ => ScopeKind::Premium,
         }
     }

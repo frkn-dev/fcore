@@ -359,6 +359,33 @@ impl PgSubscription {
         Ok(new_limit)
     }
 
+    /// Mark a subscription as living on the v2 plane.
+    ///
+    /// A self-hosted account never has a v1 side: its shard serves peers only
+    /// (`ConnResolver` answers `None` for `Selfhosted`), so the `v1` default
+    /// would be a false migration marker. Only moves forward — `dual` and `v2`
+    /// are left alone, so this cannot demote an account that already has both.
+    pub async fn mark_v2(&self, sub_id: &uuid::Uuid) -> Result<()> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        client
+            .execute(
+                r#"
+                UPDATE subscriptions
+                   SET plane = 'v2',
+                       v2_since = COALESCE(v2_since, now()),
+                       updated_at = now()
+                 WHERE id = $1
+                   AND (plane IS NULL OR plane = 'v1')
+                "#,
+                &[sub_id],
+            )
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn set_premium_fields(
         &self,
         sub_id: &uuid::Uuid,

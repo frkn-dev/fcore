@@ -1537,6 +1537,19 @@ where
                 }
             };
 
+            // Owner of every scoped shard by its recorded env. A `sfNNNN` shard
+            // does not carry the subscription id in its name, so the alert
+            // router resolves the owner here instead of parsing the string.
+            let shard_owners: std::collections::HashMap<String, uuid::Uuid> = {
+                let memory = self.sync.memory.read().await;
+                memory
+                    .subscriptions
+                    .all()
+                    .into_iter()
+                    .filter_map(|sub| sub.scope_env().map(|env| (env.to_string(), sub.id())))
+                    .collect()
+            };
+
             let now_ms = chrono::Utc::now().timestamp_millis();
 
             for (node_id, hostname, env, node_ips, is_online) in nodes {
@@ -1598,6 +1611,7 @@ where
                     // chat, the alert goes there; the quiet list only silences
                     // our global channel, it does not hide the owner's alert.
                     let owner_chat = crate::alerts::personal_owner(&env)
+                        .or_else(|| shard_owners.get(&env).copied())
                         .and_then(|sub| owner_chats.get(&sub).cloned());
                     let quiet = cfg.is_quiet_env(&env);
                     let (delivered, route) = if let Some(chat) = owner_chat.as_deref() {

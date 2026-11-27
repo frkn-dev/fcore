@@ -1,6 +1,35 @@
 # HUMANS.md
 
 ## Current
+- **27.11.2026 — личный шард `sfNNNN` для own-node аккаунтов, грант на шард, пул = нода.**
+  Владелец: «мы можем давать гранты на шард — юзер поднимает ноду, ему даётся шард личный и он
+  туда добавляет ноды; одна нода один пул для sf-нод; по пулам гранты давать не умеем; это чтоб
+  нода юзера была только его и он давал кому хочет». Старые 22 env не трогаем — отдельной задачей.
+  **Сделано (код готов, не собрано, не выкачено):**
+  1. `Env::selfhosted(n)` → `Env::Named("sf0001")` (без `custom`), `is_personal()` принимает обе
+     формы (`sf*` и legacy `custompersonal*`), `selfhosted_number()` даёт номер или `None`.
+  2. Последовательность `selfhosted_shard_seq` (в `ensure_schema`, идемпотентно) +
+     `next_selfhosted_shard()`; номер выдаётся в `POST /v1/private/account` и в
+     `ensure_personal_scope` (первый install-токен). Не переиспользуется: имя живёт в
+     `env_capacity`, `env_networks` и на машине юзера.
+  3. Владелец — по `subscriptions.scope_env`, а не по парсингу uuid: `owns_env` (оба impl),
+     `ScopeKind::from_env` (Named `sf*` = personal), `refresh_known_private_node`,
+     `set_private_feed`/`delete_private_node`, `create_private_user`, алерты (`shard_owners`
+     в `tasks.rs` вместо `personal_owner(env)`).
+  4. Пул: `private_pool` не изобретает имя, но на нумерованном шарде нода без `pool` получает
+     в пул свой `hostname` — одна нода = один пул, и каждая получает только свои пиры.
+     В `pool_cards` фолбэк `"default"` заменён на hostname для `sf*` (legacy шарды остались
+     на `default` — их не трогаем).
+  5. Усыновление legacy: аккаунт без `scope_env`, у которого уже есть ноды/грант в
+     `custompersonal<uuid>`, получает этот env, а не новый `sfNNNN` (иначе машины осиротели бы).
+  6. Грант по-прежнему на шард (`upsert_grant(sub, node.env, tags)` в `seed_private_shard`) —
+     это и было нужно, менять не пришлось.
+  **Тесты:** `--lib` 132 ok (+1 `test_selfhosted_shard_names`), `--bin api` 356 ok
+  (+1 `numbered_shard_gives_every_node_its_own_card`: две ноды без пула → две карточки, ни одной
+  `default`). Контракт — `docs/api-peers.md` §«Личный шард own-node аккаунта».
+  **Дальше:** собрать на build01 и выкатить (после «ок»), проверить живым аккаунтом: создать →
+  `sf0001` в ответе → поставить ноду → грант `{amnezia_peer,...}` на `sf0001` → карточка
+  `sf0001:<hostname>:amnezia_peer`.
 - **27.11.2026 — шард объявляет свои протоколы сам (грант перестал врать).**
   Владелец: «в шард завожу новый пул FL hysteria2 и не должен прописывать, какие теги есть —
   минтить должно туда, куда у юзера есть доступ».

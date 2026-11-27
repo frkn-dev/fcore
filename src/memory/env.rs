@@ -63,8 +63,35 @@ impl Env {
         Env::Custom(format!("personal{}", subscription_id.as_simple()))
     }
 
+    /// A self-hosted shard: `sf0001`, `sf0002`, … — one per account, carried
+    /// verbatim (no `custom` prefix). The account owns every node in it and
+    /// hands out grants on the shard, not on a pool.
+    ///
+    /// New accounts get this name; `custompersonal<uuid>` stays readable for
+    /// the ones created before it, so both spellings must keep working.
+    pub fn selfhosted(number: u64) -> Self {
+        Env::Named(format!("sf{:04}", number))
+    }
+
+    /// Whether this is the account's own shard, in either spelling:
+    /// `sfNNNN` (new) or `custompersonal<uuid>` (legacy).
     pub fn is_personal(&self) -> bool {
-        matches!(self, Env::Custom(name) if name.starts_with("personal"))
+        match self {
+            Env::Named(name) => name.starts_with("sf"),
+            Env::Custom(name) => name.starts_with("personal"),
+            _ => false,
+        }
+    }
+
+    /// The self-hosted shard number of a new-style name (`sf0001` → `1`).
+    /// `None` for the legacy `custompersonal<uuid>` spelling, whose owner is
+    /// recovered from the uuid instead.
+    pub fn selfhosted_number(&self) -> Option<u64> {
+        let name = match self {
+            Env::Named(name) => name.as_str(),
+            _ => return None,
+        };
+        name.strip_prefix("sf")?.parse().ok()
     }
 
     /// Premium slot env (`custompremium-…`): a dedicated node we run for the
@@ -218,6 +245,38 @@ mod tests {
         assert_eq!(prem, Env::BsPrem);
         let topic = format!("updates-{}", Env::BsPrem);
         assert_eq!(topic, "updates-bs-prem");
+    }
+
+    #[test]
+    fn test_selfhosted_shard_names() {
+        // A numbered shard is a plain `Env::Named`: no `custom` prefix, and it
+        // must survive the JSON/bus round-trip byte for byte.
+        assert_eq!(Env::selfhosted(1), Env::Named("sf0001".to_string()));
+        assert_eq!(Env::selfhosted(1).to_string(), "sf0001");
+        assert_eq!(Env::selfhosted(42).to_string(), "sf0042");
+        assert_eq!("sf0001".parse::<Env>().unwrap(), Env::selfhosted(1));
+        assert_eq!(
+            serde_json::from_str::<Env>("\"sf0007\"")
+                .unwrap()
+                .to_string(),
+            "sf0007"
+        );
+
+        // Both spellings are the account's own shard, so ownership checks and
+        // the connection gate treat them the same.
+        assert!(Env::selfhosted(1).is_personal());
+        assert!(Env::from_str("custompersonalabc").unwrap().is_personal());
+        assert!(!Env::Dev.is_personal());
+
+        // Only the numbered spelling carries a number; the legacy one is
+        // resolved through the subscription record.
+        assert_eq!(Env::selfhosted(7).selfhosted_number(), Some(7));
+        assert_eq!(
+            Env::from_str("custompersonalabc")
+                .unwrap()
+                .selfhosted_number(),
+            None
+        );
     }
 
     #[test]

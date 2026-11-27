@@ -285,13 +285,14 @@ impl PgPeers {
                 })
                 .or_else(|| {
                     let env = row.get::<_, String>("env");
-                    if env.starts_with("custompersonal") || env.starts_with("personal") {
+                    if env.starts_with("custompersonal")
+                        || env.starts_with("personal")
+                        || env.starts_with("sf")
+                    {
                         Some(crate::peers::ShardKind::Selfhosted)
                     } else if env
                         .strip_prefix("custom")
-                        .map(|rest| {
-                            rest.len() >= 8 && rest.chars().all(|c| c.is_ascii_hexdigit())
-                        })
+                        .map(|rest| rest.len() >= 8 && rest.chars().all(|c| c.is_ascii_hexdigit()))
                         .unwrap_or(false)
                     {
                         // A reseller shard: `custom<hex>`. Anything else
@@ -1541,11 +1542,33 @@ impl PgPeers {
                  -- plane until its first live peer moves it to v2/dual.
                  ALTER TABLE subscriptions
                      ADD COLUMN IF NOT EXISTS plane text NOT NULL DEFAULT 'v1',
-                     ADD COLUMN IF NOT EXISTS v2_since timestamptz;",
+                     ADD COLUMN IF NOT EXISTS v2_since timestamptz;
+                  -- Self-hosted shard numbers (`sf0001`). A sequence, not
+                  -- max()+1: two accounts created at the same time must not get
+                  -- the same shard, and a revoked one must not be handed out
+                  -- again while its nodes still exist.
+                  CREATE SEQUENCE IF NOT EXISTS selfhosted_shard_seq START WITH 1;",
             )
             .await?;
 
         Ok(())
+    }
+
+    /// Next free self-hosted shard name (`sf0001`, `sf0002`, …).
+    ///
+    /// Numbers are never reused: a shard whose account was deleted keeps its
+    /// name in `env_capacity`, `env_networks` and possibly on a node that is
+    /// still running, so handing the number to a new account would put two
+    /// owners in one env.
+    pub async fn next_selfhosted_shard(&self) -> Result<fcore::Env> {
+        let mut manager = self.manager.lock().await;
+        let client = manager.get_client().await?;
+
+        let row = client
+            .query_one("SELECT nextval('selfhosted_shard_seq') AS n", &[])
+            .await?;
+        let number: i64 = row.get("n");
+        Ok(fcore::Env::selfhosted(number as u64))
     }
 
     /// Deletes devices that are only history: no live tunnel and nothing

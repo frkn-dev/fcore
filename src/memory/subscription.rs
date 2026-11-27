@@ -310,6 +310,15 @@ impl Subscription {
     /// payment state: the personal env of an own-node account, and the
     /// account's premium slot.
     pub fn owns_env(&self, env: &Env) -> bool {
+        // `scope_env` is the recorded owner of an own-node account or a
+        // premium slot, and it is what a new `sfNNNN` shard is stored in. The
+        // `personal_for(id)` spelling is the pre-`sf` derivation and stays as
+        // the fallback for accounts created before it.
+        if let Some(scope) = &self.scope_env {
+            if scope == env {
+                return true;
+            }
+        }
         if env.is_personal() && Env::personal_for(self.id) == *env {
             return true;
         }
@@ -538,6 +547,13 @@ pub trait Operations {
     /// Whether the env belongs to this account and must be served regardless
     /// of the paid term (own node / premium slot).
     fn owns_env(&self, env: &Env) -> bool {
+        // Same rule as the concrete impl: the recorded scope wins, the
+        // `personal_for` spelling covers accounts created before `sfNNNN`.
+        if let Some(scope) = self.scope_env() {
+            if scope == env {
+                return true;
+            }
+        }
         if env.is_personal() && Env::personal_for(self.id()) == *env {
             return true;
         }

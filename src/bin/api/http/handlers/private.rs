@@ -530,9 +530,10 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    let personal = personal_env(subscription_id);
-
-    let (needs_set, existing_token) = {
+    // An account that already owns a shard keeps it: `sf0001` for the accounts
+    // created since the numbered scheme, `custompersonal<uuid>` for older ones.
+    // Allocating on every call would hand out a new shard per install token.
+    let (existing, existing_token) = {
         let mem = memory.memory.read().await;
         let Some(sub) = mem.subscriptions.find_by_id(&subscription_id) else {
             return Err(http::not_found("subscription not found"));
@@ -540,24 +541,90 @@ where
         if sub.is_deleted() {
             return Err(http::not_found("subscription not found"));
         }
-        let needs_set = sub.scope_env().is_none();
-        let existing_token = sub.premium_token().map(|t| t.to_string());
-        (needs_set, existing_token)
+        let existing = sub.scope_env().filter(|env| env.is_personal()).cloned();
+        (existing, sub.premium_token().map(|t| t.to_string()))
     };
 
-    if needs_set {
-        memory
+    if let Some(env) = existing {
+        return Ok(env);
+    }
+
+    // An account created before `scope_env` existed still owns its machines in
+    // the legacy `custompersonal<uuid>` env. Adopt that name instead of
+    // allocating a fresh `sfNNNN`: a new shard would strand every node the
+    // account already runs in a shard the cabinet no longer shows.
+    let legacy = personal_env(subscription_id);
+    let legacy_owned = {
+        let mem = memory.memory.read().await;
+        let has_nodes = mem
+            .nodes
+            .get_by_env(&legacy)
+            .is_some_and(|nodes| !nodes.is_empty());
+        let has_grant = mem
+            .peers_state
+            .access
+            .get(&subscription_id, &legacy)
+            .is_some();
+        has_nodes || has_grant
+    };
+    if legacy_owned {
+        if let Err(e) = memory
             .db
             .sub()
-            .set_premium_fields(&subscription_id, Some(&personal), existing_token.as_deref())
+            .set_premium_fields(&subscription_id, Some(&legacy), existing_token.as_deref())
             .await
-            .map_err(|_| http::internal_error("failed to set personal scope"))?;
+        {
+            tracing::error!("private: cannot record legacy scope {}: {}", legacy, e);
+        }
+        return Ok(legacy);
+    }
 
+    // No shard yet: this is where an own-node account is born. `sfNNNN` comes
+    // from a sequence, so two accounts registering at the same moment cannot
+    // collide, and a number is never reused — its nodes may still be running.
+    let personal = memory
+        .db
+        .peers()
+        .next_selfhosted_shard()
+        .await
+        .map_err(|_| http::internal_error("failed to allocate a shard"))?;
+
+    memory
+        .db
+        .sub()
+        .set_premium_fields(&subscription_id, Some(&personal), existing_token.as_deref())
+        .await
+        .map_err(|_| http::internal_error("failed to set personal scope"))?;
+
+    // Register the shard itself, so `shard_overview`, `env_capacity.kind` and
+    // the address block allocation all know it exists. `kind = selfhosted`
+    // follows from the plan, but the row has to be there first.
+    if let Err(e) = memory
+        .db
+        .peers()
+        .upsert_shard(&personal, "selfhosted", None, "selfhosted", None, true)
+        .await
+    {
+        tracing::warn!(
+            subscription = %subscription_id,
+            env = %personal,
+            error = %e,
+            "private: shard row was not registered"
+        );
+    }
+
+    {
         let mut mem = memory.memory.write().await;
         if let Some(sub) = mem.subscriptions.find_by_id_mut(&subscription_id) {
             sub.set_scope_env(personal.clone());
         }
     }
+
+    tracing::info!(
+        subscription = %subscription_id,
+        env = %personal,
+        "private: account got its own shard"
+    );
 
     Ok(personal)
 }
@@ -1081,11 +1148,34 @@ where
 
     let sub_id = Uuid::new_v4();
     let ref_code = fcore::utils::get_uuid_last_octet_simple(&sub_id);
-    let scope_env = personal_env(sub_id);
+    // The account is born with its own numbered shard (`sf0001`). Allocating
+    // here rather than lazily on the first install token means the cabinet can
+    // show the shard before a node exists, and `scope_env` is set once.
+    let scope_env = match memory.db.peers().next_selfhosted_shard().await {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::error!("private: cannot allocate a shard: {}", e);
+            return Ok(http::internal_error("cannot allocate a shard").into_response());
+        }
+    };
+    if let Err(e) = memory
+        .db
+        .peers()
+        .upsert_shard(&scope_env, "selfhosted", None, "selfhosted", None, true)
+        .await
+    {
+        tracing::warn!(env = %scope_env, error = %e, "private: shard row was not registered");
+    }
     let sub = Subscription::new_selfhosted(sub_id, ref_code, scope_env.clone());
 
     match SyncOp::add_sub(&memory, sub).await {
         Ok(Status::Ok(_)) | Ok(Status::Updated(_)) | Ok(Status::AlreadyExist(_)) => {
+            // The account is born on v2: its shard serves peers only, there is
+            // no v1 side to migrate. Best-effort — a failed marker read back as
+            // `v1` is a display issue, not a reason to fail the creation.
+            if let Err(e) = memory.db.sub().mark_v2(&sub_id).await {
+                tracing::warn!(subscription = %sub_id, error = %e, "private: v2 marker not set");
+            }
             Ok(warp::reply::with_status(
                 warp::reply::json(&ResponseMessage {
                     status: StatusCode::OK.as_u16(),
@@ -1166,10 +1256,10 @@ where
         return Ok(http::bad_request("invalid personal scope").into_response());
     }
 
-    let expected = personal_env(row.subscription_id);
-    if row.scope_env != expected {
-        return Ok(http::bad_request("scope mismatch").into_response());
-    }
+    // The shard the account owns: `sf0001` for new accounts, the legacy
+    // `custompersonal<uuid>` for older ones. The token's scope must match it —
+    // comparing against a re-derived name would reject every `sf` account.
+    let expected = row.scope_env.clone();
 
     if let Err(e) = node_req.validate() {
         return Ok(http::bad_request(&e.to_string()).into_response());
@@ -1187,6 +1277,12 @@ where
         Ok(pool) => pool,
         Err(msg) => return Ok(http::bad_request(&msg).into_response()),
     };
+    // A numbered shard is one node per pool: the hostname is the pool name when
+    // the machine declared none. Every node then gets only its own peers, and
+    // the card id stays stable across re-registrations.
+    if node_req.pool.is_none() && node_req.env.selfhosted_number().is_some() {
+        node_req.pool = Some(node_req.hostname.clone());
+    }
 
     let node = node_req.clone().as_node();
     let node_is_personal = {
@@ -1781,7 +1877,6 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    let env = personal_env(req.subscription_id);
     {
         let mem = memory.memory.read().await;
         let Some(sub) = mem.subscriptions.find_by_id(&req.subscription_id) else {
@@ -1790,6 +1885,13 @@ where
         if sub.is_deleted() {
             return Ok(http::not_found("subscription not found").into_response());
         }
+        // The shard this account owns, as recorded: `sf0001` or the legacy
+        // `custompersonal<uuid>`. Re-deriving it would not match `sf`.
+        let env = sub
+            .scope_env()
+            .filter(|env| env.is_personal())
+            .cloned()
+            .unwrap_or_else(|| personal_env(req.subscription_id));
         let Some(node) = mem.nodes.get_by_id(&node_uuid) else {
             return Ok(http::not_found("node not found").into_response());
         };
@@ -1846,8 +1948,6 @@ where
     Connection: From<C>,
     S: SubscriptionOperations + Send + Sync + Clone + 'static + PartialEq + From<Subscription>,
 {
-    let env = personal_env(query.subscription_id);
-
     {
         let mem = memory.memory.read().await;
         let Some(sub) = mem.subscriptions.find_by_id(&query.subscription_id) else {
@@ -1856,6 +1956,12 @@ where
         if sub.is_deleted() {
             return Ok(http::not_found("subscription not found").into_response());
         }
+        // The recorded shard (`sf0001` or legacy `custompersonal<uuid>`).
+        let env = sub
+            .scope_env()
+            .filter(|env| env.is_personal())
+            .cloned()
+            .unwrap_or_else(|| personal_env(query.subscription_id));
 
         let Some(node) = mem.nodes.get_by_id(&node_uuid) else {
             return Ok(http::not_found("node not found").into_response());
@@ -2033,7 +2139,13 @@ where
     // The account's own nodes, and the (proto, node) pairs to mint for the
     // user. Only the owner's personal env is ever touched: a uuid of a node
     // from another env is refused, an unknown uuid is a 404.
-    let env = personal_env(owner_id);
+    let env = {
+        let mem = memory.memory.read().await;
+        mem.subscriptions
+            .find_by_id(&owner_id)
+            .and_then(|sub| sub.scope_env().filter(|env| env.is_personal()).cloned())
+            .unwrap_or_else(|| personal_env(owner_id))
+    };
     let mobile_net_configured = awg_mobile_network.is_some();
 
     let (plans, node_ids) = {
@@ -2398,6 +2510,11 @@ where
         Ok(pool) => pool,
         Err(msg) => return Ok(http::bad_request(&msg).into_response()),
     };
+    // Same rule as the first registration: on a numbered shard a node with no
+    // pool of its own is its own pool.
+    if node_req.pool.is_none() && node_req.env.selfhosted_number().is_some() {
+        node_req.pool = Some(node_req.hostname.clone());
+    }
 
     let node = node_req.as_node();
 
@@ -2441,7 +2558,24 @@ where
             // A refresh is a registration: the node gets its card rights and
             // the authoritative peer set again, so a lost snapshot heals on a
             // plain `systemctl restart fnode`.
-            if let Some(subscription_id) = subscription_from_personal_env(&node.env) {
+            let shard_owner = {
+                // `sfNNNN` carries no subscription id: the owner is the account
+                // whose recorded scope is this shard. The legacy
+                // `custompersonal<uuid>` spelling still parses straight from the
+                // name, which covers accounts created before the numbered scheme.
+                let from_name = subscription_from_personal_env(&node.env);
+                if from_name.is_some() {
+                    from_name
+                } else {
+                    let mem = memory.memory.read().await;
+                    mem.subscriptions
+                        .all()
+                        .into_iter()
+                        .find(|sub| sub.scope_env() == Some(&node.env))
+                        .map(|sub| sub.id())
+                }
+            };
+            if let Some(subscription_id) = shard_owner {
                 seed_private_shard(&memory, subscription_id, &node).await;
             } else {
                 tracing::warn!(

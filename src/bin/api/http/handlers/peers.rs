@@ -1015,7 +1015,20 @@ fn pool_cards<N: NodeStorageOperations>(
             }
         };
 
-        let pool_name = node.pool.clone().unwrap_or_else(|| "default".to_string());
+        // A numbered self-hosted shard holds one node per pool, and a node is
+        // its own pool: the hostname. Falling back to `default` there would
+        // collapse every node of the shard into a single card.
+        let pool_name = node
+            .pool
+            .clone()
+            .filter(|pool| !pool.trim().is_empty())
+            .unwrap_or_else(|| {
+                if node.env.selfhosted_number().is_some() {
+                    node.hostname.clone()
+                } else {
+                    "default".to_string()
+                }
+            });
         let declared = node
             .pool_country_code
             .clone()
@@ -4016,6 +4029,44 @@ mod tests {
             cards.len(),
             1,
             "an offline self-hosted node keeps its card"
+        );
+    }
+
+    /// A numbered self-hosted shard holds one node per pool: a node that
+    /// declared no pool of its own becomes its own pool (its hostname), so two
+    /// machines of one account never collapse into a single `default` card.
+    #[test]
+    fn numbered_shard_gives_every_node_its_own_card() {
+        let env = Env::selfhosted(1);
+
+        let mut berlin = node_with("sf0001", "x", wg_inbound(51820));
+        berlin.pool = None;
+        berlin.hostname = "home-berlin".to_string();
+        berlin.r#type = NodeType::SelfHosted;
+        let mut lisbon = node_with("sf0001", "x", wg_inbound(51820));
+        lisbon.pool = None;
+        lisbon.hostname = "home-lisbon".to_string();
+        lisbon.r#type = NodeType::SelfHosted;
+
+        let cards = pool_cards(
+            &storage(vec![berlin, lisbon]),
+            &env,
+            CardProto::Peer(PeerProto::Wireguard),
+            None,
+        );
+        let ids: Vec<&str> = cards.iter().map(|card| card.card_id.as_str()).collect();
+        assert_eq!(cards.len(), 2, "one card per node, got {ids:?}");
+        assert!(
+            ids.iter().any(|id| id.starts_with("sf0001:home-berlin:")),
+            "{ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.starts_with("sf0001:home-lisbon:")),
+            "{ids:?}"
+        );
+        assert!(
+            ids.iter().all(|id| !id.contains(":default:")),
+            "no node may fall back to `default`, got {ids:?}"
         );
     }
 
