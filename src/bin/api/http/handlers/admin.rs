@@ -63,6 +63,12 @@ pub struct NodeMetricsSnapshot {
     /// Composite load percentage derived from the maximum of CPU, memory and
     /// disk usage. A higher value indicates the node is closer to saturation.
     pub load_percent: Option<f64>,
+    /// Tunnels the node reports right now (peers + legacy connections).
+    /// `None` when the node publishes no traffic series at all — not zero.
+    pub clients: Option<u64>,
+    /// Of those, the ones whose counter grew in the last few minutes: an up
+    /// but idle tunnel is not traffic.
+    pub clients_active: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -267,6 +273,14 @@ where
     Ok(Box::new(warp::reply::json(&response)))
 }
 
+/// A tunnel's traffic series counts as live if it was sampled this recently.
+/// The node pushes metrics every 30 s, so six pushes tolerate a lost one.
+const TUNNEL_FRESH_MS: i64 = 180_000;
+
+/// Window in which a tunnel's byte counter must grow to count as carrying
+/// traffic. An idle but connected tunnel is not traffic.
+const TUNNEL_ACTIVE_WINDOW_MS: i64 = 300_000;
+
 pub async fn admin_api_nodes_handler<N, C, S>(
     memory: MemSync<N, C, S>,
     admin_enabled: bool,
@@ -315,6 +329,12 @@ where
             .filter_map(|v| *v)
             .reduce(f64::max);
 
+        // Tunnels on this node. The freshness window is six metric pushes (the
+        // node samples every 30 s), so one missed push does not read as a drop;
+        // activity is judged over five minutes — a tunnel that is up but idle
+        // must not look like traffic.
+        let tunnels = metrics.node_tunnels(&node.uuid, TUNNEL_FRESH_MS, TUNNEL_ACTIVE_WINDOW_MS);
+
         admin_node.metrics = NodeMetricsSnapshot {
             memory_used_bytes: mem_used,
             memory_total_bytes: mem_total,
@@ -324,6 +344,8 @@ where
             network_rx_bps: net_rx,
             network_tx_bps: net_tx,
             load_percent,
+            clients: tunnels.map(|t| t.total as u64),
+            clients_active: tunnels.map(|t| t.active as u64),
         };
 
         nodes.push(admin_node);

@@ -8,6 +8,16 @@ pub use impls::{mark_process_start, process_uptime_secs};
 pub(crate) mod snapshot;
 pub(crate) mod storage;
 
+/// Tunnels a node reports, split by whether they are moving traffic.
+/// See `MetricStorage::node_tunnels`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeTunnelCounts {
+    /// Tunnels whose traffic counter was sampled within the freshness window.
+    pub total: usize,
+    /// Of those, the ones whose counter grew inside the activity window.
+    pub active: usize,
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Clone, Debug)]
 pub struct MetricPoint {
     #[serde(rename = "x")]

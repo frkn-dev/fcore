@@ -1595,6 +1595,10 @@ fn snapshot(metrics: &MetricStorage, node_id: &Uuid) -> super::admin::NodeMetric
         network_rx_bps: net_rx,
         network_tx_bps: net_tx,
         load_percent,
+        // Tunnel counts belong to the operator panel; a self-hosted account
+        // reads its own nodes and has no use for them here.
+        clients: None,
+        clients_active: None,
     }
 }
 

@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use super::{MetricEnvelope, MetricPoint};
+use super::{MetricEnvelope, MetricPoint, NodeTunnelCounts};
 use crate::memory::node::Node;
 use crate::metrics::EntryEnvelope;
 use crate::zmq::{publisher::Publisher, topic::Topic};
@@ -645,6 +645,71 @@ impl MetricStorage {
             return None;
         }
         Some(online as f64)
+    }
+
+    /// Tunnels a node reports right now, and how many of them are moving traffic.
+    ///
+    /// Both peer families publish `user.traffic.downlink` once per tunnel — with
+    /// a `peer_id` tag for shard peers and a `conn_id` tag for the older
+    /// connections — so counting that series counts tunnels without knowing
+    /// which protocol they belong to. `uplink` is its sibling and would double
+    /// every tunnel.
+    ///
+    /// A series outlives its tunnel: the metric store keeps the last point
+    /// until retention drops it. Hence `total` counts only series sampled within
+    /// `fresh_ms`, and `active` only those whose counter actually grew inside
+    /// `active_window_ms` — a tunnel that is up but idle is not traffic.
+    ///
+    /// `None` means the node has no traffic series at all (fresh boot, or a
+    /// build that does not publish them) — the caller must not read it as zero.
+    pub fn node_tunnels(
+        &self,
+        node_id: &uuid::Uuid,
+        fresh_ms: i64,
+        active_window_ms: i64,
+    ) -> Option<NodeTunnelCounts> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let fresh_since = now - fresh_ms;
+        let base_before = now - active_window_ms;
+        let node_map = self.inner.get(node_id)?;
+
+        let mut seen = 0usize;
+        let mut counts = NodeTunnelCounts::default();
+        for entry in node_map.iter() {
+            let hash = *entry.key();
+            let Some(meta) = self.metadata.get(&hash) else {
+                continue;
+            };
+            if meta.value().0 != "user.traffic.downlink" {
+                continue;
+            }
+            seen += 1;
+            let points = entry.value();
+            let Some(last) = points.back() else {
+                continue;
+            };
+            if last.timestamp < fresh_since {
+                continue;
+            }
+            counts.total += 1;
+            // The last sample at or before the window start is the baseline;
+            // a series younger than the window has none and counts as active
+            // only if it already carried bytes.
+            let baseline = points
+                .partition_point(|p| p.timestamp <= base_before)
+                .checked_sub(1)
+                .and_then(|idx| points.get(idx))
+                .map(|p| p.value)
+                .unwrap_or(0.0);
+            if last.value > baseline {
+                counts.active += 1;
+            }
+        }
+
+        if seen == 0 {
+            return None;
+        }
+        Some(counts)
     }
 
     /// Per-series average over the trailing `window_ms`, skipping series whose
