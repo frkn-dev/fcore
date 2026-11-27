@@ -27,9 +27,26 @@
   **Тесты:** `--lib` 132 ok (+1 `test_selfhosted_shard_names`), `--bin api` 356 ok
   (+1 `numbered_shard_gives_every_node_its_own_card`: две ноды без пула → две карточки, ни одной
   `default`). Контракт — `docs/api-peers.md` §«Личный шард own-node аккаунта».
-  **Дальше:** собрать на build01 и выкатить (после «ок»), проверить живым аккаунтом: создать →
-  `sf0001` в ответе → поставить ноду → грант `{amnezia_peer,...}` на `sf0001` → карточка
-  `sf0001:<hostname>:amnezia_peer`.
+  **Выкачено 27.11 04:19 MSK:** `v0.7.53`, собран на build01 (`--bin api --no-default-features`,
+  24м54с), 21 073 424 Б, sha256 `7e4a809f5047167c…`; GitHub release `v0.7.53` — тег на коммите
+  `272ec80` (первый заход `gh release create` поставил тег на `main`/0.6.142 — переделано через
+  `--verify-tag`, теперь `ls-remote` даёт `272ec80`), ассет `api-x86_64` совпал по sha с
+  выкаченным бинарём; бэкап `/opt/api/api.bak-0.7.52-20261127-041853`, `systemctl restart api` →
+  `active`, `NRestarts=0`, `/healthcheck` → `v0.7.53`, 0 `ERROR`/`panic` в логе за старт.
+  **Приёмка живая (прод, `POST /private/account`):** аккаунт `08d492f9…` создан →
+  `scope_env = sf0001`, `plane = v2`, `v2_since` заполнен, `env_capacity` = `sf0001|selfhosted|
+  selfhosted|t`, последовательность `selfhosted_shard_seq` = 1. Install-токен →
+  `scope_env: sf0001`, `env_block: 10.134.0.0/16`. Регистрация ноды `test-sf-node` →
+  `nodes.pool = test-sf-node` (нода без пула стала своим пулом), грант
+  `subscription_access = sf0001 | {amnezia_peer} | {install}` без срока — **грант на шард,
+  не на пул**. `/private/nodes` и `/private/state` отвечают 200 для sf-аккаунта.
+  **Тестовый аккаунт удалён** (нода через `DELETE /private/nodes`, подписка через
+  `DELETE /admin/api/subscriptions`, затем `env_capacity`/`env_networks`/`install_tokens`/
+  `subscription_access` по `sf0001`, `setval('selfhosted_shard_seq',1,false)`) — в БД ноль
+  `sf%`-строк, первый реальный клиент получит `sf0001`.
+  **Остаток:** ЛК (`frkn.org/subscription/index.html:6227`) сортирует карточки по префиксу
+  `custompersonal` — sf-карточки попадут в общую группу вместо «своих»; косметика, правка в
+  репо сайта, не делал (там чужая незакоммиченная работа).
 - **27.11.2026 — шард объявляет свои протоколы сам (грант перестал врать).**
   Владелец: «в шард завожу новый пул FL hysteria2 и не должен прописывать, какие теги есть —
   минтить должно туда, куда у юзера есть доступ».
