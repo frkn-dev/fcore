@@ -77,12 +77,24 @@ pub struct PruneCandidate {
 /// customer's own server away. `max` caps what is returned; `found` is the real
 /// number of candidates, so the caller can refuse the whole batch when a wrong
 /// grant would delete too much at once.
+///
+/// `on_peer_plane` is the subscription's proof that its client reads cards: at
+/// least one live peer. A grant alone does not prove it — activations hand
+/// grants to subscriptions whose app may still be a build that knows nothing
+/// but `/v1/config` (anything below 4.8.14.186), and v1 connections live in
+/// `dev`/`ru`/`wl`, which no shard grants. Pruning those would leave the payer
+/// with no config at all, so nothing is a candidate until a peer exists.
 pub fn connections_to_prune(
     live: &[(Uuid, Env, Tag)],
     granted: &HashMap<Env, Vec<Tag>>,
     scope_env: Option<&Env>,
+    on_peer_plane: bool,
     max: usize,
 ) -> (Vec<PruneCandidate>, usize) {
+    if !on_peer_plane {
+        return (Vec::new(), 0);
+    }
+
     let mut out = Vec::new();
     let mut found = 0usize;
 
@@ -205,7 +217,7 @@ mod tests {
         // a migration must not take the customer's server away.
         let own = Env::from_str("custompersonalc6831dad").unwrap();
         let live = vec![(uuid::Uuid::nil(), own.clone(), Tag::Hysteria2)];
-        let (candidates, found) = connections_to_prune(&live, &HashMap::new(), Some(&own), 50);
+        let (candidates, found) = connections_to_prune(&live, &HashMap::new(), Some(&own), true, 50);
         assert!(candidates.is_empty());
         assert_eq!(found, 0);
     }
@@ -217,11 +229,39 @@ mod tests {
             (uuid::Uuid::nil(), Env::Dev, Tag::Hysteria2),
             (uuid::Uuid::nil(), Env::Ru, Tag::Wireguard),
         ];
-        let (candidates, found) = connections_to_prune(&live, &granted, None, 50);
+        let (candidates, found) = connections_to_prune(&live, &granted, None, true, 50);
         assert_eq!(found, 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].env, Env::Ru);
         assert_eq!(candidates[0].proto, Tag::Wireguard);
+    }
+
+    /// A grant is not proof that the client reads cards: activations hand it to
+    /// subscriptions whose app may still only know `/v1/config`. Until the
+    /// subscription has a live peer, its v1 connections are all it can load.
+    #[test]
+    fn a_subscription_without_a_peer_keeps_its_v1_connections() {
+        let live = vec![
+            (uuid::Uuid::nil(), Env::Dev, Tag::Hysteria2),
+            (uuid::Uuid::nil(), Env::Ru, Tag::Wireguard),
+        ];
+        let (candidates, found) = connections_to_prune(&live, &HashMap::new(), None, false, 50);
+        assert!(candidates.is_empty(), "nothing may be pruned before a peer exists");
+        assert_eq!(found, 0);
+    }
+
+    /// And the same subscription, once on the peer plane, loses exactly what the
+    /// grant does not cover.
+    #[test]
+    fn a_peer_moves_the_same_subscription_onto_pruning() {
+        let granted = grants_to_conns_map(&[grant(Env::Dev, vec![Tag::Hysteria2], None)], now());
+        let live = vec![
+            (uuid::Uuid::nil(), Env::Dev, Tag::Hysteria2),
+            (uuid::Uuid::nil(), Env::Ru, Tag::Wireguard),
+        ];
+        let (candidates, found) = connections_to_prune(&live, &granted, None, true, 50);
+        assert_eq!(found, 1);
+        assert_eq!(candidates[0].env, Env::Ru);
     }
 
     #[test]
@@ -229,7 +269,7 @@ mod tests {
         let live: Vec<(uuid::Uuid, Env, Tag)> = (0..5)
             .map(|_| (uuid::Uuid::nil(), Env::Ru, Tag::Hysteria2))
             .collect();
-        let (candidates, found) = connections_to_prune(&live, &HashMap::new(), None, 2);
+        let (candidates, found) = connections_to_prune(&live, &HashMap::new(), None, true, 2);
         assert_eq!(candidates.len(), 2);
         assert_eq!(found, 5);
     }

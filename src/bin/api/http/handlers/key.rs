@@ -810,12 +810,12 @@ where
                     // already existed: the client then shows «план добавлен», not
                     // «создана подписка».
                     "merged": merged,
-                    "key": serde_json::to_value(&key).unwrap_or(serde_json::Value::Null),
+                    "key": key_instance_json(&key),
                     // The pre-shard envelope, kept so a client that only knows
                     // `response.instance.Key` still finds its `subscription_id`
                     // and does not show «Connection failed» on a successful
                     // activation.
-                    "instance": { "Key": serde_json::to_value(&key).unwrap_or(serde_json::Value::Null) },
+                    "instance": { "Key": key_instance_json(&key) },
                 });
                 if let Some((env, used, limit, overflow)) = granted {
                     response["env"] = serde_json::json!(env);

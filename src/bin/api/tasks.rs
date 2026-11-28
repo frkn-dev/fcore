@@ -605,7 +605,7 @@ where
         };
         let cfg = &self.settings.service.peers;
 
-        let (live, scope_env) = {
+        let (live, scope_env, on_peer_plane) = {
             let mem = self.sync.memory.read().await;
             let scope_env = mem
                 .subscriptions
@@ -618,10 +618,16 @@ where
                 .into_iter()
                 .filter(|(_, conn)| !conn.get_deleted())
                 .collect();
-            (live, scope_env)
+            // A live peer is the only proof the client reads cards. A grant is
+            // handed to subscriptions whose app may still be on a build that
+            // knows nothing but `/v1/config` (anything below 4.8.14.186), so
+            // pruning on a grant alone would take away the only config those
+            // payers can load.
+            let on_peer_plane = !mem.peers_state.peers.live_of_sub(&sub_id).is_empty();
+            (live, scope_env, on_peer_plane)
         };
 
-        if live.is_empty() {
+        if live.is_empty() || !on_peer_plane {
             return;
         }
 
@@ -634,6 +640,7 @@ where
             &triples,
             granted,
             scope_env.as_ref(),
+            on_peer_plane,
             cfg.prune_max_per_tick,
         );
 
