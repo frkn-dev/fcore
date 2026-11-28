@@ -71,6 +71,27 @@ pub struct NodeMetricsSnapshot {
     pub clients_active: Option<u64>,
 }
 
+/// Inbound tags of a node as plain strings, sorted and deduplicated.
+///
+/// The tag is a `ProtoTag`, whose serde name is the same identifier the clients
+/// use (`AmneziaWg`, `VlessTcpReality`, …); Debug is only the fallback so an
+/// unknown future variant still shows up instead of being dropped.
+fn node_protocols(node: &Node) -> Vec<String> {
+    let mut out: Vec<String> = node
+        .inbounds
+        .keys()
+        .map(|tag| {
+            serde_json::to_value(tag)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{tag:?}"))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[derive(Serialize)]
 pub struct AdminNode {
     pub id: uuid::Uuid,
@@ -81,6 +102,18 @@ pub struct AdminNode {
     pub label: String,
     pub cluster: Option<String>,
     pub country: String,
+    /// Country as the node declares it for humans (`pool_country_name`), for
+    /// panels that show a name instead of an ISO code. `None` on nodes whose
+    /// config predates the field.
+    pub country_name: Option<String>,
+    /// Pool the node serves (`eu`, `ru`, `at`…). Empty for nodes that do not
+    /// declare one — the shard view groups by pool, so it needs the value.
+    pub pool: Option<String>,
+    /// Protocols the node announces as inbounds (`AmneziaWg`, `Hysteria2`, …),
+    /// deduplicated and sorted. A shard's protocol set is the union over its
+    /// nodes, which is what an operator needs to answer "what does this park
+    /// actually serve".
+    pub protocols: Vec<String>,
     pub metrics: NodeMetricsSnapshot,
 }
 
@@ -95,6 +128,9 @@ impl From<&Node> for AdminNode {
             label: node.label.clone(),
             cluster: node.cluster.clone(),
             country: node.country.clone(),
+            country_name: node.pool_country_name.clone(),
+            pool: node.pool.clone(),
+            protocols: node_protocols(node),
             metrics: NodeMetricsSnapshot::default(),
         }
     }

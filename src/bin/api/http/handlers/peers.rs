@@ -1147,8 +1147,76 @@ fn cards_for_grants<N: NodeStorageOperations>(
             out.extend(cards);
         }
     }
+    borrow_pool_names(&mut out, nodes);
     disambiguate_shared_pools(&mut out);
     out
+}
+
+/// Fill in a pool's display name from a sibling shard that declares one.
+///
+/// `pool_translation` lives in the node config (`[node] pool_translation`), and a
+/// shard is provisioned by registering nodes — so a shard whose machines were set
+/// up without that block sells `eu` while its twin sells `Netherlands`. The same
+/// pool name is the same pool everywhere we run it, so the name is borrowed from
+/// any node that declares it. Without this the client shows the raw `eu`, `ru`,
+/// `us` for one shard and translated names for the other.
+///
+/// The borrowing is by pool name only and never overwrites a declared value: a
+/// shard that names its own pool keeps its own name.
+fn borrow_pool_names<N: NodeStorageOperations>(cards: &mut [PoolCard], nodes: &N) {
+    let mut translations: std::collections::BTreeMap<&str, &std::collections::BTreeMap<String, String>> =
+        std::collections::BTreeMap::new();
+    let mut countries: std::collections::BTreeMap<&str, (&str, &str)> =
+        std::collections::BTreeMap::new();
+
+    // Deterministic donor: nodes are walked in storage order, which is stable
+    // enough for a display name, but tie-break on hostname anyway so two
+    // shards declaring different names for one pool cannot flip between calls.
+    let mut donors: Vec<(String, String, Option<&std::collections::BTreeMap<String, String>>, Option<(&str, &str)>)> =
+        nodes
+            .iter_nodes()
+            .filter_map(|(_, node)| {
+                let pool = node.pool.as_deref()?.trim();
+                if pool.is_empty() {
+                    return None;
+                }
+                let translation = node
+                    .pool_translation
+                    .as_ref()
+                    .filter(|t| !t.is_empty());
+                let country = node
+                    .pool_country_code
+                    .as_deref()
+                    .zip(node.pool_country_name.as_deref());
+                if translation.is_none() && country.is_none() {
+                    return None;
+                }
+                Some((pool.to_string(), node.hostname.clone(), translation, country))
+            })
+            .collect();
+    donors.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+
+    for (pool, _host, translation, country) in &donors {
+        if let Some(translation) = translation {
+            translations.entry(pool.as_str()).or_insert(translation);
+        }
+        if let Some(country) = country {
+            countries.entry(pool.as_str()).or_insert(*country);
+        }
+    }
+
+    for card in cards.iter_mut() {
+        if card.pool_translation.as_ref().is_none_or(|t| t.is_empty()) {
+            if let Some(translation) = translations.get(card.pool.as_str()) {
+                card.pool_translation = Some((*translation).clone());
+            }
+        }
+        if card.country_name.is_none() {
+            if let Some((_, name)) = countries.get(card.pool.as_str()) {
+                card.country_name = Some((*name).to_string());
+            }
+        }
+    }
 }
 
 /// Number pools that share a name across shards: `Netherlands #1`, `Netherlands #2`.
@@ -4164,6 +4232,75 @@ mod tests {
         assert!(
             ids.iter().all(|id| !id.contains(":default:")),
             "no node may fall back to `default`, got {ids:?}"
+        );
+    }
+
+    /// A shard whose nodes declare no `pool_translation` still shows the pool's
+    /// name: it is borrowed from a sibling shard that does declare one, so `eu`
+    /// of `0002` reads `Netherlands` like `eu` of `0001`.
+    #[test]
+    fn a_pool_name_is_borrowed_from_a_shard_that_declares_it() {
+        let mut donor = node_with("0001", "eu", wg_inbound(51820));
+        donor.pool_translation = Some(BTreeMap::from([
+            ("en".to_string(), "Netherlands".to_string()),
+            ("ru".to_string(), "Нидерланды".to_string()),
+        ]));
+        donor.pool_country_code = Some("NL".to_string());
+        donor.pool_country_name = Some("Netherlands".to_string());
+
+        // The second shard has the same pool but no translation of its own.
+        let mut bare = node_with("0002", "eu", wg_inbound(51820));
+        bare.pool_translation = None;
+        bare.pool_country_code = None;
+        bare.pool_country_name = None;
+
+        let storage = storage(vec![donor, bare]);
+        let mut cards = pool_cards(
+            &storage,
+            &Env::from_str("0002").unwrap(),
+            CardProto::Peer(PeerProto::Wireguard),
+            None,
+        );
+        assert!(cards[0].pool_translation.is_none(), "the node declares none");
+        assert!(cards[0].country_name.is_none());
+
+        borrow_pool_names(&mut cards, &storage);
+        assert_eq!(
+            cards[0].pool_translation.as_ref().unwrap()["en"],
+            "Netherlands"
+        );
+        assert_eq!(cards[0].country_name.as_deref(), Some("Netherlands"));
+        // The handle is untouched: the client keeps echoing `0002:eu:...`.
+        assert_eq!(cards[0].card_id, "0002:eu:wireguard_peer");
+        assert_eq!(cards[0].pool, "eu");
+    }
+
+    /// A shard that names its own pool keeps its own name — borrowing never
+    /// overwrites a declared value.
+    #[test]
+    fn a_declared_name_wins_over_a_borrowed_one() {
+        let mut donor = node_with("0001", "eu", wg_inbound(51820));
+        donor.pool_translation = Some(BTreeMap::from([(
+            "en".to_string(),
+            "Netherlands".to_string(),
+        )]));
+        let mut own = node_with("0002", "eu", wg_inbound(51820));
+        own.pool_translation = Some(BTreeMap::from([(
+            "en".to_string(),
+            "Netherlands 2".to_string(),
+        )]));
+
+        let storage = storage(vec![donor, own]);
+        let mut cards = pool_cards(
+            &storage,
+            &Env::from_str("0002").unwrap(),
+            CardProto::Peer(PeerProto::Wireguard),
+            None,
+        );
+        borrow_pool_names(&mut cards, &storage);
+        assert_eq!(
+            cards[0].pool_translation.as_ref().unwrap()["en"],
+            "Netherlands 2"
         );
     }
 
