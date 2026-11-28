@@ -1165,8 +1165,11 @@ fn cards_for_grants<N: NodeStorageOperations>(
 /// gets one filled in with the numbered bare name, so the row still reads
 /// `eu #1` / `eu #2` instead of two identical `eu`.
 ///
-/// Only a name that really occurs in more than one shard is numbered: a
-/// subscription on one shard sees the plain `Netherlands`, exactly as before.
+/// Only a name that really occurs in more than one shard is numbered, and only
+/// from the second shard on: the first keeps the plain `Netherlands`. A
+/// subscription on one shard therefore sees exactly what it saw before, and if
+/// the first shard's grant is revoked the survivor loses its suffix again — the
+/// collision is gone.
 fn disambiguate_shared_pools(cards: &mut [PoolCard]) {
     // Identity of a card's name: the whole translation when there is one (the
     // client picks a language out of it), the raw pool name otherwise.
@@ -1218,6 +1221,12 @@ fn disambiguate_shared_pools(cards: &mut [PoolCard]) {
         }
         let counter = seen.entry(key).or_insert(0);
         *counter += 1;
+        // The first shard keeps the plain name. A subscription that had only that
+        // shard must not see "Netherlands" turn into "Netherlands #1" the day a
+        // second grant appears — nothing about its own row changed.
+        if *counter == 1 {
+            continue;
+        }
         let suffix = format!(" #{}", *counter);
         let card = &mut cards[index];
         match card.pool_translation.as_mut().filter(|t| !t.is_empty()) {
@@ -4221,9 +4230,12 @@ mod tests {
                 .clone()
                 .unwrap()
         };
-        assert_eq!(by_id("0001:eu:amnezia_peer")["en"], "Netherlands #1");
+        // The first shard is untouched: its subscribers never see a rename.
+        assert_eq!(by_id("0001:eu:amnezia_peer")["en"], "Netherlands");
+        assert_eq!(by_id("0001:eu:amnezia_peer")["ru"], "Нидерланды");
+        // The second one gets the number.
         assert_eq!(by_id("0002:eu:amnezia_peer")["en"], "Netherlands #2");
-        assert_eq!(by_id("0001:eu:amnezia_peer")["ru"], "Нидерланды #1");
+        assert_eq!(by_id("0002:eu:amnezia_peer")["ru"], "Нидерланды #2");
         // The handle the client holds must not change: `pool` stays `eu`.
         assert_eq!(cards[0].pool, "eu");
         assert_eq!(cards[1].pool, "eu");
@@ -4278,9 +4290,61 @@ mod tests {
             },
         ];
         disambiguate_shared_pools(&mut cards);
-        assert_eq!(cards[0].pool_translation.as_ref().unwrap()["en"], "eu #1");
+        // No translation on the first card stays absent — the row still reads
+        // `eu`, exactly as it did before the second shard appeared.
+        assert!(cards[0].pool_translation.is_none());
         assert_eq!(cards[1].pool_translation.as_ref().unwrap()["en"], "eu #2");
         assert_eq!(cards[0].pool, "eu");
+    }
+
+    /// The suffix disappears when the first shard's grant is gone: with a single
+    /// card left there is no collision, so the survivor goes back to its plain
+    /// name instead of keeping a dangling `#2`.
+    #[test]
+    fn the_suffix_goes_away_with_the_first_shard() {
+        let mut cards = vec![PoolCard {
+            card_id: "0002:eu:amnezia_peer".to_string(),
+            pool: "eu".to_string(),
+            pool_translation: Some(BTreeMap::from([(
+                "en".to_string(),
+                "Netherlands".to_string(),
+            )])),
+            country: Some("NL".to_string()),
+            country_name: None,
+            proto: "amnezia_peer".to_string(),
+            kind: CardKind::Peer,
+            nodes: Vec::new(),
+        }];
+        disambiguate_shared_pools(&mut cards);
+        assert_eq!(cards[0].pool_translation.as_ref().unwrap()["en"], "Netherlands");
+    }
+
+    /// Three shards: the first keeps the name, the rest count from 2.
+    #[test]
+    fn three_shards_number_from_the_second() {
+        let card = |id: &str| PoolCard {
+            card_id: id.to_string(),
+            pool: "eu".to_string(),
+            pool_translation: Some(BTreeMap::from([(
+                "en".to_string(),
+                "Netherlands".to_string(),
+            )])),
+            country: Some("NL".to_string()),
+            country_name: None,
+            proto: "amnezia_peer".to_string(),
+            kind: CardKind::Peer,
+            nodes: Vec::new(),
+        };
+        let mut cards = vec![
+            card("0003:eu:amnezia_peer"),
+            card("0001:eu:amnezia_peer"),
+            card("0002:eu:amnezia_peer"),
+        ];
+        disambiguate_shared_pools(&mut cards);
+        // Numbering follows the shard id, not the order the cards arrived in.
+        assert_eq!(cards[1].pool_translation.as_ref().unwrap()["en"], "Netherlands");
+        assert_eq!(cards[2].pool_translation.as_ref().unwrap()["en"], "Netherlands #2");
+        assert_eq!(cards[0].pool_translation.as_ref().unwrap()["en"], "Netherlands #3");
     }
 
     /// Different names are left alone even across shards.
