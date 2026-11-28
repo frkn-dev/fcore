@@ -1040,6 +1040,32 @@ where
         }
     }
 
+    // Grants are the shard-side half of a subscription: they carry the address
+    // and the peers, and they count against the shard's cap. Leaving them live
+    // after the subscription is gone kept a slot occupied forever — every
+    // deleted account slowly ate the capacity of its shard. Revoke each one
+    // (which also drops its peers from the nodes) before the row is marked.
+    let granted_envs: Vec<Env> = {
+        let mem = memory.memory.read().await;
+        mem.peers_state
+            .access
+            .of_sub(&subscription_id)
+            .into_iter()
+            .map(|row| row.env.clone())
+            .collect()
+    };
+    for env in granted_envs {
+        if let Err(e) =
+            super::peers::revoke_env_access(&memory, subscription_id, &env, DELETE_REASON_MANUAL)
+                .await
+        {
+            error!(
+                "Failed to revoke grant {} of subscription {}: {}",
+                env, subscription_id, e
+            );
+        }
+    }
+
     {
         let mut mem = memory.memory.write().await;
         if let Some(sub) = mem.subscriptions.find_by_id_mut(&subscription_id) {
