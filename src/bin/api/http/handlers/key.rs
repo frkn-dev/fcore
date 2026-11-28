@@ -228,23 +228,26 @@ where
         KeyKind::Standard => PlanKind::Standard,
         KeyKind::Lite => PlanKind::Lite,
     };
-    // ROLLED BACK to the pre-0.7.33 behaviour on purpose: a lite key targets its
-    // product shard (i.e. `standard`) until the «Super Duper» shard has live
-    // nodes. Routing lite keys to plan `lite` while that shard is empty turned
-    // every new lite activation into `503 no_live_shard`, which is a production
-    // outage for a product we are still selling. Re-enable the lite mapping only
-    // together with live Super Duper nodes, and only with the owner's approval.
-    let plan = key.product.to_string();
-    // A product is not a plan: `standard-gaming`/`full` bundle the classic env
-    // set on top of their extra envs, and only `standard` has shards in
-    // `env_capacity`. Using the product name as the assignment plan answered
-    // `503 plan_not_configured` for every such key — a payer blocked by a naming
-    // mismatch. Products that include the classic set are served from the
-    // `standard` shards; single-env products keep their own name.
-    let plan = if key.product.includes_standard() {
-        "standard".to_string()
-    } else {
-        plan
+    // A traffic key buys Super Duper, and that plan owns its own shard: the
+    // bought volume must land on the nodes the price list names (AT/TR), not on
+    // the classic shards. The pre-0.7.33 mapping was rolled back only because
+    // the Super Duper shard had no live nodes and every activation answered
+    // `503 no_live_shard`; the shard serves now, so the volume goes home.
+    //
+    // The classic products keep the product-name rule: a product is not a plan
+    // (`standard-gaming`/`full` bundle the classic env set on top of their extra
+    // envs, and only `standard` has shards in `env_capacity`), so products that
+    // include the classic set are served from the `standard` shards and
+    // single-env products keep their own name.
+    let plan = match key.kind {
+        KeyKind::Lite => crate::plans::LITE.to_string(),
+        KeyKind::Standard => {
+            if key.product.includes_standard() {
+                "standard".to_string()
+            } else {
+                key.product.to_string()
+            }
+        }
     };
     // The peer plane is for products a shard actually serves. A single-env
     // product (`gaming`, `bs-prem`) has no shard row, so the peers flow would
